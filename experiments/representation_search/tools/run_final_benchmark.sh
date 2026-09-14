@@ -53,6 +53,11 @@ RUN="taskset -c $CORE nice -n -20"
 # --- the builds under test ----------------------------------------------
 # Every one is the SAME source tree, differing only in -D flags, so the tree is
 # never a confounder.
+# NOTE: none of these -D flags exist any more. REPSEARCH_COZ_TABLE and
+# REPSEARCH_CT_SAFEGCD_INV won and became the default; REPSEARCH_DUALMUL_WINDOW_G
+# (and DBL_VARIANT, INLINE_ZINV) lost and were deleted. On a current tree every
+# arm below builds the SAME binary. Reproducing any A/B needs a tree from before
+# that change; the arms are kept here so the recorded runs stay readable.
 declare -A BUILDS=(
   [baseline]=""
   [coz]="-DREPSEARCH_COZ_TABLE=1"

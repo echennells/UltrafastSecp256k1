@@ -323,7 +323,11 @@ machine can resolve. Recorded in full as knowledge-base entry
 | **co-Z coordinate change**, all 4 live sites | `dual_scalar_mul_gen_point` **−7.19%**, `ecdsa_verify` **−1.96%**, 0 regressions | verify + `ct::scalar_mul` + BIP-324 |
 | **CT SafeGCD inverse**, both call sites | `ElligatorSwift XDH` **−8.23%**, `Session handshake` **−4.35%** | ECDH, BIP-352 scan |
 
-Both are macro-guarded; the default build is byte-identical.
+Both are now the **default build** -- no flag, no preset, nothing to opt into.
+They were macro-guarded (`REPSEARCH_COZ_TABLE`, `REPSEARCH_CT_SAFEGCD_INV`) while
+under test; the superseded branches have been deleted, so the A/B arms in
+`tools/run_final_benchmark.sh` can only be reproduced from a tree that predates
+that change.
 
 The inverse result is worth stating precisely because it is the cleanest
 prediction the cost model made: the primitive measured 3847.5 ns (Fermat, CT)
@@ -340,6 +344,13 @@ behaviour pinned by the new audit module `regression_table_build_invariants`,
 filed as #399.
 
 ### Refuted or below the noise floor — do not re-chase
+
+The macros that carried these variants (`REPSEARCH_DBL_VARIANT`,
+`REPSEARCH_INLINE_ZINV`, `REPSEARCH_DUALMUL_WINDOW_G`) have been removed from
+`src/cpu/src/point.cpp`. A losing arm kept behind an `#if` is dead code in a hot
+file, not an option — the verdict is what has value, and it lives here, in the
+knowledge base, and in a comment at each site. Re-opening one means editing the
+line and measuring, which is what it always meant.
 
 | axis | verdict |
 |---|---|

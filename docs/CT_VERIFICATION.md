@@ -13,6 +13,54 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-14 ct_point.cpp / point.cpp — co-Z table build and CT SafeGCD inverse became the default (no CT boundary moved)
+
+Two representation-search wins stopped being macro-guarded (`REPSEARCH_COZ_TABLE`,
+`REPSEARCH_CT_SAFEGCD_INV`) and became the default build; the superseded branches
+were deleted. The secret-path gate classifies `src/cpu/src/ct_point.cpp` as a CT
+secret-bearing surface, so the classification is answered here rather than waived.
+
+**Nothing became variable-time and nothing became constant-time.** Both changes
+replace one implementation with another *inside* the existing boundary.
+
+**1. Field inverse — `ct::ecmult_const_xonly`, `Point::batch_scalar_mul_fixed_k`.**
+Was `FieldElement52::inverse()`: the Fermat chain, 255 squarings + 15 multiplies,
+a fixed operation sequence and therefore constant-time. Is now `ct::field_inv`:
+Bernstein-Yang SafeGCD, 10 x 59 = 590 divsteps on `__int128` platforms and
+25 x 30 = 750 on the generic (MSVC / 32-bit) arm, both fixed iteration counts.
+`ct_divsteps_59` (`src/cpu/src/ct_field.cpp:262`) carries no branch and no memory
+access dependent on `f`, `g` or `zeta` — every conditional is a mask built from
+`zeta >> 63` and `-(g & 1)`. Unlike `ct::scalar_inverse`, whose multiply chain
+falls back to `fast::` when `__int128` is absent (SEC-001-INCOMPLETE), `field_inv`
+is constant-time on **both** dispatch arms.
+
+The inverted value is secret-derived at both sites, so a CT inverse is required at
+both: the ElligatorSwift XDH denominator is `R.z^2 * g * xd` where `R = q*P_eff`
+and `q` is the secret ECDH scalar; the batch site inverts a Montgomery prefix
+product of Z-coordinates derived from the `KPlan`'s scalar, which callers populate
+with the BIP-352 scan key (`bch_scan.cpp`, `sp_scan_batch_impl.hpp`, `address.cpp`)
+— a CT-mandatory input per CLAUDE.md. A CT inverse is what runs, before and after.
+Only the algorithm changed. See KB `FE52-INVERSE-CT-DOMINATED`.
+
+**2. Odd-multiple table build — four sites.** Was a mixed-add chain on an
+isomorphic curve (`jac_add_ge_var_zr`, `jac52_add_mixed_inplace_zr`); is now a
+co-Z DBLU/ZADDU chain (`jac52_dblu_ct` / `jac52_zaddu_ct` on the ct:: track,
+`jac52_dblu` / `jac52_zaddu_zr` on the fast:: track). **The table is a function of
+the base point only, never of the scalar** — before and after. `jac52_zaddu_ct`
+does hold one variable-time test, `dx.normalizes_to_zero_var()`, guarding the
+`X1 == X2` case ZADDU cannot represent; its timing is therefore a function of the
+base point, exactly as the `_var` mixed add it replaces already was. No branch,
+table index or memory access in either chain reads the secret scalar. The scalar
+is consumed afterwards by `table_lookup_core`, which is untouched.
+
+Evidence: `regression_table_build_invariants` gained section (5)
+`ecmult_const_xonly(x_P, 1, q) == x(q*P)` over 16 random cases and section (6)
+`batch_scalar_mul_fixed_k(k) == scalar_mul(k)` over 64 points — the two sites
+newly on the default path that sections (1)-(3) could not reach. 12/12 checks
+pass. Equivalence to the previously-measured macro-on build was established as
+code identity: `point.cpp` and `ct_point.cpp` compiled from the default tree emit
+assembly identical to the prior tree compiled with both macros set.
+
 ### 2026-09-07 precompute.cpp / CMakeLists.txt — fixed-base cache location and no-op reconfigure (no CT surface moved)
 
 Two changes touch files the secret-path gate classifies as CT secret-bearing

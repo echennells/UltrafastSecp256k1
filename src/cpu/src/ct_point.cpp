@@ -179,11 +179,9 @@ inline JacFE52 jac_add_ge_var_zr(const JacFE52& a,
     return {x3, y3, z3};
 }
 
-#if defined(REPSEARCH_COZ_TABLE) && REPSEARCH_COZ_TABLE == 1
-// --- co-Z table construction (EXPERIMENT ONLY) -------------------------------
-// experiments/representation_search. Not compiled in a default build; selected
-// by -DREPSEARCH_COZ_TABLE=1. Same transformation already applied to
-// build_glv52_table_zr in point.cpp, here on the ct:: track's table.
+// --- co-Z table construction -------------------------------------------------
+// From experiments/representation_search. The same transformation is applied to
+// build_glv52_table_zr in point.cpp; this is the ct:: track's copy.
 //
 // jac_add_ge_var_zr above spends four of its eleven heavy operations bridging
 // two different Z values -- z1sq, bx*z1sq, z1cu, by*z1cu. If both operands
@@ -277,7 +275,6 @@ inline bool jac52_zaddu_ct(FE52& x1, FE52& y1,
     x1 = B; y1 = y1cb;                     // P on the new Z
     return true;
 }
-#endif  // REPSEARCH_COZ_TABLE
 
 // --- FE52 Field Inversion ---------------------------------------------------
 // Delegates to FieldElement52::inverse() which uses the optimal Fermat
@@ -1400,18 +1397,18 @@ static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
     CTAffinePoint pre_a[TABLE_SIZE];
     CTAffinePoint pre_a_lam[TABLE_SIZE];
 
-    // Double the input point using CTJacobianPoint path (no on-curve assert).
-    // point_dbl_n_core operates on CTJacobianPoint — safe for isomorphic-curve points.
     JacFE52 iso[TABLE_SIZE];
     FE52 zr[TABLE_SIZE];
     FE52 global_z;
 
-#if defined(REPSEARCH_COZ_TABLE) && REPSEARCH_COZ_TABLE == 1
-    // ---- co-Z chain (EXPERIMENT ONLY) -----------------------------------
-    // Fourth and last site. This one enters with Z == 1, so DBLU's Z_new
-    // reduces to 2*Y and the multiply by the incoming Z is by one -- kept
-    // generic rather than specialised, because the saving is a single multiply
-    // once per call and a second code path is not worth it.
+    // Co-Z table chain. The accumulator and the constant 2P are kept on ONE Z,
+    // so the four heavy operations jac_add_ge_var_zr spends bridging two Z
+    // values never happen, and the iso-curve mapping is not needed at all.
+    //
+    // Fourth and last of the four co-Z sites. This one enters with Z == 1, so
+    // DBLU's Z_new reduces to 2*Y and the multiply by the incoming Z is by one
+    // -- kept generic rather than specialised, because the saving is a single
+    // multiply once per call and a second code path is not worth it.
     {
         FE52 dX, dY, aX, aY, chainZ;
         jac52_dblu_ct(px, py, FE52::one(), dX, dY, aX, aY, chainZ);
@@ -1432,22 +1429,6 @@ static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
         }
         global_z = chainZ;
     }
-#else
-    CTJacobianPoint p2_ct{px, py, FE52::one(), 0};
-    point_dbl_n_core(&p2_ct, 1);   // 2P in Jacobian (bypasses SECP_ASSERT_ON_CURVE)
-    FE52 const C  = p2_ct.z;
-    FE52 const C2 = C.square();
-    FE52 const C3 = C2 * C;
-    FE52 const d_x = p2_ct.x;
-    FE52 const d_y = p2_ct.y;
-
-    iso[0] = { px * C2, py * C3, FE52::one() };   // P in iso coords (Z_P=1)
-
-    for (std::size_t i = 1; i < TABLE_SIZE; ++i)
-        iso[i] = jac_add_ge_var_zr(iso[i - 1], d_x, d_y, &zr[i]);
-
-    global_z = iso[TABLE_SIZE - 1].z * C;
-#endif  // REPSEARCH_COZ_TABLE
     const FE52& beta = get_beta_fe52();
 
     pre_a[TABLE_SIZE - 1].x = iso[TABLE_SIZE - 1].x;
@@ -1533,12 +1514,11 @@ static CTJacobianPoint scalar_mul_jac(const Point& p, const Scalar& k) noexcept 
     FE52 zr[TABLE_SIZE];
     FE52 global_z;
 
-#if defined(REPSEARCH_COZ_TABLE) && REPSEARCH_COZ_TABLE == 1
-    // ---- co-Z chain (EXPERIMENT ONLY) -----------------------------------
-    // Third of the four sites. Same shared-global-Z contract and the same
-    // backward sweep below; the accumulator and the constant 2P are kept on one
-    // Z, so the four heavy operations jac_add_ge_var_zr spends bridging two Z
-    // values never happen, and the iso-curve mapping is not needed at all.
+    // Co-Z table chain. Third of the four co-Z sites. Same shared-global-Z
+    // contract and the same backward sweep below; the accumulator and the
+    // constant 2P are kept on one Z, so the four heavy operations
+    // jac_add_ge_var_zr spends bridging two Z values never happen, and the
+    // iso-curve mapping is not needed at all.
     // 177 -> 112 heavy field ops on the table build, -36.7%.
     {
         FE52 dX, dY, aX, aY, chainZ;
@@ -1563,22 +1543,6 @@ static CTJacobianPoint scalar_mul_jac(const Point& p, const Scalar& k) noexcept 
         }
         global_z = chainZ;   // no isomorphism to undo
     }
-#else
-    Point p2 = p;
-    p2.dbl_inplace();
-    FE52 const C  = p2.Z52();
-    FE52 const C2 = C.square();
-    FE52 const C3 = C2 * C;
-    FE52 const d_x = p2.X52();
-    FE52 const d_y = p2.Y52();
-
-    iso[0] = { p.X52() * C2, p.Y52() * C3, p.Z52() };
-
-    for (std::size_t i = 1; i < TABLE_SIZE; ++i)
-        iso[i] = jac_add_ge_var_zr(iso[i - 1], d_x, d_y, &zr[i]);
-
-    global_z = iso[TABLE_SIZE - 1].z * C;
-#endif  // REPSEARCH_COZ_TABLE
     const FE52& beta = get_beta_fe52();
 
     pre_a[TABLE_SIZE - 1].x = iso[TABLE_SIZE - 1].x;
@@ -1695,16 +1659,12 @@ FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& x
     FE52 const rz2   = R.z.square();
     FE52       denom = rz2 * g;
     denom = denom * xd;             // R.z² * g * xd
-#if defined(REPSEARCH_CT_SAFEGCD_INV) && REPSEARCH_CT_SAFEGCD_INV == 1
-    // EXPERIMENT ONLY (experiments/representation_search); default build uses
-    // the line in the #else branch, unchanged.
+    // Bernstein-Yang SafeGCD, constant-time. q is secret, so this inverse must
+    // be CT -- and it is: 10 x 59 = 590 BRANCHLESS divsteps, a port of
+    // libsecp256k1's secp256k1_modinv64 (the CT variant, not the _var one).
     //
-    // Both of these are CONSTANT-TIME. FieldElement52::inverse() is the Fermat
-    // chain: 255 squarings + 15 multiplies, a fixed operation sequence.
-    // ct::field_inv is the ct:: track's Bernstein-Yang SafeGCD: 10 x 59 = 590
-    // BRANCHLESS divsteps, a port of libsecp256k1's secp256k1_modinv64 (the CT
-    // variant, not the _var one). Same timing guarantee, different algorithm.
-    //
+    // FieldElement52::inverse() -- the Fermat chain, 255 squarings + 15
+    // multiplies -- carries the same timing guarantee and is simply slower.
     // MEASURED on this machine (i5-14400F, GCC 14.2.0, -O3 -march=native, 64
     // random elements, 11 passes, minimum taken, P-core pinned; all paths
     // verified to return true inverses first):
@@ -1716,13 +1676,10 @@ FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& x
     //
     // The Fermat chain is therefore not the price of constant time; it is
     // simply the slower of the two constant-time inverses this repository
-    // already contains. See issue #398 and KB FE52-INVERSE-CT-DOMINATED.
-    //
-    // This inverse is NOT amortised: one per ECDH, so the full ~2.3 us lands.
+    // contains. This inverse is NOT amortised -- one per ECDH -- so the full
+    // saving lands end to end: ElligatorSwift XDH -8.23%, session handshake
+    // -4.35%. See issue #398 and KB FE52-INVERSE-CT-DOMINATED.
     FE52 const denom_inv = FE52::from_fe(ct::field_inv(denom.to_fe()));
-#else
-    FE52 const denom_inv = denom.inverse();
-#endif
     FE52 const x52   = R.x * denom_inv;
 
     return x52.to_fe();
@@ -1742,13 +1699,11 @@ CTScalarMulTables build_scalar_mul_tables(const Point& p) noexcept {
     JacFE52 iso[TABLE_SIZE];
     FE52 zr[TABLE_SIZE];
 
-#if defined(REPSEARCH_COZ_TABLE) && REPSEARCH_COZ_TABLE == 1
-    // ---- co-Z chain (EXPERIMENT ONLY) -----------------------------------
-    // Same table, same shared-global-Z contract, same backward sweep below.
-    // The accumulator and the constant 2P are kept on ONE Z, so the four heavy
-    // operations jac_add_ge_var_zr spends bridging two Z values never happen,
-    // and the iso-curve mapping (C, C^2, C^3 plus two multiplies) is not needed
-    // at all -- the chain works on the curve directly.
+    // Co-Z table chain. Same table, same shared-global-Z contract, same backward
+    // sweep below. The accumulator and the constant 2P are kept on ONE Z, so the
+    // four heavy operations jac_add_ge_var_zr spends bridging two Z values never
+    // happen, and the iso-curve mapping (C, C^2, C^3 plus two multiplies) is not
+    // needed at all -- the chain works on the curve directly.
     FE52 dX, dY, aX, aY, chainZ;
     jac52_dblu_ct(p.X52(), p.Y52(), p.Z52(), dX, dY, aX, aY, chainZ);
 
@@ -1766,21 +1721,6 @@ CTScalarMulTables build_scalar_mul_tables(const Point& p) noexcept {
 
     // No isomorphism to undo: the shared Z is the Z the chain ended on.
     out.global_z = chainZ;
-#else
-    Point p2 = p;
-    p2.dbl_inplace();
-    FE52 const C  = p2.Z52();
-    FE52 const C2 = C.square();
-    FE52 const C3 = C2 * C;
-    FE52 const d_x = p2.X52();
-    FE52 const d_y = p2.Y52();
-
-    iso[0] = { p.X52() * C2, p.Y52() * C3, p.Z52() };
-    for (std::size_t i = 1; i < TABLE_SIZE; ++i)
-        iso[i] = jac_add_ge_var_zr(iso[i - 1], d_x, d_y, &zr[i]);
-
-    out.global_z = iso[TABLE_SIZE - 1].z * C;
-#endif  // REPSEARCH_COZ_TABLE
     const FE52& beta = get_beta_fe52();
 
     out.pre_a[TABLE_SIZE - 1].x = iso[TABLE_SIZE - 1].x;

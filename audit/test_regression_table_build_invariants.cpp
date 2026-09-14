@@ -29,7 +29,15 @@
 //       This module walks the table through the public API: k*P for every odd k
 //       the table represents must equal repeated addition of P.
 //
-// Both checks are deliberately expressed against PUBLIC behaviour, not internal
+//   (3) THE TWO SITES SECTIONS (1)-(2) CANNOT REACH.  ct::ecmult_const_xonly
+//       builds its table on an ISOMORPHIC curve and closes with one field
+//       inverse; batch_scalar_mul_fixed_k inverts one Montgomery prefix product
+//       for a whole chunk. Both are on the default path since the co-Z table
+//       build and the CT SafeGCD inverse stopped being macro-guarded, and both
+//       fail quietly: a wrong shared Z or a wrong inverse makes every result in
+//       the batch wrong by the same factor, which stays self-consistent.
+//
+// All checks are deliberately expressed against PUBLIC behaviour, not internal
 // state, so they survive a change of table representation -- which is the whole
 // point, since the representation is what the experiment changes.
 // ============================================================================
@@ -213,6 +221,56 @@ int test_regression_table_build_invariants_run() {
               "x-only parse rejects x = 5 (no y on the curve)");
         check(secp256k1::schnorr_xonly_pubkey_parse(p1, x1),
               "x-only parse accepts x = 1 (on the curve)");
+    }
+
+    // ---- (5) x-only ECDH through the fourth co-Z site -----------------
+    // ct::ecmult_const_xonly builds its own odd-multiple table (the fourth and
+    // last co-Z site) and closes with ONE field inverse. Both are on the default
+    // path now, and neither is reachable from sections (1)-(3): that table is
+    // built on an ISOMORPHIC curve, so a chain that drifts onto a wrong shared Z
+    // produces an x that is self-consistent and wrong. Check it against the same
+    // point computed the ordinary way.
+    printf("\n--- (5) ct::ecmult_const_xonly(x_P, 1, q) == x of q*P ---\n");
+    {
+        using secp256k1::fast::FieldElement;
+        const FieldElement one_fe = FieldElement::one();
+        int agree = 0;
+        const int kCases = 16;
+        for (int i = 0; i < kCases; ++i) {
+            const Scalar q = random_scalar();
+            const Point  P = G.scalar_mul(random_scalar());
+
+            const FieldElement got  = secp256k1::ct::ecmult_const_xonly(P.x(), one_fe, q);
+            const FieldElement want = secp256k1::ct::scalar_mul(P, q).x();
+
+            if (got == want) ++agree;
+        }
+        check(agree == kCases, "ecmult_const_xonly(x_P, 1, q) == x(q*P) on random inputs");
+        printf("  %d/%d cases agree\n", agree, kCases);
+    }
+
+    // ---- (6) the batch path's single shared inverse --------------------
+    // batch_scalar_mul_fixed_k inverts ONE Montgomery prefix product for the
+    // whole chunk and unwinds it backwards. A wrong inverse does not fail
+    // loudly: every point in the chunk comes out wrong by a related factor.
+    // The scalar is secret here (BIP-352 scan key), so this inverse is CT.
+    printf("\n--- (6) batch_scalar_mul_fixed_k == per-point scalar_mul ---\n");
+    {
+        constexpr std::size_t kN = 64;
+        const Scalar k = random_scalar();
+        const secp256k1::fast::KPlan plan = secp256k1::fast::KPlan::from_scalar(k);
+
+        std::array<Point, kN> pts{};
+        std::array<Point, kN> got{};
+        for (std::size_t i = 0; i < kN; ++i) pts[i] = G.scalar_mul(random_scalar());
+
+        Point::batch_scalar_mul_fixed_k(plan, pts.data(), kN, got.data());
+
+        std::size_t ok = 0;
+        for (std::size_t i = 0; i < kN; ++i)
+            if (same_point(got[i], pts[i].scalar_mul(k))) ++ok;
+        check(ok == kN, "batch_scalar_mul_fixed_k(k) == scalar_mul(k) for every point");
+        printf("  %zu/%zu points agree\n", ok, kN);
     }
 
     printf("\n[regression_table_build_invariants] %d/%d checks passed\n",

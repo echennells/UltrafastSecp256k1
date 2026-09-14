@@ -44,6 +44,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on-device `{0, n-1, n, 2^256-1, s+n}` boundary-scalar differential that
   self-skips without a GPU.
 
+### Performance
+
+- The co-Z odd-multiple table build and the constant-time SafeGCD field inverse
+  are the **default build** now, not opt-in macros. Both came out of
+  `experiments/representation_search` behind `-DREPSEARCH_COZ_TABLE=1` and
+  `-DREPSEARCH_CT_SAFEGCD_INV=1`; both won their controlled A/B, and the
+  superseded branches are deleted rather than left as dead `#else` arms:
+
+  | change | measured | where |
+  |---|---|---|
+  | co-Z table build, all 4 sites | `dual_scalar_mul_gen_point` -7.19%, `ecdsa_verify` -1.96%, 0 regressions | verify, `ct::scalar_mul`, BIP-324 |
+  | CT SafeGCD inverse, both sites | ElligatorSwift XDH -8.23%, session handshake -4.35% | ECDH, BIP-352 scan |
+
+  This closes an evidence gap rather than adding a speedup. The canonical
+  artifact `docs/bench_unified_2026-09-07_gcc14_x86-64.json` was produced WITH
+  both flags set -- its `build` field records the exact command -- so every ratio
+  in `docs/canonical_numbers.json`, and everything the sync scripts derive from
+  it, described a build that `cmake --preset cpu-release` did not produce. It
+  does now.
+
+  Verified as code identity rather than as a re-measurement, which is the
+  stronger claim available here: `src/cpu/src/point.cpp` and
+  `src/cpu/src/ct_point.cpp` compiled from the new default tree emit assembly
+  identical to the previous tree compiled with both macros set (same flags plus
+  `-fno-lto -g0 -S`; 101364 and 83201 asm lines, diff empty once the
+  temp-filename static-init symbol is normalised). The default build IS the arm
+  that was measured.
+
+- Removed `REPSEARCH_DBL_VARIANT`, `REPSEARCH_INLINE_ZINV` and
+  `REPSEARCH_DUALMUL_WINDOW_G` from `src/cpu/src/point.cpp`. These were the axes
+  the representation search refuted or could not resolve -- the alternative sign
+  placement measured +1.17% slower, the inline/noinline flip gave fully
+  overlapping ranges, and no G-table window width beat 15 on ConnectBlock. A
+  losing arm kept behind an `#if` is dead code in the engine's hottest file, not
+  an option: the verdict is what has value, and it stays as a comment at each
+  site, in `experiments/representation_search/README.md`, and in the knowledge
+  base (`DUALMUL-WINDOW-CONNECTBLOCK-NO-WIN`,
+  `X86-REPRESENTATION-SEARCH-EXHAUSTED`). The window constant is now the plain
+  `kDualMulWindowG = 15` that `regression_table_build_invariants` section (1)
+  guards.
+
+
 ### Credited
 
 - **[@kawacukennedy](https://github.com/kawacukennedy)** for reporting 9 verified

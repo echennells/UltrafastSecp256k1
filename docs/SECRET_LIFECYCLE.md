@@ -2,6 +2,35 @@
 
 **Last updated**: 2026-09-10 | **Version**: 4.5.0
 
+### 2026-09-14 - co-Z table build and CT SafeGCD inverse as defaults: no secret lifecycle change
+
+`REPSEARCH_COZ_TABLE` and `REPSEARCH_CT_SAFEGCD_INV` became the default build and
+their superseded branches were deleted. The gate-watched surfaces touched are
+`src/cpu/src/ct_point.cpp`, `src/cpu/src/point.cpp` and `CHANGELOG.md`; this entry
+answers the classification rather than waiving it.
+
+**Secret-buffer and zeroization verdict: unchanged.** No `secure_erase` call site
+is added, removed or moved, and no new resident secret buffer is created.
+
+- The co-Z chain replaces the mixed-add chain in place. It writes the same
+  `iso[]` / `zr[]` / `tbl[]` arrays the previous construction wrote, with the
+  same lifetime and the same scope, and its extra temporaries (`dX`, `dY`, `aX`,
+  `aY`, `chainZ`) are stack `FE52` values holding multiples of the **base point**
+  — public data at every site. It holds no key material, so it needs no erase.
+- The inverse swap changes which algorithm computes one `FE52`, not how long any
+  buffer lives. `ct::field_inv` takes its input by const reference and returns by
+  value; the SafeGCD state (`SG62 d/e/f/g`, `SGTrans`) is function-local and dies
+  with the call, exactly as the Fermat chain's temporaries did. Neither the old
+  nor the new inverse erased its intermediates, and that is unchanged.
+
+**What does hold secret-derived material here, unchanged:** the XDH denominator
+`R.z^2 * g * xd` at `ecmult_const_xonly` derives from `q*P_eff` with `q` secret,
+and the Montgomery prefix product at `batch_scalar_mul_fixed_k` derives from the
+`KPlan`'s scalar (the BIP-352 scan key at its callers). Both were secret-derived
+before this change and are secret-derived after it; both are inverted by a
+constant-time algorithm before and after. See
+[`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date.
+
 ### 2026-09-10 - GPU compact-ECDSA strict-range guard (`src/cuda/include/ecdsa.cuh`, Metal shader, OpenCL kernel): no secret lifecycle change
 
 `ecdsa_verify()` on each GPU backend now rejects a compact signature whose `r >= n`

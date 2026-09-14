@@ -2,6 +2,33 @@
 
 **UltrafastSecp256k1 v4.5.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-14 - The default build is now the build the canonical benchmark measured
+
+The co-Z table construction and the CT SafeGCD field inverse are the default
+build; `-DREPSEARCH_COZ_TABLE=1` and `-DREPSEARCH_CT_SAFEGCD_INV=1` no longer
+exist. Recorded here because the secret-path gate classifies
+`src/cpu/src/ct_point.cpp` and `CHANGELOG.md` as CT secret-bearing surfaces.
+
+**No security claim weakens, and one documentation claim stops being
+conditional.** The CT analysis is in [`CT_VERIFICATION.md`](CT_VERIFICATION.md)
+under the same date: both changes swap one constant-time implementation for
+another inside an unchanged boundary, and the table build was a function of the
+base point rather than of the secret scalar both before and after.
+
+What is repaired is an evidence claim. `docs/bench_unified_2026-09-07_gcc14_x86-64.json`
+was produced WITH both flags set — its `build` field records the exact cmake
+invocation — so every ratio in `docs/canonical_numbers.json`, and every document
+the sync scripts derive from it, described a binary that
+`cmake --preset cpu-release` did not produce. Any reader reproducing the numbers
+from the documented preset would have measured a different binary. The default
+preset now produces that binary.
+
+Established as code identity rather than as a fresh measurement: `point.cpp` and
+`ct_point.cpp` compiled from the default tree emit assembly identical to the
+previous tree compiled with both macros (same `compile_commands.json` flags plus
+`-fno-lto -g0 -S`; 101364 and 83201 lines; empty diff once the temp-filename
+static-init symbol is normalised).
+
 ### 2026-09-10 - Strict compact-ECDSA range (`r`,`s` in `[1, n-1]`) enforced uniformly on every GPU verify path
 
 The compact-ECDSA strictness guard added in this wave is a verification-contract

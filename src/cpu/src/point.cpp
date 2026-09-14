@@ -4,10 +4,7 @@
 #endif
 #include "secp256k1/glv.hpp"
 #include "secp256k1/ct/point.hpp"
-#if defined(REPSEARCH_CT_SAFEGCD_INV) && REPSEARCH_CT_SAFEGCD_INV == 1
-// EXPERIMENT ONLY: ct::field_inv, the ct:: track's constant-time SafeGCD inverse.
-#include "secp256k1/ct/field.hpp"
-#endif
+#include "secp256k1/ct/field.hpp"   // ct::field_inv -- the CT SafeGCD inverse
 #if defined(__SIZEOF_INT128__) && !defined(__EMSCRIPTEN__)
 #include "secp256k1/field_52.hpp"
 #endif
@@ -492,44 +489,11 @@ SECP256K1_HOT_FUNCTION
 // Core doubling on raw FE52 references (zero struct-copy overhead)
 // In-place variant: reads and writes through same x/y/z references.
 static inline void jac52_double_coords(FieldElement52& x, FieldElement52& y, FieldElement52& z) noexcept {
-#if defined(REPSEARCH_DBL_VARIANT) && REPSEARCH_DBL_VARIANT == 1
-    // ---- representation-search candidate: dbl_prod_alt_sign --------------
-    // EXPERIMENT ONLY (experiments/representation_search). Never enabled in a
-    // default build; selected by -DREPSEARCH_DBL_VARIANT=1.
-    //
-    // Same 3M+4S as production, same result. The difference is sign placement:
-    // production carries T = -S*X negated through the whole temporary chain;
-    // this keeps U = +S*X positive and pushes both negations onto the X3 and
-    // Y3 subtractions, which are off the critical path.
-    //
-    // Proven exactly equivalent to the reference group law over 96 cases
-    // (24 curve points x 4 randomized Z) -- see tests/test_point_equivalence.py.
-    // Model (NOT a measurement): weighted 7.060 vs 7.140, critical depth
-    // 3.170 vs 3.250, live values 7 vs 6. Outputs X mag 4, Y mag 3, Z mag 1,
-    // inside the X<=8 / Y<=4 declared at the negate() call sites below.
-    FieldElement52 s = y.square();           // S = Y^2, mag 1
-    FieldElement52 l = x.square();           // mag 1
-    l.mul_int_assign(3);                     // mag 3
-    l.half_assign();                         // L = (3/2)X^2, mag 2
+    // The representation search generated an alternative sign placement for this
+    // body (dbl_prod_alt_sign: same 3M+4S, negations pushed onto the X3 and Y3
+    // subtractions instead of carried through T). Measured +1.17% -- refuted.
+    // See experiments/representation_search/README.md before re-deriving it.
 
-    z.mul_assign(y);                         // Z3 = Z*Y, mag 1  (y still Y1)
-
-    y = s * x;                               // U = X*S, mag 1   (x still X1)
-
-    FieldElement52 two_u = y;                // mag 1
-    two_u.add_assign(y);                     // 2U, mag 2
-
-    x = l.square();                          // L^2, mag 1
-    x.add_assign(two_u.negate(2));           // X3 = L^2 - 2U, mag 4
-
-    s.square_inplace();                      // S^2, mag 1
-
-    FieldElement52 t = y;                    // U, mag 1
-    t.add_assign(x.negate(4));               // U - X3, mag 6
-    t.mul_assign(l);                         // L*(U - X3), mag 1
-    t.add_assign(s.negate(1));               // Y3, mag 3
-    y = t;
-#else
     // S = Y1^2 (1S) -- computed before y is reused
     FieldElement52 s = y.square();         // mag 1
 
@@ -560,7 +524,6 @@ static inline void jac52_double_coords(FieldElement52& x, FieldElement52& y, Fie
     y.mul_assign(l);                         // mag 1  (y = L*(T+X3))
     y.add_assign(s);                         // mag 2
     y.negate_assign(2);                      // mag 3
-#endif  // REPSEARCH_DBL_VARIANT
 }
 
 // Split I/O variant: reads from const in_*, writes to separate out_*.
@@ -1041,13 +1004,9 @@ static void jac52_add_mixed_inplace_zr(JacobianPoint52& p,
 // cpu0, turbo off): the regression is GONE, and so is any gain -- ecdsa_verify
 // -0.46%, schnorr_verify -0.44%, dual_mul -0.87%, every range overlapping.
 // It stays NOINLINE because nothing argues for changing it, not because the old
-// number still holds. REPSEARCH_INLINE_ZINV=1 flips it if a different target
-// (ARM64, RISC-V, a smaller I-cache) wants the question re-opened there.
-#if defined(REPSEARCH_INLINE_ZINV) && REPSEARCH_INLINE_ZINV == 1
-SECP256K1_HOT_FUNCTION SECP256K1_INLINE
-#else
+// number still holds. Anyone re-opening the question on a different target
+// (ARM64, RISC-V, a smaller I-cache) changes the attribute here and measures.
 SECP256K1_HOT_FUNCTION SECP256K1_NOINLINE
-#endif
 static void jac52_add_zinv_inplace(JacobianPoint52& p,
                                     const AffinePoint52& b,
                                     const FieldElement52& bzinv) noexcept {
@@ -1188,10 +1147,8 @@ static inline JacobianPoint52 jac52_negate(const JacobianPoint52& p) {
 // -- GLV + Shamir helpers (shared by scalar_mul_glv52 / scalar_mul_with_plan_glv52 /
 //    dual_scalar_mul_gen_point) -----------------------------------------------
 
-#if defined(REPSEARCH_COZ_TABLE) && REPSEARCH_COZ_TABLE == 1
 // ---------------------------------------------------------------------------
-// EXPERIMENT ONLY (experiments/representation_search). Default build does not
-// compile this; selected by -DREPSEARCH_COZ_TABLE=1.
+// Co-Z (Meloni) table construction, from experiments/representation_search.
 //
 // Co-Z (Meloni) table construction. Both operands share one Z, so the four
 // heavy operations a mixed add spends reconciling two different Z values --
@@ -1300,7 +1257,6 @@ static bool jac52_zaddu_zr(FieldElement52& x1, FieldElement52& y1,
     x1 = B; y1 = y1cb;                                          // P on the new Z
     return true;
 }
-#endif  // REPSEARCH_COZ_TABLE
 
 // Builds odd-multiple table [1P, 3P, ..., (2T-1)P] in FE52 using the z-ratio
 // technique (zero field inversions).  All table entries share an implied
@@ -1312,12 +1268,10 @@ static bool build_glv52_table_zr(
     int table_size,
     FieldElement52& globalz)
 {
-#if defined(REPSEARCH_COZ_TABLE) && REPSEARCH_COZ_TABLE == 1
-    // ---- co-Z construction (EXPERIMENT ONLY) ----------------------------
-    // Same table, same shared-Z contract, same backward sweep. The difference
-    // is that the accumulator and the constant 2P are kept on ONE Z, so the
-    // four heavy operations a mixed add spends bridging two Z values never
-    // happen: 7 heavy operations per entry instead of 11.
+    // Co-Z construction. Same table, same shared-Z contract, same backward
+    // sweep. The difference is that the accumulator and the constant 2P are
+    // kept on ONE Z, so the four heavy operations a mixed add spends bridging
+    // two Z values never happen: 7 heavy operations per entry instead of 11.
     constexpr int kMaxZr = 32;
     assert(table_size <= kMaxZr);
     FieldElement52 zr[kMaxZr];
@@ -1345,40 +1299,6 @@ static bool build_glv52_table_zr(
     // No isomorphism to undo: the chain worked on the curve directly, so the
     // shared Z is simply the Z the chain ended on.
     globalz = chainZ;
-#else
-    // d = 2*P (Jacobian)
-    JacobianPoint52 const d = jac52_double(P52);
-    FieldElement52 const C  = d.z;
-    FieldElement52 const C2 = C.square();
-    FieldElement52 const C3 = C2 * C;
-
-    // d as affine on iso curve (Z cancels in isomorphism)
-    AffinePoint52 const d_aff = {d.x, d.y};
-
-    // Transform P onto iso curve: (P.X*C^2, P.Y*C^3, P.Z)
-    JacobianPoint52 ai = {P52.x * C2, P52.y * C3, P52.z, false};
-    tbl[0].x = ai.x;
-    tbl[0].y = ai.y;
-
-    // Z-ratio array: zr[i] = Z_i / Z_{i-1} for the accumulator
-    constexpr int kMaxZr = 32;
-    assert(table_size <= kMaxZr);
-    FieldElement52 zr[kMaxZr];
-    zr[0] = C;  // first z-ratio is C (from iso mapping)
-
-    // Build rest using mixed adds on iso curve with z-ratio output
-    for (int i = 1; i < table_size; i++) {
-        jac52_add_mixed_inplace_zr(ai, d_aff, zr[i]);
-        if (SECP256K1_UNLIKELY(ai.infinity)) {
-            return false;
-        }
-        tbl[i].x = ai.x;
-        tbl[i].y = ai.y;
-    }
-
-    // globalz = final_Z * C (maps from iso curve back to secp256k1)
-    globalz = ai.z * C;
-#endif  // REPSEARCH_COZ_TABLE
 
     // Backward sweep: rescale table entries so all share implied Z = Z_last.
     // zs accumulates the product zr[n-1] * ... * zr[i+1] = Z_last / Z_i.
@@ -3555,33 +3475,27 @@ void Point::batch_scalar_mul_fixed_k(const KPlan& plan,
                         pts[chunk_start + i].scalar_mul_with_plan(plan);
                 continue;
             }
-#if defined(REPSEARCH_CT_SAFEGCD_INV) && REPSEARCH_CT_SAFEGCD_INV == 1
-            // EXPERIMENT ONLY. The default build uses the #else line, unchanged.
+            // Bernstein-Yang SafeGCD, constant-time.
             //
-            // This is the ONE FieldElement52::inverse() call on the fast:: track.
-            // It is deliberately the CONSTANT-TIME Fermat chain, not the
-            // variable-time inverse_safegcd(), because the value being inverted
-            // is the Montgomery prefix product of Z-coordinates derived from the
-            // KPlan's scalar -- and the callers pass a SECRET one:
-            //   src/bch/src/bch_scan.cpp        KPlan::from_scalar(scan_privkey)
+            // This is the ONE field inverse on the fast:: track, and it must be
+            // constant-time: the value inverted is the Montgomery prefix product
+            // of Z-coordinates derived from the KPlan's scalar, and the callers
+            // pass a SECRET one:
+            //   src/bch/src/bch_scan.cpp             KPlan::from_scalar(scan_privkey)
             //   src/cpu/src/sp_scan_batch_impl.hpp   BIP-352 silent payments
             //   src/cpu/src/address.cpp
             // CLAUDE.md lists the BIP-352 scan key under CT-mandatory. Nothing in
-            // the code says any of this; recorded as KB
-            // BATCH-SCALAR-MUL-FIXED-K-CT-STATUS.
+            // the code said so; recorded as KB BATCH-SCALAR-MUL-FIXED-K-CT-STATUS.
             //
-            // ct::field_inv is ALSO constant-time -- Bernstein-Yang SafeGCD,
-            // 10 x 59 = 590 branchless divsteps, a port of libsecp256k1's
-            // secp256k1_modinv64 (the CT variant). Measured 1555.0 ns against the
-            // Fermat chain's 3847.5 ns, 2.47x, same timing guarantee.
+            // ct::field_inv carries that guarantee -- 10 x 59 = 590 branchless
+            // divsteps, a port of libsecp256k1's secp256k1_modinv64 (the CT
+            // variant) -- at 1555.0 ns measured against the Fermat chain's
+            // 3847.5 ns, 2.47x.
             //
             // Amortisation caveat: Montgomery's trick means this is ONE inversion
-            // for the whole batch, so ~2.3 us is a small share of a scan. The
+            // for the whole batch, so the saving is a small share of a scan. The
             // ECDH site in ct_point.cpp is where this swap actually pays.
             FE52 inv = FE52::from_fe(ct::field_inv(s_prefix[total - 1].to_fe()));
-#else
-            FE52 inv = s_prefix[total - 1].inverse();
-#endif
             for (size_t k = total; k-- > 0; ) {
                 if (s_tables[k].is_infinity()) {
                     s_tbl_P_x[k] = FE52::zero();
@@ -4298,11 +4212,12 @@ namespace {
     // the whole table resident and systematically FLATTERS the large window. A real
     // workload (ConnectBlock, batch verify) interleaves other data that evicts it.
     // So ConnectBlock is the metric that matters here, not the micro one.
-#if defined(REPSEARCH_DUALMUL_WINDOW_G)
-    constexpr unsigned kDualMulWindowG    = REPSEARCH_DUALMUL_WINDOW_G;
-#else
+    // Windows 13 and 12 were built and measured against 15 on ConnectBlock --
+    // the metric named above, not the micro one -- frequency-locked, taskset -c 0,
+    // 5 runs per arm at -min-time 3000 and again at 10000. 13 was never faster on
+    // any profile arm and ran ~2% slower on Schnorr. KB
+    // DUALMUL-WINDOW-CONNECTBLOCK-NO-WIN.
     constexpr unsigned kDualMulWindowG    = 15;
-#endif
     constexpr int kDualMulGTableSize      = (1 << (kDualMulWindowG - 2)); // 8192 at w=15
     constexpr unsigned kDualMulWindowP    = 5;
     constexpr int kDualMulPTableSize      = (1 << (kDualMulWindowP - 2)); // 8

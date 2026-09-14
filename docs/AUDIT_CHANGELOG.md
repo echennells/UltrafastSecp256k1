@@ -1,5 +1,28 @@
 # Audit Changelog
 
+## 2026-09-14 - two table/inverse sites reached the default path with no gate on them
+
+The co-Z table build and the CT SafeGCD inverse stopped being macro-guarded and
+became the default build. `regression_table_build_invariants` already covered
+three of the four co-Z sites -- the fast:: table through
+`dual_scalar_mul_gen_point` and `k*P`, the ct:: table through `ct::scalar_mul`.
+Two sites it could not reach were newly on the default path with no assertion
+behind them:
+
+- `ct::ecmult_const_xonly` builds its odd-multiple table on an ISOMORPHIC curve
+  and closes with one field inverse. A chain that drifts onto a wrong shared Z
+  yields an x that is self-consistent and wrong.
+- `Point::batch_scalar_mul_fixed_k` inverts ONE Montgomery prefix product per
+  chunk and unwinds it backwards, so a wrong inverse makes every point in the
+  chunk wrong by a related factor -- never a loud failure. The scalar here is
+  the BIP-352 scan key, which CLAUDE.md lists as CT-mandatory.
+
+Added as sections (5) and (6) of the existing module rather than as a new file:
+both are the same invariant the module exists for, expressed against public
+behaviour. (5) checks `ecmult_const_xonly(x_P, 1, q) == x(q*P)` over 16 random
+cases; (6) checks `batch_scalar_mul_fixed_k(k)` against `scalar_mul(k)` over 64
+points, above the chunking threshold so the batch path is the one exercised.
+
 ## 2026-09-13 - GPU MSM finished its reduction on one thread
 
 `CudaBackend::msm()` block-reduced the scatter output and then handed whatever
