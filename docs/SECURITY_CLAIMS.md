@@ -2,6 +2,52 @@
 
 **UltrafastSecp256k1 v4.5.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-14 - BCH Schnorr shim: nonce shared with ECDSA (key recovery), and two spec violations
+
+Three defects in `compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp`, the
+Bitcoin Cash 2019 EC-Schnorr surface `OP_CHECKDATASIG` accepts. All fixed.
+
+**1. Nonce reuse across schemes -- private key recoverable (P1).** The signer
+called `secp256k1::rfc6979_nonce(d, msg)`: the same function, with the same
+arguments, that `ct::ecdsa_sign` calls (`src/cpu/src/ct_sign.cpp:50`). Signing one
+32-byte message with one key under both schemes reused a single nonce `k` across
+two equations,
+
+    ECDSA    s1 = k^-1 (z + r*d)
+    Schnorr  s2 = k + e*d
+    =>       d  = (s1*s2 - z) / (r + s1*e)   mod n
+
+and both signatures are public. Demonstrated rather than inferred: over 16 fixed
+(key, message) pairs the pre-fix shim's Schnorr `r` was byte-equal to the ECDSA
+`r` in 16/16 cases, and the formula recovered **16 of 16 private keys** from the
+signature pairs alone. Fixed by the RFC 6979 domain separator the spec mandates,
+`algo16 = "Schnorr+SHA256  "` -- which is precisely what makes the two nonce
+streams disjoint, and the concrete reason that tag is a security control rather
+than a formatting detail.
+
+**2. `Jacobi(R.y) == 1` absent on both sides.** The signer never negated its
+nonce for a non-residue `R.y`; the verifier never applied verification step 10.
+Self-concealing: our verifier accepted such signatures precisely because it
+skipped the check BCHN and Libauth apply. Over the same 16 pairs, only 6 had a
+residue `R.y` -- **10 of 16 signatures would have been rejected by a BCH node**
+while our own verifier took all 16.
+
+**3. Signature bytes matched no other implementation.** Consequence of (1): 0 of
+16 were byte-identical to BCHN/Libauth for the same key and message. Now 16 of 16.
+
+**Exposure.** The BCH shim builds only under `SECP256K1_BCHN_SHIM_BUILD_TESTS`,
+which defaults `OFF` and which no GitHub workflow and no `ci/` script has ever
+set, so it shipped in no default build and no gate ever executed it. That is the
+root cause of all three surviving, and it is not a mitigation to rely on.
+
+**Claim scope unchanged elsewhere.** `rfc6979_nonce_libsecp_compat` gained an
+optional `algo16` argument; passing `nullptr` keeps every existing caller
+byte-for-byte on libsecp256k1's `"ECDSA\0..."` tag, so no ECDSA, Schnorr (BIP-340)
+or recovery claim moves. New CTest module `regression_bch_schnorr_spec` pins all
+three: 8 known-answer vectors from an independent implementation of the spec, the
+`-R` twin negative control, and a direct nonce-collision probe. Reported under
+issue #374.
+
 ### 2026-09-14 - The default build is now the build the canonical benchmark measured
 
 The co-Z table construction and the CT SafeGCD field inverse are the default

@@ -566,11 +566,16 @@ Scalar rfc6979_nonce_hedged(const Scalar& private_key,
 
 Scalar rfc6979_nonce_libsecp_compat(const Scalar& private_key,
                                      const std::array<uint8_t, 32>& msg_hash,
-                                     const uint8_t* ndata32) {
-    // algo16 = "ECDSA\0\0\0\0\0\0\0\0\0\0\0" (16 bytes), matching libsecp256k1
-    static constexpr uint8_t kAlgo16[16] = {
+                                     const uint8_t* ndata32,
+                                     const uint8_t* algo16) {
+    // Default algo16 = "ECDSA\0\0\0\0\0\0\0\0\0\0\0" (16 bytes), matching
+    // libsecp256k1. A caller signing under a different scheme passes its own
+    // tag; the keydata layout below is otherwise identical, which is the whole
+    // point of the tag -- it is what separates the two nonce streams.
+    static constexpr uint8_t kAlgo16Ecdsa[16] = {
         'E','C','D','S','A', 0,0,0,0,0,0,0,0,0,0,0
     };
+    const uint8_t* const tag16 = algo16 ? algo16 : kAlgo16Ecdsa;
 
     auto x_bytes = private_key.to_bytes();
     alignas(16) uint8_t V[32], K[32];
@@ -592,7 +597,7 @@ Scalar rfc6979_nonce_libsecp_compat(const Scalar& private_key,
         std::memcpy(buf + 65, msg_hash.data(),32);
         size_t pos = 97;
         if (ndata32) { std::memcpy(buf + pos, ndata32, 32); pos += 32; }
-        std::memcpy(buf + pos, kAlgo16, 16);
+        std::memcpy(buf + pos, tag16, 16);
     };
 
     HMAC_Ctx hmac;

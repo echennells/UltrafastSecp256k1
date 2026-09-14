@@ -6004,6 +6004,32 @@ set_tests_properties(regression_table_build_invariants PROPERTIES TIMEOUT 60
     LABELS "audit;regression;math-invariants;table-build;window;shared-z")
 target_sources(unified_audit_runner PRIVATE test_regression_table_build_invariants.cpp)
 
+# BCH 2019 Schnorr specification conformance — Jacobi(R.y) and the RFC6979
+# "Schnorr+SHA256  " algo16 tag, both absent until 2026-09-14 (issue #374).
+# Compiles the BCH shim source directly and supplies its own context pointer:
+# the shim only null-checks that argument, so this needs no shim link, and the
+# two symbols it defines (secp256k1_schnorr_sign/_verify, the BCHN names) do not
+# collide with the main shim's BIP-340 secp256k1_schnorrsig_* .
+add_executable(test_regression_bch_schnorr_spec_standalone
+    test_regression_bch_schnorr_spec.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp)
+audit_target_defaults(test_regression_bch_schnorr_spec_standalone)
+target_include_directories(test_regression_bch_schnorr_spec_standalone PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_bchn_shim/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_shim/include)
+target_compile_definitions(test_regression_bch_schnorr_spec_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME regression_bch_schnorr_spec
+    COMMAND test_regression_bch_schnorr_spec_standalone)
+set_tests_properties(regression_bch_schnorr_spec PROPERTIES TIMEOUT 60
+    LABELS "audit;regression;standard-vectors;bch;schnorr;bchn;interop")
+# NOT added to unified_audit_runner. shim_schnorr_bch.cpp exports the C symbols
+# secp256k1_schnorr_sign / secp256k1_schnorr_verify, and bindings/c_api/
+# ultrafast_secp256k1.cpp -- already linked into the runner -- exports those same
+# two names for its own BIP-340 functions. Linking both multiply-defines them.
+# The runner therefore carries the ADVISORY_SKIP_CODE stub from
+# shim_run_stubs_unified.cpp and this standalone target is where the module
+# actually runs, the same split the shim-dependent modules above use.
+
 # EXTERNAL-ANCHOR KAT — NIST SHA-512 + official BIP-341 vectors (common-mode defence, 2026-06-11)
 add_executable(test_external_anchor_kat_standalone
     test_external_anchor_kat.cpp)

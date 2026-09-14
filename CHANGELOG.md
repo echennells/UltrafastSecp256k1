@@ -44,6 +44,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on-device `{0, n-1, n, 2^256-1, s+n}` boundary-scalar differential that
   self-skips without a GPU.
 
+### Fixed
+
+- The Bitcoin Cash 2019 Schnorr shim (`secp256k1_schnorr_sign` /
+  `secp256k1_schnorr_verify`) did not implement the specification it is named
+  after, and one of the gaps was a private-key recovery defect:
+
+  0. **The nonce was shared with ECDSA (P1).** The signer called
+     `secp256k1::rfc6979_nonce(d, msg)` -- the same function, with the same
+     arguments, that `ct::ecdsa_sign` calls. Signing one message with one key
+     under both schemes reused a single nonce across `s1 = k^-1(z + r*d)` and
+     `s2 = k + e*d`, so `d = (s1*s2 - z)/(r + s1*e)` recovers the private key
+     from two public signatures. Demonstrated, not inferred: the Schnorr `r`
+     equalled the ECDSA `r` in 16/16 cases and 16/16 private keys were recovered
+     from their own signature pairs. The RFC 6979 tag in (2) is what makes the
+     two nonce streams disjoint -- it is a security control, not a formatting
+     detail.
+  1. **`Jacobi(R.y) == 1`.** The signer must negate its nonce when `R.y` is not a
+     quadratic residue; the verifier must fail when `Jacobi(R'.y) != 1` (spec
+     verification step 10). Neither existed, and the omission concealed itself:
+     signatures with a non-residue `R.y` passed our own verifier precisely
+     because that verifier skipped the same check.
+  2. **RFC 6979 `algo16 = "Schnorr+SHA256  "`** (two trailing 0x20). The signer
+     used the plain ECDSA nonce path, so its nonces -- and its signature bytes --
+     matched neither BCHN nor Libauth for the same key and message.
+
+  Measured over 16 fixed (key, message) pairs against an independent pure-Python
+  implementation of the spec: byte-identical to the oracle went 0/16 -> 16/16,
+  residue `R.y` 6/16 -> 16/16, and **accepted by a spec-conformant verifier
+  6/16 -> 16/16**. Ten of sixteen signatures would have been rejected by a BCH
+  node while our own verifier accepted all sixteen.
+
+  Exposure was limited -- the shim ships in no default build, which is also why
+  all three survived -- but that is a root cause, not a mitigation.
+
+  Root cause of its survival: the BCH shim builds only under
+  `SECP256K1_BCHN_SHIM_BUILD_TESTS`, which defaults `OFF` and which no GitHub
+  workflow and no `ci/` script ever enabled -- the file was neither compiled nor
+  tested by any gate. New CTest module `regression_bch_schnorr_spec` fixes that:
+  eight known-answer vectors checked byte-for-byte, a negative control building
+  the `-R` twin of each signature (`s' = 2ed - s`, same `r`) that the verifier
+  must reject, a determinism check, and a probe that the BCH `r` differs from the
+  ECDSA `r` for the same key and message. Against the pre-fix shim the module
+  fails 4 of 7 checks and exits 1.
+
+  `rfc6979_nonce_libsecp_compat` gained an optional `algo16` argument to carry
+  the tag; passing `nullptr` keeps every existing caller byte-for-byte on
+  libsecp256k1's `"ECDSA\0..."` tag. Reported under issue #374.
+
 ### Performance
 
 - The co-Z odd-multiple table build and the constant-time SafeGCD field inverse

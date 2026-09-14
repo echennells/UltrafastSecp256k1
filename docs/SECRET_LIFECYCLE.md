@@ -2,6 +2,36 @@
 
 **Last updated**: 2026-09-10 | **Version**: 4.5.0
 
+### 2026-09-14 - BCH Schnorr nonce was shared with ECDSA: a nonce-lifetime defect, now domain-separated
+
+`compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp` derived its nonce with
+`secp256k1::rfc6979_nonce(d, msg)` -- the same call `ct::ecdsa_sign` makes. One
+nonce therefore served two different signature equations whenever an application
+signed the same message with the same key under both schemes, and the private key
+is algebraically recoverable from that pair. 16 of 16 keys were recovered in
+measurement. This is a secret-lifetime defect, not merely an interop one: the
+nonce's single-use property is what the whole construction rests on.
+
+**Fixed** by RFC 6979 `algo16 = "Schnorr+SHA256  "`, which makes the BCH nonce
+stream disjoint from the ECDSA stream for the same inputs. `src/cpu/src/ecdsa.cpp`
+changed only to carry the tag: `rfc6979_nonce_libsecp_compat` gained an optional
+`algo16` argument and `nullptr` reproduces the previous `"ECDSA\0..."` behaviour
+byte-for-byte, so no existing nonce stream moves.
+
+**Zeroization verdict: unchanged.** No `secure_erase` site is added, removed or
+moved.
+
+- The signer's erase set is what it was -- `kb`, `d`, `k` on every exit path,
+  including the new early returns.
+- The quadratic-residue normalisation replaces `k` through
+  `ct::scalar_cneg(k, mask)`, so the variable that gets erased is the one that
+  was used. The negated copy that `scalar_cneg` forms internally is a function
+  local, exactly like the temporaries every other `ct::` primitive creates, and
+  is not separately erased -- unchanged policy, not a new exposure.
+- The Jacobi test reads `R.y`, which is public: `R.x` is the signature's `r` and
+  any observer can `lift_x(r)` and recompute the same bit. It introduces no new
+  resident secret.
+
 ### 2026-09-14 - co-Z table build and CT SafeGCD inverse as defaults: no secret lifecycle change
 
 `REPSEARCH_COZ_TABLE` and `REPSEARCH_CT_SAFEGCD_INV` became the default build and

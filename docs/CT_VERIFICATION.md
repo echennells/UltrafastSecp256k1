@@ -13,6 +13,38 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-14 ecdsa.cpp — RFC 6979 algo16 became a parameter (no CT boundary moved)
+
+`rfc6979_nonce_libsecp_compat` gained an optional `algo16` argument so the BCH
+Schnorr shim can pass the tag its specification requires. `src/cpu/src/ecdsa.cpp`
+is a CT secret-bearing surface, so the classification is answered here.
+
+**The HMAC-DRBG is untouched.** The keydata layout, the V/K ladder, the fixed
+two-iteration candidate loop (CT-001) and every `secure_erase` are exactly as
+they were. The only change is which 16 bytes get appended: `nullptr` selects the
+`"ECDSA\0..."` constant the function always used, so every existing caller --
+`ct::ecdsa_sign_libsecp_compat` and its recoverable variant -- produces
+byte-identical nonces to before. Verified by construction and by the 8/8
+cross-check against an independent RFC 6979 implementation described in
+`regression_bch_schnorr_spec`.
+
+**What the tag fixes is a CT-adjacent secret-lifetime defect, not a timing one.**
+The BCH shim previously called `rfc6979_nonce(d, msg)`, the same call
+`ct::ecdsa_sign` makes, so one nonce could serve two different signature
+equations and the private key is recoverable from that pair (16/16 recovered in
+measurement). Domain separation removes it. See
+[`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) and
+[`SECURITY_CLAIMS.md`](SECURITY_CLAIMS.md) under the same date, and KB
+`BCH-SCHNORR-NONCE-REUSE-ECDSA`.
+
+**On the shim side**, the quadratic-residue normalisation added to
+`secp256k1_schnorr_sign` negates the nonce through `ct::scalar_cneg` with an
+arithmetic mask (`(uint64_t)is_qr - 1`), not a branch. The bit being tested is
+public -- `R.x` is the signature's `r`, and anyone can `lift_x(r)` and recompute
+it -- but `k` is secret and the test sits inside its live range, so the negation
+is constant time regardless. The matching verifier check is variable-time, which
+is correct: verify is a public-data path (CT-VERIFY).
+
 ### 2026-09-14 ct_point.cpp / point.cpp — co-Z table build and CT SafeGCD inverse became the default (no CT boundary moved)
 
 Two representation-search wins stopped being macro-guarded (`REPSEARCH_COZ_TABLE`,
@@ -594,7 +626,7 @@ The OpenCL CT layer mirrors the CUDA CT implementation with OpenCL-native barrie
 - `value_barrier()` via inline OpenCL `asm volatile` or volatile loads
 - Branchless masks and conditional moves on all secret-dependent paths
 - CT scalar multiplication with fixed iteration count (GLV + signed-digit)
-- Audited via `opencl_audit_runner` ( 476 modules including CT sections)
+- Audited via `opencl_audit_runner` ( 477 modules including CT sections)
 
 ### Metal CT Layer
 
@@ -607,7 +639,7 @@ src/metal/shaders/
 The Metal CT layer uses Metal Shading Language (MSL) with:
 - `value_barrier()` via threadgroup memory fence pattern
 - Identical algorithms to CUDA/OpenCL CT layers
-- Audited via `metal_audit_runner` ( 476 modules including CT sections)
+- Audited via `metal_audit_runner` ( 477 modules including CT sections)
 
 ---
 
@@ -868,8 +900,8 @@ fixed iteration counts. All three GPU backends implement identical CT algorithms
 
 The GPU CT layers are tested via:
 - **CUDA**: `test_ct_smoke` (9 functional tests) + GPU audit runner (Section S6: CT Analysis)
-- **OpenCL**: `opencl_audit_runner` ( 476 modules including CT signing + CT ZK sections)
-- **Metal**: `metal_audit_runner` ( 476 modules including CT signing + CT ZK sections)
+- **OpenCL**: `opencl_audit_runner` ( 477 modules including CT signing + CT ZK sections)
+- **Metal**: `metal_audit_runner` ( 477 modules including CT signing + CT ZK sections)
 
 ### 5. Experimental Protocols
 

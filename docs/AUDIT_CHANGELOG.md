@@ -1,5 +1,77 @@
 # Audit Changelog
 
+## 2026-09-14 - BCH 2019 Schnorr shim violated the spec it is named after, and nothing ran it
+
+`compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp` implements the Bitcoin
+Cash 2019 EC-Schnorr construction that `OP_CHECKDATASIG` accepts. Two of the
+specification's requirements were missing, and a third defect followed from one
+of them.
+
+**0. The nonce was shared with ECDSA -- the private key was recoverable (P1).**
+The signer called `secp256k1::rfc6979_nonce(d, msg)`: the same function, same
+arguments, that `ct::ecdsa_sign` calls (`src/cpu/src/ct_sign.cpp:50`). One message
+signed with one key under both schemes reused one nonce across
+`s1 = k^-1(z + r*d)` and `s2 = k + e*d`, giving `d = (s1*s2 - z)/(r + s1*e)` from
+two public signatures. Measured: the Schnorr `r` equalled the ECDSA `r` in 16/16
+cases, and 16/16 private keys were recovered from their own signature pairs. The
+RFC 6979 tag in (2) is exactly what separates the two streams -- a security
+control, not a formatting detail.
+
+**1. Jacobi(R.y) == 1 was absent on both sides.** The spec requires the signer to
+negate its nonce when `R.y` is not a quadratic residue, and the verifier to fail
+when `Jacobi(R'.y) != 1` (verification step 10). Neither was implemented. The
+omission was self-concealing: signatures with a non-residue `R.y` were accepted by
+our own verifier precisely because our verifier also skipped the check.
+
+**2. The RFC 6979 nonce carried no BCH domain separator.** The signer called the
+plain ECDSA nonce path instead of RFC 6979 with `algo16 = "Schnorr+SHA256  "`
+(two trailing 0x20). Nonces, and therefore signature bytes, matched neither BCHN
+nor Libauth for the same key and message.
+
+Measured over 16 fixed (key, message) pairs against an independent pure-Python
+implementation of the spec:
+
+| | pre-fix | post-fix |
+|---|---:|---:|
+| byte-identical to the spec oracle | 0/16 | 16/16 |
+| `R.y` is a quadratic residue | 6/16 | 16/16 |
+| **accepted by a spec-conformant verifier** (BCHN, Libauth) | **6/16** | **16/16** |
+| accepted by our own verifier | 16/16 | 16/16 |
+
+Ten of sixteen signatures would have been rejected on a BCH node.
+
+**Why it survived:** the BCH shim is built only under
+`SECP256K1_BCHN_SHIM_BUILD_TESTS`, which defaults `OFF` and which no GitHub
+workflow and no `ci/` script ever set. The file was neither compiled nor tested
+by any gate. Its one existing test covers output clearing on failure, not the
+signing math.
+
+New module `regression_bch_schnorr_spec` (`audit/test_regression_bch_schnorr_spec.cpp`)
+closes that. It is a standalone CTest target that compiles the shim source
+directly and supplies its own context pointer, so it needs no shim link. Four
+sections: eight known-answer vectors checked byte-for-byte, a negative control
+that builds the `-R` twin of each valid signature (`s' = 2ed - s`, same `r`) and
+requires the verifier to reject it, a determinism check, and a direct probe that
+the BCH `r` differs from the ECDSA `r` for the same key and message.
+
+It is registered `advisory=true` in the unified runner and carries the
+ADVISORY_SKIP_CODE stub there, because `shim_schnorr_bch.cpp` and
+`bindings/c_api/ultrafast_secp256k1.cpp` export the same two C symbol names and
+cannot be linked into one binary -- a naming collision worth its own decision,
+recorded as KB `BCH-SCHNORR-CAPI-SYMBOL-COLLISION` and left open. The advisory
+ceiling was raised 61 -> 62 with that reason written at the constant. The real
+coverage is the standalone target, built by the default `cpu-release` preset.
+
+The oracle is independent: pure Python written from the spec text, RFC 6979 and
+libsecp256k1's nonce keydata layout. Its RFC 6979 was cross-checked against
+`rfc6979_nonce_libsecp_compat` with the `"ECDSA\0..."` tag -- a path this
+repository already asserts is byte-identical to upstream -- 8/8 matching, so its
+BCH-tagged output is a trustworthy known-answer source.
+
+Proof-it-blocks: built against the pre-fix shim the module fails 4 of 7 checks
+and exits 1, reporting 0/8 byte-identical, 2/8 residue `R.y`, 0/8 twins rejected,
+and 0/8 distinct nonces.
+
 ## 2026-09-14 - two table/inverse sites reached the default path with no gate on them
 
 The co-Z table build and the CT SafeGCD inverse stopped being macro-guarded and

@@ -28,6 +28,29 @@ For the complete compatibility test matrix see `compat/libsecp256k1_shim/tests/`
 
 ---
 
+
+## secp256k1_schnorr_sign / secp256k1_schnorr_verify (BCHN shim)
+
+- **Upstream behavior:** BCHN signs with RFC 6979 using `algo16 = "Schnorr+SHA256  "`,
+  negates the nonce when `Jacobi(R.y) != 1`, and rejects a signature whose
+  recomputed `R'` has a non-residue Y (2019-05-15 spec, verification step 10).
+- **Shim behavior:** identical, as of 2026-09-14. Before that date the shim did
+  neither: it used the ECDSA nonce path and omitted the Jacobi condition in both
+  signing and verification.
+- **Reason:** not a deliberate divergence -- a defect. The BCH shim is excluded
+  from the default build (`SECP256K1_BCHN_SHIM_BUILD_TESTS=OFF`) and no CI job
+  enabled it, so no gate ever executed the code.
+- **Impact:** signatures produced before the fix were byte-different from BCHN
+  and Libauth for every input, and roughly half would be rejected by a BCH node.
+  The shim's verifier accepted both `R` and `-R` for the same `r`.
+- **Test:** `regression_bch_schnorr_spec` -- eight known-answer vectors from an
+  independent Python implementation of the spec, plus a `-R` twin negative
+  control and a determinism check.
+
+Residual divergence: on the astronomically improbable failures (`R` at infinity,
+`s == 0`) BCHN retries with an incremented nonce counter while this shim returns
+0 with the output buffer cleared. Fail-closed, and unreachable in practice.
+
 ## Compatibility parity notes — do not list as divergences
 
 ### ECDSA opaque signature storage
