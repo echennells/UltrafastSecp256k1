@@ -64,29 +64,21 @@ from pathlib import Path
 # comments before counting (see count_advisory_modules() below); ceiling raised to match
 # the now-correct count, not because a new advisory module was added.
 #
-# 2026-09-14 (issue #374): 61 -> 62 — one genuinely new advisory module,
-# `regression_bch_schnorr_spec`. It CANNOT be made mandatory in the unified
-# runner, and the reason is a link constraint rather than missing infrastructure:
-# its subject, compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp, exports the
-# C symbols secp256k1_schnorr_sign and secp256k1_schnorr_verify, and
-# bindings/c_api/ultrafast_secp256k1.cpp -- already linked into the runner --
-# exports those same two names for its own BIP-340 functions. Compiling both into
-# one binary multiply-defines them, which is exactly what happened when this was
-# first wired mandatory.
-#
-# The module is NOT unexercised. It runs for real as the standalone CTest target
-# `regression_bch_schnorr_spec`, built by the default cpu-release preset, where it
-# checks eight known-answer vectors byte-for-byte against an independent Python
-# implementation of the BCH 2019 spec, rejects the -R twin of every signature, and
-# fails 3/6 against the pre-fix shim. The runner carries the ADVISORY_SKIP_CODE
-# stub only because the two binaries cannot coexist -- the same split the
-# shim-dependent modules above already use.
-ADVISORY_CEILING: int = 62
+# 2026-09-14 (issue #374): briefly 61 -> 62 for `regression_bch_schnorr_spec`,
+# then back to 61 the same day. The module was advisory only because its subject,
+# compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp, could not be linked into
+# the runner: bindings/c_api/ultrafast_secp256k1.cpp exported
+# secp256k1_schnorr_sign / secp256k1_schnorr_verify for its own BIP-340 functions
+# and multiply-defined the BCHN names. Renaming that legacy surface to
+# ultrafast_secp256k1_* removed the collision, so the module is mandatory and the
+# ceiling did not need to move after all. Recorded rather than silently reverted:
+# the right answer to "this module cannot be mandatory" was to fix the reason.
+ADVISORY_CEILING: int = 61
 
 # Frozen twin (CAAS meta-gate): bumping the ceiling requires updating BOTH constants,
 # turning a silent loosening into a deliberate, diff-visible change. Mirrors
 # RETROACTIVELY_COVERED_FROZEN_COUNT in ci/check_security_fix_has_test.py.
-ADVISORY_CEILING_FROZEN: int = 62
+ADVISORY_CEILING_FROZEN: int = 61
 assert ADVISORY_CEILING == ADVISORY_CEILING_FROZEN, (
     f"ADVISORY_CEILING ({ADVISORY_CEILING}) != ADVISORY_CEILING_FROZEN "
     f"({ADVISORY_CEILING_FROZEN}). Bump BOTH (and add advisory module(s) + docs) "

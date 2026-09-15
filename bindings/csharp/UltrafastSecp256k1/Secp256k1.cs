@@ -29,119 +29,119 @@ namespace UltrafastSecp256k1
         private const string LibName = "ultrafast_secp256k1";
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr secp256k1_version();
+        public static extern IntPtr ultrafast_secp256k1_version();
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_init();
+        public static extern int ultrafast_secp256k1_init();
 
         // Key operations
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_pubkey_create(byte[] privkey, byte[] pubkey_out);
+        public static extern int ultrafast_secp256k1_ec_pubkey_create(byte[] privkey, byte[] pubkey_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_pubkey_create_uncompressed(byte[] privkey, byte[] pubkey_out);
+        public static extern int ultrafast_secp256k1_ec_pubkey_create_uncompressed(byte[] privkey, byte[] pubkey_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_pubkey_parse(byte[] input, UIntPtr input_len, byte[] pubkey_out);
+        public static extern int ultrafast_secp256k1_ec_pubkey_parse(byte[] input, UIntPtr input_len, byte[] pubkey_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_seckey_verify(byte[] privkey);
+        public static extern int ultrafast_secp256k1_ec_seckey_verify(byte[] privkey);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_privkey_negate(byte[] privkey);
+        public static extern int ultrafast_secp256k1_ec_privkey_negate(byte[] privkey);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_privkey_tweak_add(byte[] privkey, byte[] tweak);
+        public static extern int ultrafast_secp256k1_ec_privkey_tweak_add(byte[] privkey, byte[] tweak);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ec_privkey_tweak_mul(byte[] privkey, byte[] tweak);
+        public static extern int ultrafast_secp256k1_ec_privkey_tweak_mul(byte[] privkey, byte[] tweak);
 
         // ECDSA
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdsa_sign(byte[] msg_hash, byte[] privkey, byte[] sig_out);
+        public static extern int ultrafast_secp256k1_ecdsa_sign(byte[] msg_hash, byte[] privkey, byte[] sig_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdsa_verify(byte[] msg_hash, byte[] sig, byte[] pubkey);
+        public static extern int ultrafast_secp256k1_ecdsa_verify(byte[] msg_hash, byte[] sig, byte[] pubkey);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdsa_signature_serialize_der(byte[] sig, byte[] der_out, ref UIntPtr der_len);
+        public static extern int ultrafast_secp256k1_ecdsa_signature_serialize_der(byte[] sig, byte[] der_out, ref UIntPtr der_len);
 
         // Recovery
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdsa_sign_recoverable(byte[] msg_hash, byte[] privkey, byte[] sig_out, ref int recid_out);
+        public static extern int ultrafast_secp256k1_ecdsa_sign_recoverable(byte[] msg_hash, byte[] privkey, byte[] sig_out, ref int recid_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdsa_recover(byte[] msg_hash, byte[] sig, int recid, byte[] pubkey_out);
+        public static extern int ultrafast_secp256k1_ecdsa_recover(byte[] msg_hash, byte[] sig, int recid, byte[] pubkey_out);
 
         // Schnorr
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_schnorr_sign(byte[] msg, byte[] privkey, byte[] aux_rand, byte[] sig_out);
+        public static extern int ultrafast_secp256k1_schnorr_sign(byte[] msg, byte[] privkey, byte[] aux_rand, byte[] sig_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_schnorr_verify(byte[] msg, byte[] sig, byte[] pubkey_x);
+        public static extern int ultrafast_secp256k1_schnorr_verify(byte[] msg, byte[] sig, byte[] pubkey_x);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_schnorr_pubkey(byte[] privkey, byte[] pubkey_x_out);
+        public static extern int ultrafast_secp256k1_schnorr_pubkey(byte[] privkey, byte[] pubkey_x_out);
 
         // ECDH
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdh(byte[] privkey, byte[] pubkey, byte[] secret_out);
+        public static extern int ultrafast_secp256k1_ecdh(byte[] privkey, byte[] pubkey, byte[] secret_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdh_xonly(byte[] privkey, byte[] pubkey, byte[] secret_out);
+        public static extern int ultrafast_secp256k1_ecdh_xonly(byte[] privkey, byte[] pubkey, byte[] secret_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_ecdh_raw(byte[] privkey, byte[] pubkey, byte[] secret_out);
+        public static extern int ultrafast_secp256k1_ecdh_raw(byte[] privkey, byte[] pubkey, byte[] secret_out);
 
         // Hashing
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void secp256k1_sha256(byte[] data, UIntPtr data_len, byte[] digest_out);
+        public static extern void ultrafast_secp256k1_sha256(byte[] data, UIntPtr data_len, byte[] digest_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void secp256k1_hash160(byte[] data, UIntPtr data_len, byte[] digest_out);
+        public static extern void ultrafast_secp256k1_hash160(byte[] data, UIntPtr data_len, byte[] digest_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void secp256k1_tagged_hash(byte[] tag, byte[] data, UIntPtr data_len, byte[] digest_out);
+        public static extern void ultrafast_secp256k1_tagged_hash(byte[] tag, byte[] data, UIntPtr data_len, byte[] digest_out);
 
         // Addresses
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_address_p2pkh(byte[] pubkey, int network, byte[] addr_out, ref UIntPtr addr_len);
+        public static extern int ultrafast_secp256k1_address_p2pkh(byte[] pubkey, int network, byte[] addr_out, ref UIntPtr addr_len);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_address_p2wpkh(byte[] pubkey, int network, byte[] addr_out, ref UIntPtr addr_len);
+        public static extern int ultrafast_secp256k1_address_p2wpkh(byte[] pubkey, int network, byte[] addr_out, ref UIntPtr addr_len);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_address_p2tr(byte[] internal_key_x, int network, byte[] addr_out, ref UIntPtr addr_len);
+        public static extern int ultrafast_secp256k1_address_p2tr(byte[] internal_key_x, int network, byte[] addr_out, ref UIntPtr addr_len);
 
         // WIF
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_wif_encode(byte[] privkey, int compressed, int network, byte[] wif_out, ref UIntPtr wif_len);
+        public static extern int ultrafast_secp256k1_wif_encode(byte[] privkey, int compressed, int network, byte[] wif_out, ref UIntPtr wif_len);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_wif_decode(byte[] wif, byte[] privkey_out, ref int compressed_out, ref int network_out);
+        public static extern int ultrafast_secp256k1_wif_decode(byte[] wif, byte[] privkey_out, ref int compressed_out, ref int network_out);
 
         // BIP-32
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_bip32_master_key(byte[] seed, UIntPtr seed_len, byte[] key_out);
+        public static extern int ultrafast_secp256k1_bip32_master_key(byte[] seed, UIntPtr seed_len, byte[] key_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_bip32_derive_path(byte[] master, byte[] path, byte[] key_out);
+        public static extern int ultrafast_secp256k1_bip32_derive_path(byte[] master, byte[] path, byte[] key_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_bip32_get_privkey(byte[] key, byte[] privkey_out);
+        public static extern int ultrafast_secp256k1_bip32_get_privkey(byte[] key, byte[] privkey_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_bip32_get_pubkey(byte[] key, byte[] pubkey_out);
+        public static extern int ultrafast_secp256k1_bip32_get_pubkey(byte[] key, byte[] pubkey_out);
 
         // Taproot
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_taproot_output_key(byte[] internal_key_x, byte[]? merkle_root, byte[] output_key_x_out, ref int parity_out);
+        public static extern int ultrafast_secp256k1_taproot_output_key(byte[] internal_key_x, byte[]? merkle_root, byte[] output_key_x_out, ref int parity_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_taproot_tweak_privkey(byte[] privkey, byte[]? merkle_root, byte[] tweaked_out);
+        public static extern int ultrafast_secp256k1_taproot_tweak_privkey(byte[] privkey, byte[]? merkle_root, byte[] tweaked_out);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int secp256k1_taproot_verify_commitment(byte[] output_key_x, int output_key_parity, byte[] internal_key_x, byte[]? merkle_root, UIntPtr merkle_root_len);
+        public static extern int ultrafast_secp256k1_taproot_verify_commitment(byte[] output_key_x, int output_key_parity, byte[] internal_key_x, byte[]? merkle_root, UIntPtr merkle_root_len);
     }
 
     /// <summary>
@@ -171,9 +171,9 @@ namespace UltrafastSecp256k1
             lock (_lock)
             {
                 if (_initialized) return;
-                int rc = Native.secp256k1_init();
+                int rc = Native.ultrafast_secp256k1_init();
                 if (rc != 0)
-                    throw new InvalidOperationException("secp256k1_init() failed: library selftest failure");
+                    throw new InvalidOperationException("ultrafast_secp256k1_init() failed: library selftest failure");
                 _initialized = true;
             }
         }
@@ -182,7 +182,7 @@ namespace UltrafastSecp256k1
         public static string Version()
         {
             Init();
-            IntPtr ptr = Native.secp256k1_version();
+            IntPtr ptr = Native.ultrafast_secp256k1_version();
             return Marshal.PtrToStringAnsi(ptr) ?? "unknown";
         }
 
@@ -194,7 +194,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(privkey, 32, nameof(privkey));
             byte[] pubkey = new byte[33];
-            int rc = Native.secp256k1_ec_pubkey_create(privkey, pubkey);
+            int rc = Native.ultrafast_secp256k1_ec_pubkey_create(privkey, pubkey);
             if (rc != 0) throw new ArgumentException("Invalid private key");
             return pubkey;
         }
@@ -205,7 +205,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(privkey, 32, nameof(privkey));
             byte[] pubkey = new byte[65];
-            int rc = Native.secp256k1_ec_pubkey_create_uncompressed(privkey, pubkey);
+            int rc = Native.ultrafast_secp256k1_ec_pubkey_create_uncompressed(privkey, pubkey);
             if (rc != 0) throw new ArgumentException("Invalid private key");
             return pubkey;
         }
@@ -215,7 +215,7 @@ namespace UltrafastSecp256k1
         {
             Init();
             byte[] result = new byte[33];
-            int rc = Native.secp256k1_ec_pubkey_parse(pubkey, (UIntPtr)pubkey.Length, result);
+            int rc = Native.ultrafast_secp256k1_ec_pubkey_parse(pubkey, (UIntPtr)pubkey.Length, result);
             if (rc != 0) throw new ArgumentException("Invalid public key");
             return result;
         }
@@ -225,7 +225,7 @@ namespace UltrafastSecp256k1
         {
             Init();
             Check(privkey, 32, nameof(privkey));
-            return Native.secp256k1_ec_seckey_verify(privkey) == 1;
+            return Native.ultrafast_secp256k1_ec_seckey_verify(privkey) == 1;
         }
 
         /// <summary>Negate a private key (mod n). Returns new key.</summary>
@@ -234,7 +234,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(privkey, 32, nameof(privkey));
             byte[] result = (byte[])privkey.Clone();
-            int rc = Native.secp256k1_ec_privkey_negate(result);
+            int rc = Native.ultrafast_secp256k1_ec_privkey_negate(result);
             if (rc != 0)
                 throw new ArgumentException("NegatePrivateKey failed: invalid (zero) key");
             return result;
@@ -247,7 +247,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             Check(tweak, 32, nameof(tweak));
             byte[] result = (byte[])privkey.Clone();
-            int rc = Native.secp256k1_ec_privkey_tweak_add(result, tweak);
+            int rc = Native.ultrafast_secp256k1_ec_privkey_tweak_add(result, tweak);
             if (rc != 0) throw new InvalidOperationException("Tweak add produced invalid key");
             return result;
         }
@@ -259,7 +259,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             Check(tweak, 32, nameof(tweak));
             byte[] result = (byte[])privkey.Clone();
-            int rc = Native.secp256k1_ec_privkey_tweak_mul(result, tweak);
+            int rc = Native.ultrafast_secp256k1_ec_privkey_tweak_mul(result, tweak);
             if (rc != 0) throw new InvalidOperationException("Tweak mul produced invalid key");
             return result;
         }
@@ -276,7 +276,7 @@ namespace UltrafastSecp256k1
             Check(msgHash, 32, nameof(msgHash));
             Check(privkey, 32, nameof(privkey));
             byte[] sig = new byte[64];
-            int rc = Native.secp256k1_ecdsa_sign(msgHash, privkey, sig);
+            int rc = Native.ultrafast_secp256k1_ecdsa_sign(msgHash, privkey, sig);
             if (rc != 0) throw new InvalidOperationException("ECDSA signing failed");
             return sig;
         }
@@ -288,7 +288,7 @@ namespace UltrafastSecp256k1
             Check(msgHash, 32, nameof(msgHash));
             Check(sig, 64, nameof(sig));
             Check(pubkey, 33, nameof(pubkey));
-            return Native.secp256k1_ecdsa_verify(msgHash, sig, pubkey) == 1;
+            return Native.ultrafast_secp256k1_ecdsa_verify(msgHash, sig, pubkey) == 1;
         }
 
         /// <summary>Serialize compact signature to DER format.</summary>
@@ -298,7 +298,7 @@ namespace UltrafastSecp256k1
             Check(sig, 64, nameof(sig));
             byte[] der = new byte[72];
             UIntPtr len = (UIntPtr)72;
-            int rc = Native.secp256k1_ecdsa_signature_serialize_der(sig, der, ref len);
+            int rc = Native.ultrafast_secp256k1_ecdsa_signature_serialize_der(sig, der, ref len);
             if (rc != 0) throw new InvalidOperationException("DER serialization failed");
             byte[] result = new byte[(int)len];
             Array.Copy(der, result, (int)len);
@@ -315,7 +315,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             byte[] sig = new byte[64];
             int recid = 0;
-            int rc = Native.secp256k1_ecdsa_sign_recoverable(msgHash, privkey, sig, ref recid);
+            int rc = Native.ultrafast_secp256k1_ecdsa_sign_recoverable(msgHash, privkey, sig, ref recid);
             if (rc != 0) throw new InvalidOperationException("Recoverable signing failed");
             return (sig, recid);
         }
@@ -327,7 +327,7 @@ namespace UltrafastSecp256k1
             Check(msgHash, 32, nameof(msgHash));
             Check(sig, 64, nameof(sig));
             byte[] pubkey = new byte[33];
-            int rc = Native.secp256k1_ecdsa_recover(msgHash, sig, recid, pubkey);
+            int rc = Native.ultrafast_secp256k1_ecdsa_recover(msgHash, sig, recid, pubkey);
             if (rc != 0) throw new InvalidOperationException("Recovery failed");
             return pubkey;
         }
@@ -342,7 +342,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             Check(auxRand, 32, nameof(auxRand));
             byte[] sig = new byte[64];
-            int rc = Native.secp256k1_schnorr_sign(msg, privkey, auxRand, sig);
+            int rc = Native.ultrafast_secp256k1_schnorr_sign(msg, privkey, auxRand, sig);
             if (rc != 0) throw new InvalidOperationException("Schnorr signing failed");
             return sig;
         }
@@ -354,7 +354,7 @@ namespace UltrafastSecp256k1
             Check(msg, 32, nameof(msg));
             Check(sig, 64, nameof(sig));
             Check(pubkeyX, 32, nameof(pubkeyX));
-            return Native.secp256k1_schnorr_verify(msg, sig, pubkeyX) == 1;
+            return Native.ultrafast_secp256k1_schnorr_verify(msg, sig, pubkeyX) == 1;
         }
 
         /// <summary>Get x-only public key (32 bytes) for Schnorr.</summary>
@@ -363,7 +363,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(privkey, 32, nameof(privkey));
             byte[] pubkeyX = new byte[32];
-            int rc = Native.secp256k1_schnorr_pubkey(privkey, pubkeyX);
+            int rc = Native.ultrafast_secp256k1_schnorr_pubkey(privkey, pubkeyX);
             if (rc != 0) throw new ArgumentException("Invalid private key");
             return pubkeyX;
         }
@@ -377,7 +377,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             Check(pubkey, 33, nameof(pubkey));
             byte[] secret = new byte[32];
-            int rc = Native.secp256k1_ecdh(privkey, pubkey, secret);
+            int rc = Native.ultrafast_secp256k1_ecdh(privkey, pubkey, secret);
             if (rc != 0) throw new InvalidOperationException("ECDH failed");
             return secret;
         }
@@ -389,7 +389,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             Check(pubkey, 33, nameof(pubkey));
             byte[] secret = new byte[32];
-            int rc = Native.secp256k1_ecdh_xonly(privkey, pubkey, secret);
+            int rc = Native.ultrafast_secp256k1_ecdh_xonly(privkey, pubkey, secret);
             if (rc != 0) throw new InvalidOperationException("ECDH xonly failed");
             return secret;
         }
@@ -401,7 +401,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             Check(pubkey, 33, nameof(pubkey));
             byte[] secret = new byte[32];
-            int rc = Native.secp256k1_ecdh_raw(privkey, pubkey, secret);
+            int rc = Native.ultrafast_secp256k1_ecdh_raw(privkey, pubkey, secret);
             if (rc != 0) throw new InvalidOperationException("ECDH raw failed");
             return secret;
         }
@@ -413,7 +413,7 @@ namespace UltrafastSecp256k1
         {
             Init();
             byte[] digest = new byte[32];
-            Native.secp256k1_sha256(data, (UIntPtr)data.Length, digest);
+            Native.ultrafast_secp256k1_sha256(data, (UIntPtr)data.Length, digest);
             return digest;
         }
 
@@ -422,7 +422,7 @@ namespace UltrafastSecp256k1
         {
             Init();
             byte[] digest = new byte[20];
-            Native.secp256k1_hash160(data, (UIntPtr)data.Length, digest);
+            Native.ultrafast_secp256k1_hash160(data, (UIntPtr)data.Length, digest);
             return digest;
         }
 
@@ -432,7 +432,7 @@ namespace UltrafastSecp256k1
             Init();
             byte[] tagBytes = Encoding.UTF8.GetBytes(tag + '\0');
             byte[] digest = new byte[32];
-            Native.secp256k1_tagged_hash(tagBytes, data, (UIntPtr)data.Length, digest);
+            Native.ultrafast_secp256k1_tagged_hash(tagBytes, data, (UIntPtr)data.Length, digest);
             return digest;
         }
 
@@ -445,7 +445,7 @@ namespace UltrafastSecp256k1
             Check(pubkey, 33, nameof(pubkey));
             byte[] buf = new byte[128];
             UIntPtr len = (UIntPtr)128;
-            int rc = Native.secp256k1_address_p2pkh(pubkey, (int)network, buf, ref len);
+            int rc = Native.ultrafast_secp256k1_address_p2pkh(pubkey, (int)network, buf, ref len);
             if (rc != 0) throw new InvalidOperationException("P2PKH address generation failed");
             return Encoding.ASCII.GetString(buf, 0, (int)len);
         }
@@ -457,7 +457,7 @@ namespace UltrafastSecp256k1
             Check(pubkey, 33, nameof(pubkey));
             byte[] buf = new byte[128];
             UIntPtr len = (UIntPtr)128;
-            int rc = Native.secp256k1_address_p2wpkh(pubkey, (int)network, buf, ref len);
+            int rc = Native.ultrafast_secp256k1_address_p2wpkh(pubkey, (int)network, buf, ref len);
             if (rc != 0) throw new InvalidOperationException("P2WPKH address generation failed");
             return Encoding.ASCII.GetString(buf, 0, (int)len);
         }
@@ -469,7 +469,7 @@ namespace UltrafastSecp256k1
             Check(internalKeyX, 32, nameof(internalKeyX));
             byte[] buf = new byte[128];
             UIntPtr len = (UIntPtr)128;
-            int rc = Native.secp256k1_address_p2tr(internalKeyX, (int)network, buf, ref len);
+            int rc = Native.ultrafast_secp256k1_address_p2tr(internalKeyX, (int)network, buf, ref len);
             if (rc != 0) throw new InvalidOperationException("P2TR address generation failed");
             return Encoding.ASCII.GetString(buf, 0, (int)len);
         }
@@ -483,7 +483,7 @@ namespace UltrafastSecp256k1
             Check(privkey, 32, nameof(privkey));
             byte[] buf = new byte[128];
             UIntPtr len = (UIntPtr)128;
-            int rc = Native.secp256k1_wif_encode(privkey, compressed ? 1 : 0, (int)network, buf, ref len);
+            int rc = Native.ultrafast_secp256k1_wif_encode(privkey, compressed ? 1 : 0, (int)network, buf, ref len);
             if (rc != 0) throw new InvalidOperationException("WIF encoding failed");
             return Encoding.ASCII.GetString(buf, 0, (int)len);
         }
@@ -496,7 +496,7 @@ namespace UltrafastSecp256k1
             byte[] privkey = new byte[32];
             int compressed = 0;
             int network = 0;
-            int rc = Native.secp256k1_wif_decode(wifBytes, privkey, ref compressed, ref network);
+            int rc = Native.ultrafast_secp256k1_wif_decode(wifBytes, privkey, ref compressed, ref network);
             if (rc != 0) throw new ArgumentException("Invalid WIF string");
             return (privkey, compressed == 1, (Network)network);
         }
@@ -510,7 +510,7 @@ namespace UltrafastSecp256k1
             if (seed.Length < 16 || seed.Length > 64)
                 throw new ArgumentException("Seed must be 16-64 bytes");
             byte[] key = new byte[79];
-            int rc = Native.secp256k1_bip32_master_key(seed, (UIntPtr)seed.Length, key);
+            int rc = Native.ultrafast_secp256k1_bip32_master_key(seed, (UIntPtr)seed.Length, key);
             if (rc != 0) throw new InvalidOperationException("Master key generation failed");
             return key;
         }
@@ -522,7 +522,7 @@ namespace UltrafastSecp256k1
             Check(masterKey, 79, nameof(masterKey));
             byte[] pathBytes = Encoding.ASCII.GetBytes(path + '\0');
             byte[] key = new byte[79];
-            int rc = Native.secp256k1_bip32_derive_path(masterKey, pathBytes, key);
+            int rc = Native.ultrafast_secp256k1_bip32_derive_path(masterKey, pathBytes, key);
             if (rc != 0) throw new InvalidOperationException($"Path derivation failed: {path}");
             return key;
         }
@@ -533,7 +533,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(key, 79, nameof(key));
             byte[] privkey = new byte[32];
-            int rc = Native.secp256k1_bip32_get_privkey(key, privkey);
+            int rc = Native.ultrafast_secp256k1_bip32_get_privkey(key, privkey);
             if (rc != 0) throw new InvalidOperationException("Key is not a private key");
             return privkey;
         }
@@ -544,7 +544,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(key, 79, nameof(key));
             byte[] pubkey = new byte[33];
-            int rc = Native.secp256k1_bip32_get_pubkey(key, pubkey);
+            int rc = Native.ultrafast_secp256k1_bip32_get_pubkey(key, pubkey);
             if (rc != 0) throw new InvalidOperationException("Public key extraction failed");
             return pubkey;
         }
@@ -558,7 +558,7 @@ namespace UltrafastSecp256k1
             Check(internalKeyX, 32, nameof(internalKeyX));
             byte[] outputKeyX = new byte[32];
             int parity = 0;
-            int rc = Native.secp256k1_taproot_output_key(internalKeyX, merkleRoot, outputKeyX, ref parity);
+            int rc = Native.ultrafast_secp256k1_taproot_output_key(internalKeyX, merkleRoot, outputKeyX, ref parity);
             if (rc != 0) throw new InvalidOperationException("Taproot output key derivation failed");
             return (outputKeyX, parity);
         }
@@ -569,7 +569,7 @@ namespace UltrafastSecp256k1
             Init();
             Check(privkey, 32, nameof(privkey));
             byte[] tweaked = new byte[32];
-            int rc = Native.secp256k1_taproot_tweak_privkey(privkey, merkleRoot, tweaked);
+            int rc = Native.ultrafast_secp256k1_taproot_tweak_privkey(privkey, merkleRoot, tweaked);
             if (rc != 0) throw new InvalidOperationException("Taproot privkey tweaking failed");
             return tweaked;
         }
@@ -582,7 +582,7 @@ namespace UltrafastSecp256k1
             Check(outputKeyX, 32, nameof(outputKeyX));
             Check(internalKeyX, 32, nameof(internalKeyX));
             UIntPtr mrLen = merkleRoot != null ? (UIntPtr)merkleRoot.Length : UIntPtr.Zero;
-            return Native.secp256k1_taproot_verify_commitment(outputKeyX, outputKeyParity,
+            return Native.ultrafast_secp256k1_taproot_verify_commitment(outputKeyX, outputKeyParity,
                 internalKeyX, merkleRoot, mrLen) == 1;
         }
 

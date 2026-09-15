@@ -53,7 +53,7 @@ var (
 
 // Init initialises the library (selftest). Must be called once before use.
 func Init() error {
-	if rc := C.secp256k1_init(); rc != 0 {
+	if rc := C.ultrafast_secp256k1_init(); rc != 0 {
 		return ErrInitFailed
 	}
 	return nil
@@ -61,7 +61,7 @@ func Init() error {
 
 // Version returns the library version string.
 func Version() string {
-	return C.GoString(C.secp256k1_version())
+	return C.GoString(C.ultrafast_secp256k1_version())
 }
 
 // ── Key Operations ───────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ func Version() string {
 // PubkeyCreate computes a compressed (33-byte) public key from a 32-byte private key.
 func PubkeyCreate(privkey [32]byte) ([33]byte, error) {
 	var out [33]byte
-	rc := C.secp256k1_ec_pubkey_create(
+	rc := C.ultrafast_secp256k1_ec_pubkey_create(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
 	)
@@ -82,7 +82,7 @@ func PubkeyCreate(privkey [32]byte) ([33]byte, error) {
 // PubkeyCreateUncompressed computes an uncompressed (65-byte) public key.
 func PubkeyCreateUncompressed(privkey [32]byte) ([65]byte, error) {
 	var out [65]byte
-	rc := C.secp256k1_ec_pubkey_create_uncompressed(
+	rc := C.ultrafast_secp256k1_ec_pubkey_create_uncompressed(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
 	)
@@ -99,7 +99,7 @@ func PubkeyParse(input []byte) ([33]byte, error) {
 		return [33]byte{}, fmt.Errorf("secp256k1: pubkey must be 33 or 65 bytes, got %d", len(input))
 	}
 	var out [33]byte
-	rc := C.secp256k1_ec_pubkey_parse(
+	rc := C.ultrafast_secp256k1_ec_pubkey_parse(
 		(*C.uint8_t)(unsafe.Pointer(&input[0])),
 		C.size_t(len(input)),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
@@ -112,21 +112,21 @@ func PubkeyParse(input []byte) ([33]byte, error) {
 
 // SeckeyVerify checks whether a private key is valid.
 func SeckeyVerify(privkey [32]byte) bool {
-	rc := C.secp256k1_ec_seckey_verify((*C.uint8_t)(unsafe.Pointer(&privkey[0])))
+	rc := C.ultrafast_secp256k1_ec_seckey_verify((*C.uint8_t)(unsafe.Pointer(&privkey[0])))
 	return rc == 1
 }
 
 // PrivkeyNegate negates a private key (mod n).
 func PrivkeyNegate(privkey [32]byte) [32]byte {
 	out := privkey
-	C.secp256k1_ec_privkey_negate((*C.uint8_t)(unsafe.Pointer(&out[0])))
+	C.ultrafast_secp256k1_ec_privkey_negate((*C.uint8_t)(unsafe.Pointer(&out[0])))
 	return out
 }
 
 // PrivkeyTweakAdd adds a tweak to a private key: key = (key + tweak) mod n.
 func PrivkeyTweakAdd(privkey, tweak [32]byte) ([32]byte, error) {
 	out := privkey
-	rc := C.secp256k1_ec_privkey_tweak_add(
+	rc := C.ultrafast_secp256k1_ec_privkey_tweak_add(
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
 		(*C.uint8_t)(unsafe.Pointer(&tweak[0])),
 	)
@@ -139,7 +139,7 @@ func PrivkeyTweakAdd(privkey, tweak [32]byte) ([32]byte, error) {
 // PrivkeyTweakMul multiplies a private key by a tweak: key = (key * tweak) mod n.
 func PrivkeyTweakMul(privkey, tweak [32]byte) ([32]byte, error) {
 	out := privkey
-	rc := C.secp256k1_ec_privkey_tweak_mul(
+	rc := C.ultrafast_secp256k1_ec_privkey_tweak_mul(
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
 		(*C.uint8_t)(unsafe.Pointer(&tweak[0])),
 	)
@@ -154,7 +154,7 @@ func PrivkeyTweakMul(privkey, tweak [32]byte) ([32]byte, error) {
 // EcdsaSign signs a 32-byte hash with ECDSA (RFC 6979). Returns 64-byte compact sig.
 func EcdsaSign(msgHash, privkey [32]byte) ([64]byte, error) {
 	var sig [64]byte
-	rc := C.secp256k1_ecdsa_sign(
+	rc := C.ultrafast_secp256k1_ecdsa_sign(
 		(*C.uint8_t)(unsafe.Pointer(&msgHash[0])),
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&sig[0])),
@@ -167,7 +167,7 @@ func EcdsaSign(msgHash, privkey [32]byte) ([64]byte, error) {
 
 // EcdsaVerify verifies an ECDSA signature.
 func EcdsaVerify(msgHash [32]byte, sig [64]byte, pubkey [33]byte) bool {
-	rc := C.secp256k1_ecdsa_verify(
+	rc := C.ultrafast_secp256k1_ecdsa_verify(
 		(*C.uint8_t)(unsafe.Pointer(&msgHash[0])),
 		(*C.uint8_t)(unsafe.Pointer(&sig[0])),
 		(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
@@ -179,7 +179,7 @@ func EcdsaVerify(msgHash [32]byte, sig [64]byte, pubkey [33]byte) bool {
 func EcdsaSerializeDER(sig [64]byte) ([]byte, error) {
 	var der [72]byte
 	derLen := C.size_t(72)
-	rc := C.secp256k1_ecdsa_signature_serialize_der(
+	rc := C.ultrafast_secp256k1_ecdsa_signature_serialize_der(
 		(*C.uint8_t)(unsafe.Pointer(&sig[0])),
 		(*C.uint8_t)(unsafe.Pointer(&der[0])),
 		&derLen,
@@ -195,7 +195,7 @@ func EcdsaSerializeDER(sig [64]byte) ([]byte, error) {
 // EcdsaSignRecoverable signs with a recovery id.
 func EcdsaSignRecoverable(msgHash, privkey [32]byte) (sig [64]byte, recid int, err error) {
 	var cRecid C.int
-	rc := C.secp256k1_ecdsa_sign_recoverable(
+	rc := C.ultrafast_secp256k1_ecdsa_sign_recoverable(
 		(*C.uint8_t)(unsafe.Pointer(&msgHash[0])),
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&sig[0])),
@@ -210,7 +210,7 @@ func EcdsaSignRecoverable(msgHash, privkey [32]byte) (sig [64]byte, recid int, e
 // EcdsaRecover recovers a compressed public key from a recoverable signature.
 func EcdsaRecover(msgHash [32]byte, sig [64]byte, recid int) ([33]byte, error) {
 	var pubkey [33]byte
-	rc := C.secp256k1_ecdsa_recover(
+	rc := C.ultrafast_secp256k1_ecdsa_recover(
 		(*C.uint8_t)(unsafe.Pointer(&msgHash[0])),
 		(*C.uint8_t)(unsafe.Pointer(&sig[0])),
 		C.int(recid),
@@ -227,7 +227,7 @@ func EcdsaRecover(msgHash [32]byte, sig [64]byte, recid int) ([33]byte, error) {
 // SchnorrSign creates a BIP-340 Schnorr signature (64 bytes).
 func SchnorrSign(msg, privkey, auxRand [32]byte) ([64]byte, error) {
 	var sig [64]byte
-	rc := C.secp256k1_schnorr_sign(
+	rc := C.ultrafast_secp256k1_schnorr_sign(
 		(*C.uint8_t)(unsafe.Pointer(&msg[0])),
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&auxRand[0])),
@@ -241,7 +241,7 @@ func SchnorrSign(msg, privkey, auxRand [32]byte) ([64]byte, error) {
 
 // SchnorrVerify verifies a BIP-340 Schnorr signature.
 func SchnorrVerify(msg [32]byte, sig [64]byte, pubkeyX [32]byte) bool {
-	rc := C.secp256k1_schnorr_verify(
+	rc := C.ultrafast_secp256k1_schnorr_verify(
 		(*C.uint8_t)(unsafe.Pointer(&msg[0])),
 		(*C.uint8_t)(unsafe.Pointer(&sig[0])),
 		(*C.uint8_t)(unsafe.Pointer(&pubkeyX[0])),
@@ -252,7 +252,7 @@ func SchnorrVerify(msg [32]byte, sig [64]byte, pubkeyX [32]byte) bool {
 // SchnorrPubkey returns the 32-byte x-only public key for Schnorr.
 func SchnorrPubkey(privkey [32]byte) ([32]byte, error) {
 	var out [32]byte
-	rc := C.secp256k1_schnorr_pubkey(
+	rc := C.ultrafast_secp256k1_schnorr_pubkey(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
 	)
@@ -267,7 +267,7 @@ func SchnorrPubkey(privkey [32]byte) ([32]byte, error) {
 // ECDH computes a shared secret: SHA256(compressed_shared_point).
 func ECDH(privkey [32]byte, pubkey [33]byte) ([32]byte, error) {
 	var out [32]byte
-	rc := C.secp256k1_ecdh(
+	rc := C.ultrafast_secp256k1_ecdh(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
@@ -281,7 +281,7 @@ func ECDH(privkey [32]byte, pubkey [33]byte) ([32]byte, error) {
 // ECDHXonly computes a shared secret from x-coordinate only.
 func ECDHXonly(privkey [32]byte, pubkey [33]byte) ([32]byte, error) {
 	var out [32]byte
-	rc := C.secp256k1_ecdh_xonly(
+	rc := C.ultrafast_secp256k1_ecdh_xonly(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
@@ -295,7 +295,7 @@ func ECDHXonly(privkey [32]byte, pubkey [33]byte) ([32]byte, error) {
 // ECDHRaw returns the raw x-coordinate of the shared point.
 func ECDHRaw(privkey [32]byte, pubkey [33]byte) ([32]byte, error) {
 	var out [32]byte
-	rc := C.secp256k1_ecdh_raw(
+	rc := C.ultrafast_secp256k1_ecdh_raw(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
@@ -315,7 +315,7 @@ func SHA256(data []byte) [32]byte {
 	if len(data) > 0 {
 		p = (*C.uint8_t)(unsafe.Pointer(&data[0]))
 	}
-	C.secp256k1_sha256(p, C.size_t(len(data)), (*C.uint8_t)(unsafe.Pointer(&out[0])))
+	C.ultrafast_secp256k1_sha256(p, C.size_t(len(data)), (*C.uint8_t)(unsafe.Pointer(&out[0])))
 	return out
 }
 
@@ -326,7 +326,7 @@ func Hash160(data []byte) [20]byte {
 	if len(data) > 0 {
 		p = (*C.uint8_t)(unsafe.Pointer(&data[0]))
 	}
-	C.secp256k1_hash160(p, C.size_t(len(data)), (*C.uint8_t)(unsafe.Pointer(&out[0])))
+	C.ultrafast_secp256k1_hash160(p, C.size_t(len(data)), (*C.uint8_t)(unsafe.Pointer(&out[0])))
 	return out
 }
 
@@ -339,7 +339,7 @@ func TaggedHash(tag string, data []byte) [32]byte {
 	if len(data) > 0 {
 		p = (*C.uint8_t)(unsafe.Pointer(&data[0]))
 	}
-	C.secp256k1_tagged_hash(cTag, p, C.size_t(len(data)), (*C.uint8_t)(unsafe.Pointer(&out[0])))
+	C.ultrafast_secp256k1_tagged_hash(cTag, p, C.size_t(len(data)), (*C.uint8_t)(unsafe.Pointer(&out[0])))
 	return out
 }
 
@@ -358,7 +358,7 @@ func getAddress(fn func(buf *C.char, bufLen *C.size_t) C.int) (string, error) {
 // AddressP2PKH generates a P2PKH address from a compressed public key.
 func AddressP2PKH(pubkey [33]byte, net Network) (string, error) {
 	return getAddress(func(buf *C.char, bufLen *C.size_t) C.int {
-		return C.secp256k1_address_p2pkh(
+		return C.ultrafast_secp256k1_address_p2pkh(
 			(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
 			C.int(net), buf, bufLen,
 		)
@@ -368,7 +368,7 @@ func AddressP2PKH(pubkey [33]byte, net Network) (string, error) {
 // AddressP2WPKH generates a P2WPKH (SegWit v0) address.
 func AddressP2WPKH(pubkey [33]byte, net Network) (string, error) {
 	return getAddress(func(buf *C.char, bufLen *C.size_t) C.int {
-		return C.secp256k1_address_p2wpkh(
+		return C.ultrafast_secp256k1_address_p2wpkh(
 			(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
 			C.int(net), buf, bufLen,
 		)
@@ -378,7 +378,7 @@ func AddressP2WPKH(pubkey [33]byte, net Network) (string, error) {
 // AddressP2TR generates a P2TR (Taproot) address from an x-only key.
 func AddressP2TR(internalKeyX [32]byte, net Network) (string, error) {
 	return getAddress(func(buf *C.char, bufLen *C.size_t) C.int {
-		return C.secp256k1_address_p2tr(
+		return C.ultrafast_secp256k1_address_p2tr(
 			(*C.uint8_t)(unsafe.Pointer(&internalKeyX[0])),
 			C.int(net), buf, bufLen,
 		)
@@ -394,7 +394,7 @@ func WIFEncode(privkey [32]byte, compressed bool, net Network) (string, error) {
 		comp = 1
 	}
 	return getAddress(func(buf *C.char, bufLen *C.size_t) C.int {
-		return C.secp256k1_wif_encode(
+		return C.ultrafast_secp256k1_wif_encode(
 			(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 			comp, C.int(net), buf, bufLen,
 		)
@@ -414,7 +414,7 @@ func WIFDecode(wif string) (WIFDecodeResult, error) {
 	defer C.free(unsafe.Pointer(cWIF))
 	var result WIFDecodeResult
 	var comp, net C.int
-	rc := C.secp256k1_wif_decode(
+	rc := C.ultrafast_secp256k1_wif_decode(
 		cWIF,
 		(*C.uint8_t)(unsafe.Pointer(&result.Privkey[0])),
 		&comp, &net,
@@ -438,7 +438,7 @@ func BIP32MasterKey(seed []byte) (BIP32Key, error) {
 		return BIP32Key{}, fmt.Errorf("secp256k1: seed must be 16-64 bytes, got %d", len(seed))
 	}
 	var key BIP32Key
-	rc := C.secp256k1_bip32_master_key(
+	rc := C.ultrafast_secp256k1_bip32_master_key(
 		(*C.uint8_t)(unsafe.Pointer(&seed[0])),
 		C.size_t(len(seed)),
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&key[0])),
@@ -452,7 +452,7 @@ func BIP32MasterKey(seed []byte) (BIP32Key, error) {
 // BIP32DeriveChild derives a child key by index.
 func BIP32DeriveChild(parent BIP32Key, index uint32) (BIP32Key, error) {
 	var child BIP32Key
-	rc := C.secp256k1_bip32_derive_child(
+	rc := C.ultrafast_secp256k1_bip32_derive_child(
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&parent[0])),
 		C.uint32_t(index),
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&child[0])),
@@ -468,7 +468,7 @@ func BIP32DerivePath(master BIP32Key, path string) (BIP32Key, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 	var key BIP32Key
-	rc := C.secp256k1_bip32_derive_path(
+	rc := C.ultrafast_secp256k1_bip32_derive_path(
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&master[0])),
 		cPath,
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&key[0])),
@@ -482,7 +482,7 @@ func BIP32DerivePath(master BIP32Key, path string) (BIP32Key, error) {
 // BIP32GetPrivkey extracts the 32-byte private key from an extended key.
 func BIP32GetPrivkey(key BIP32Key) ([32]byte, error) {
 	var privkey [32]byte
-	rc := C.secp256k1_bip32_get_privkey(
+	rc := C.ultrafast_secp256k1_bip32_get_privkey(
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&key[0])),
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 	)
@@ -495,7 +495,7 @@ func BIP32GetPrivkey(key BIP32Key) ([32]byte, error) {
 // BIP32GetPubkey extracts the compressed 33-byte public key from an extended key.
 func BIP32GetPubkey(key BIP32Key) ([33]byte, error) {
 	var pubkey [33]byte
-	rc := C.secp256k1_bip32_get_pubkey(
+	rc := C.ultrafast_secp256k1_bip32_get_pubkey(
 		(*C.secp256k1_bip32_key)(unsafe.Pointer(&key[0])),
 		(*C.uint8_t)(unsafe.Pointer(&pubkey[0])),
 	)
@@ -515,7 +515,7 @@ func TaprootOutputKey(internalKeyX [32]byte, merkleRoot *[32]byte) (outputKeyX [
 		mr = (*C.uint8_t)(unsafe.Pointer(&merkleRoot[0]))
 	}
 	var cParity C.int
-	rc := C.secp256k1_taproot_output_key(
+	rc := C.ultrafast_secp256k1_taproot_output_key(
 		(*C.uint8_t)(unsafe.Pointer(&internalKeyX[0])),
 		mr,
 		(*C.uint8_t)(unsafe.Pointer(&outputKeyX[0])),
@@ -534,7 +534,7 @@ func TaprootTweakPrivkey(privkey [32]byte, merkleRoot *[32]byte) ([32]byte, erro
 		mr = (*C.uint8_t)(unsafe.Pointer(&merkleRoot[0]))
 	}
 	var out [32]byte
-	rc := C.secp256k1_taproot_tweak_privkey(
+	rc := C.ultrafast_secp256k1_taproot_tweak_privkey(
 		(*C.uint8_t)(unsafe.Pointer(&privkey[0])),
 		mr,
 		(*C.uint8_t)(unsafe.Pointer(&out[0])),
@@ -552,7 +552,7 @@ func TaprootVerifyCommitment(outputKeyX [32]byte, outputKeyParity int, internalK
 	if len(merkleRoot) > 0 {
 		mr = (*C.uint8_t)(unsafe.Pointer(&merkleRoot[0]))
 	}
-	rc := C.secp256k1_taproot_verify_commitment(
+	rc := C.ultrafast_secp256k1_taproot_verify_commitment(
 		(*C.uint8_t)(unsafe.Pointer(&outputKeyX[0])),
 		C.int(outputKeyParity),
 		(*C.uint8_t)(unsafe.Pointer(&internalKeyX[0])),

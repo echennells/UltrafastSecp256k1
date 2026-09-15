@@ -1,5 +1,56 @@
 # Audit Changelog
 
+## 2026-09-15 - the legacy C API was squatting libsecp256k1's namespace
+
+`bindings/c_api` exported 36 functions named `secp256k1_*` and its `exports.map`
+published that whole prefix from the shared library. Eleven of the 36 are also
+defined by the bundled libsecp256k1 shim, with incompatible signatures:
+
+    ultrafast_secp256k1_ecdsa_sign(msg_hash, privkey, sig_out)     <- ours
+    secp256k1_ecdsa_sign(ctx, sig, msg32, seckey, noncefp, ndata)  <- libsecp
+
+The eleven: `ec_pubkey_create`, `ec_pubkey_parse`, `ec_seckey_verify`, `ecdh`,
+`ecdsa_recover`, `ecdsa_sign`, `ecdsa_sign_recoverable`,
+`ecdsa_signature_serialize_der`, `ecdsa_verify`, `schnorr_sign`, `schnorr_verify`.
+Statically, linking both objects is a duplicate-symbol error. Dynamically,
+resolving to the wrong one passes a `secp256k1_context*` where a 32-byte private
+key is expected, and the reverse.
+
+This was not hypothetical and not newly discovered by reading: `audit/CMakeLists.txt`
+already carried a comment warning that pulling real shim sources into
+`unified_audit_runner` "multiply-defines secp256k1_ecdsa_* against the legacy c_api
+bindings", and yesterday's `regression_bch_schnorr_spec` had to be registered
+advisory=true with an ADVISORY_SKIP_CODE stub for exactly this reason.
+
+Renamed to `ultrafast_secp256k1_*`; export macro `ULTRAFAST_SECP256K1_API`;
+`exports.map` publishes only the new prefix. Verified on the built library with
+`nm -D --defined-only`: **36 `ultrafast_secp256k1_*`, 0 `secp256k1_*`**.
+
+All eleven language bindings were updated in the same commit -- Python, Ruby, C#,
+Node, PHP, Swift, Rust (sys and safe), Dart, Go, Java JNI, React Native -- and each
+was re-verified symbol by symbol against the built `.so`: every name a binding
+looks up is exported, and no old name survives anywhere. Several of these resolve
+by string at runtime, so a missed rename would have failed only on first call.
+
+Two files that *look* like consumers were deliberately left alone, because their
+`secp256k1_*` names are genuinely libsecp256k1's: `bindings/android/test/libsecp_bench.c`
+(which `#include`s `secp256k1.c` and benchmarks upstream directly) and the
+`<secp256k1_ecdh.h>` header reference in `bindings/nuget-native/README.md`. Both
+were caught and reverted after a first over-broad pass.
+
+The regression test is the build itself. `regression_bch_schnorr_spec` and
+`shim_schnorr_bch.cpp` are compiled into `unified_audit_runner` now; if a
+`secp256k1_*` name returns to the c_api, that link fails in CI. The module is
+blocking rather than advisory, the advisory ceiling returns 62 -> 61, and Standard
+Test Vectors moves 10/10 -> 11/11 (runner total 429/476, ALL PASSED).
+
+The shim include directories are attached to those two sources with
+`set_source_files_properties(... TARGET_DIRECTORY ...)` rather than to the target:
+several audit modules gate their body on `__has_include("secp256k1.h")` and rely on
+`shim_run_stubs_unified.cpp` for the symbol otherwise, so a target-wide include path
+flips those guards on and multiply-defines them against their own stubs. That was
+observed, not predicted.
+
 ## 2026-09-14 - BCH 2019 Schnorr shim violated the spec it is named after, and nothing ran it
 
 `compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp` implements the Bitcoin

@@ -2,6 +2,31 @@
 
 **Last updated**: 2026-09-10 | **Version**: 4.5.0
 
+### 2026-09-15 - legacy c_api rename: no lifecycle change, one secret-handling hazard removed
+
+The 36 `bindings/c_api` functions are `ultrafast_secp256k1_*` now. The gate-watched
+surface touched is `CHANGELOG.md`; this answers the classification rather than
+waiving it.
+
+**Zeroization verdict: unchanged.** No `secure_erase` call site is added, removed or
+moved, no buffer lifetime changes, and no function body was edited.
+
+**One secret-handling hazard is removed.** Eleven of the 36 names were also defined
+by the bundled libsecp256k1 shim with a different argument order, and several take a
+private key:
+
+    ultrafast_secp256k1_ec_seckey_verify(privkey32)          <- ours
+    secp256k1_ec_seckey_verify(ctx, seckey32)                <- libsecp
+    ultrafast_secp256k1_ecdsa_sign(msg_hash, privkey, out)   <- ours
+    secp256k1_ecdsa_sign(ctx, sig, msg32, seckey, fp, nd)    <- libsecp
+
+A dynamic resolution landing on the wrong one shifts every argument by one position,
+so a `secp256k1_context*` is read as a 32-byte private key -- 32 bytes of unrelated
+process memory treated as key material and, on the signing paths, fed to a scalar
+parse and a generator multiply. The reverse dereferences a private-key pointer as a
+context. Renaming the surface removes the possibility instead of documenting around
+it. See [`SECURITY_CLAIMS.md`](SECURITY_CLAIMS.md) under the same date.
+
 ### 2026-09-14 - BCH Schnorr nonce was shared with ECDSA: a nonce-lifetime defect, now domain-separated
 
 `compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp` derived its nonce with

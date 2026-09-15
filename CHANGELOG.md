@@ -44,6 +44,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on-device `{0, n-1, n, 2^256-1, s+n}` boundary-scalar differential that
   self-skips without a GPU.
 
+### Changed
+
+- **BREAKING (legacy C API):** the 36 functions in `bindings/c_api` are
+  `ultrafast_secp256k1_*` now, not `secp256k1_*`. That prefix is libsecp256k1's C
+  namespace and this library had no business occupying it. Eleven of the 36 were
+  defined by **both** this surface and the bundled libsecp256k1 shim, with
+  incompatible signatures:
+
+      ultrafast_secp256k1_ecdsa_sign(msg_hash, privkey, sig_out)     <- ours
+      secp256k1_ecdsa_sign(ctx, sig, msg32, seckey, noncefp, ndata)  <- libsecp
+
+  `secp256k1_ec_pubkey_create`, `_ec_pubkey_parse`, `_ec_seckey_verify`, `_ecdh`,
+  `_ecdsa_recover`, `_ecdsa_sign`, `_ecdsa_sign_recoverable`,
+  `_ecdsa_signature_serialize_der`, `_ecdsa_verify`, `_schnorr_sign` and
+  `_schnorr_verify` were the eleven. Linking both objects was a duplicate-symbol
+  error; a dynamic resolution landing on the wrong one would have read a context
+  pointer as a private key. `exports.map` made it worse by exporting
+  `secp256k1_*` wholesale from the shared library.
+
+  The shared library now exports 36 `ultrafast_secp256k1_*` symbols and **zero**
+  `secp256k1_*` symbols (`nm -D --defined-only`). All eleven language bindings --
+  Python, Ruby, C#, Node, PHP, Swift, Rust (sys + safe), Dart, Go, Java JNI and
+  React Native -- were updated in the same commit and re-verified symbol by symbol
+  against the built library: every name each binding looks up exists, and no old
+  name remains. The export macro is `ULTRAFAST_SECP256K1_API`.
+
+  Migration is a mechanical rename, `secp256k1_foo` -> `ultrafast_secp256k1_foo`.
+  No compatibility aliases: an alias would reintroduce the collision it exists to
+  remove, and a header `#define` of `secp256k1_ecdsa_sign` in a translation unit
+  that also includes real libsecp256k1 would be worse than the original defect.
+
+  The immediate payoff is that `regression_bch_schnorr_spec` -- which could not be
+  linked into `unified_audit_runner` yesterday because of this exact collision --
+  is now a blocking module there, so the advisory ceiling returns 62 -> 61 and
+  Standard Test Vectors goes 10/10 -> 11/11.
+
 ### Fixed
 
 - The Bitcoin Cash 2019 Schnorr shim (`secp256k1_schnorr_sign` /

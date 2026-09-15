@@ -22,7 +22,7 @@ public final class Secp256k1 {
         if (loaded) return;
         System.loadLibrary("ultrafast_secp256k1_jni");
         int rc = nativeInit();
-        if (rc != 0) throw new RuntimeException("secp256k1_init() selftest failed");
+        if (rc != 0) throw new RuntimeException("ultrafast_secp256k1_init() selftest failed");
         loaded = true;
     }
 
@@ -40,7 +40,7 @@ public final class Secp256k1 {
         }
         System.load(dir + java.io.File.separator + name);
         int rc = nativeInit();
-        if (rc != 0) throw new RuntimeException("secp256k1_init() selftest failed");
+        if (rc != 0) throw new RuntimeException("ultrafast_secp256k1_init() selftest failed");
         loaded = true;
     }
 

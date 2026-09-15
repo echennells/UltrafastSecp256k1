@@ -1,4 +1,4 @@
 {
-    global: secp256k1_*;
+    global: ultrafast_secp256k1_*;
     local: *;
 };

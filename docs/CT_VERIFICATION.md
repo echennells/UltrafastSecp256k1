@@ -13,6 +13,24 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-15 legacy c_api renamed off libsecp256k1's namespace (no CT boundary moved)
+
+The 36 functions in `bindings/c_api` are `ultrafast_secp256k1_*` now instead of
+`secp256k1_*`. Recorded here because the secret-path gate classifies `CHANGELOG.md`
+as a CT secret-bearing surface.
+
+**No constant-time property changes and no cryptographic code was edited.** The
+change is C symbol names, the export macro (`ULTRAFAST_SECP256K1_API`) and the
+linker version script. Each renamed function's body is byte-for-byte what it was
+and still delegates to the same `secp256k1::ct::*` / `secp256k1::fast::*` primitive.
+No branch, table index or memory access became dependent on secret data, and none
+stopped being.
+
+The defect repaired is an ABI-safety one, not a timing one -- see
+[`SECURITY_CLAIMS.md`](SECURITY_CLAIMS.md) and
+[`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) under the same date, and KB
+`BCH-SCHNORR-CAPI-SYMBOL-COLLISION`.
+
 ### 2026-09-14 ecdsa.cpp — RFC 6979 algo16 became a parameter (no CT boundary moved)
 
 `rfc6979_nonce_libsecp_compat` gained an optional `algo16` argument so the BCH

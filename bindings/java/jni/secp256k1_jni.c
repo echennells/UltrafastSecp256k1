@@ -44,14 +44,14 @@ JNIEXPORT jint JNICALL Java_com_ultrafast_secp256k1_Secp256k1_nativeInit
   (JNIEnv *env, jclass cls)
 {
     (void)env; (void)cls;
-    return (jint)secp256k1_init();
+    return (jint)ultrafast_secp256k1_init();
 }
 
 JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_nativeVersion
   (JNIEnv *env, jclass cls)
 {
     (void)cls;
-    return (*env)->NewStringUTF(env, secp256k1_version());
+    return (*env)->NewStringUTF(env, ultrafast_secp256k1_version());
 }
 
 /* ── Key Operations ────────────────────────────────────────────────────────── */
@@ -63,7 +63,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPubkeyCrea
     CHECK_LEN(privkey, 32, "privkey");
     uint8_t pk[32], out[33];
     get_bytes(env, privkey, pk, 32);
-    if (secp256k1_ec_pubkey_create(pk, out) != 0) {
+    if (ultrafast_secp256k1_ec_pubkey_create(pk, out) != 0) {
         throw_exc(env, "Invalid private key");
         return NULL;
     }
@@ -77,7 +77,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPubkeyCrea
     CHECK_LEN(privkey, 32, "privkey");
     uint8_t pk[32], out[65];
     get_bytes(env, privkey, pk, 32);
-    if (secp256k1_ec_pubkey_create_uncompressed(pk, out) != 0) {
+    if (ultrafast_secp256k1_ec_pubkey_create_uncompressed(pk, out) != 0) {
         throw_exc(env, "Invalid private key");
         return NULL;
     }
@@ -95,7 +95,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPubkeyPars
     }
     uint8_t ibuf[65], out[33];
     get_bytes(env, input, ibuf, ilen);
-    if (secp256k1_ec_pubkey_parse(ibuf, (size_t)ilen, out) != 0) {
+    if (ultrafast_secp256k1_ec_pubkey_parse(ibuf, (size_t)ilen, out) != 0) {
         throw_exc(env, "Invalid public key");
         return NULL;
     }
@@ -109,7 +109,7 @@ JNIEXPORT jboolean JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecSeckeyVerify
     CHECK_LEN_BOOL(privkey, 32, "privkey");
     uint8_t pk[32];
     get_bytes(env, privkey, pk, 32);
-    return secp256k1_ec_seckey_verify(pk) == 1 ? JNI_TRUE : JNI_FALSE;
+    return ultrafast_secp256k1_ec_seckey_verify(pk) == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPrivkeyNegate
@@ -119,7 +119,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPrivkeyNeg
     CHECK_LEN(privkey, 32, "privkey");
     uint8_t pk[32];
     get_bytes(env, privkey, pk, 32);
-    if (secp256k1_ec_privkey_negate(pk) != 1) {
+    if (ultrafast_secp256k1_ec_privkey_negate(pk) != 1) {
         throw_exc(env, "Privkey negate failed");
         return NULL;
     }
@@ -135,7 +135,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPrivkeyTwe
     uint8_t pk[32], tw[32];
     get_bytes(env, privkey, pk, 32);
     get_bytes(env, tweak, tw, 32);
-    if (secp256k1_ec_privkey_tweak_add(pk, tw) != 0) {
+    if (ultrafast_secp256k1_ec_privkey_tweak_add(pk, tw) != 0) {
         throw_exc(env, "Tweak add failed");
         return NULL;
     }
@@ -151,7 +151,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecPrivkeyTwe
     uint8_t pk[32], tw[32];
     get_bytes(env, privkey, pk, 32);
     get_bytes(env, tweak, tw, 32);
-    if (secp256k1_ec_privkey_tweak_mul(pk, tw) != 0) {
+    if (ultrafast_secp256k1_ec_privkey_tweak_mul(pk, tw) != 0) {
         throw_exc(env, "Tweak mul failed");
         return NULL;
     }
@@ -169,7 +169,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdsaSign
     uint8_t mh[32], pk[32], sig[64];
     get_bytes(env, msgHash, mh, 32);
     get_bytes(env, privkey, pk, 32);
-    if (secp256k1_ecdsa_sign(mh, pk, sig) != 0) {
+    if (ultrafast_secp256k1_ecdsa_sign(mh, pk, sig) != 0) {
         throw_exc(env, "ECDSA signing failed");
         return NULL;
     }
@@ -187,7 +187,7 @@ JNIEXPORT jboolean JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdsaVerify
     get_bytes(env, msgHash, mh, 32);
     get_bytes(env, sig, s, 64);
     get_bytes(env, pubkey, pk, 33);
-    return secp256k1_ecdsa_verify(mh, s, pk) == 1 ? JNI_TRUE : JNI_FALSE;
+    return ultrafast_secp256k1_ecdsa_verify(mh, s, pk) == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdsaSerializeDer
@@ -198,7 +198,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdsaSeriali
     uint8_t s[64], der[72];
     size_t der_len = 72;
     get_bytes(env, sig, s, 64);
-    if (secp256k1_ecdsa_signature_serialize_der(s, der, &der_len) != 0) {
+    if (ultrafast_secp256k1_ecdsa_signature_serialize_der(s, der, &der_len) != 0) {
         throw_exc(env, "DER serialization failed");
         return NULL;
     }
@@ -219,7 +219,7 @@ JNIEXPORT jobject JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdsaSignRecove
     }
     get_bytes(env, msgHash, mh, 32);
     get_bytes(env, privkey, pk, 32);
-    if (secp256k1_ecdsa_sign_recoverable(mh, pk, sig, &recid) != 0) {
+    if (ultrafast_secp256k1_ecdsa_sign_recoverable(mh, pk, sig, &recid) != 0) {
         throw_exc(env, "Recoverable signing failed");
         return NULL;
     }
@@ -238,7 +238,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdsaRecover
     uint8_t mh[32], s[64], pubkey[33];
     get_bytes(env, msgHash, mh, 32);
     get_bytes(env, sig, s, 64);
-    if (secp256k1_ecdsa_recover(mh, s, (int)recid, pubkey) != 0) {
+    if (ultrafast_secp256k1_ecdsa_recover(mh, s, (int)recid, pubkey) != 0) {
         throw_exc(env, "Recovery failed");
         return NULL;
     }
@@ -258,7 +258,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_schnorrSign
     get_bytes(env, msg, m, 32);
     get_bytes(env, privkey, pk, 32);
     get_bytes(env, auxRand, ar, 32);
-    if (secp256k1_schnorr_sign(m, pk, ar, sig) != 0) {
+    if (ultrafast_secp256k1_schnorr_sign(m, pk, ar, sig) != 0) {
         throw_exc(env, "Schnorr signing failed");
         return NULL;
     }
@@ -276,7 +276,7 @@ JNIEXPORT jboolean JNICALL Java_com_ultrafast_secp256k1_Secp256k1_schnorrVerify
     get_bytes(env, msg, m, 32);
     get_bytes(env, sig, s, 64);
     get_bytes(env, pubkeyX, px, 32);
-    return secp256k1_schnorr_verify(m, s, px) == 1 ? JNI_TRUE : JNI_FALSE;
+    return ultrafast_secp256k1_schnorr_verify(m, s, px) == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_schnorrPubkey
@@ -286,7 +286,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_schnorrPubke
     CHECK_LEN(privkey, 32, "privkey");
     uint8_t pk[32], out[32];
     get_bytes(env, privkey, pk, 32);
-    if (secp256k1_schnorr_pubkey(pk, out) != 0) {
+    if (ultrafast_secp256k1_schnorr_pubkey(pk, out) != 0) {
         throw_exc(env, "Invalid private key");
         return NULL;
     }
@@ -304,7 +304,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdh
     uint8_t pk[32], pub[33], out[32];
     get_bytes(env, privkey, pk, 32);
     get_bytes(env, pubkey, pub, 33);
-    if (secp256k1_ecdh(pk, pub, out) != 0) {
+    if (ultrafast_secp256k1_ecdh(pk, pub, out) != 0) {
         throw_exc(env, "ECDH failed");
         return NULL;
     }
@@ -320,7 +320,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdhXonly
     uint8_t pk[32], pub[33], out[32];
     get_bytes(env, privkey, pk, 32);
     get_bytes(env, pubkey, pub, 33);
-    if (secp256k1_ecdh_xonly(pk, pub, out) != 0) {
+    if (ultrafast_secp256k1_ecdh_xonly(pk, pub, out) != 0) {
         throw_exc(env, "ECDH xonly failed");
         return NULL;
     }
@@ -336,7 +336,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_ecdhRaw
     uint8_t pk[32], pub[33], out[32];
     get_bytes(env, privkey, pk, 32);
     get_bytes(env, pubkey, pub, 33);
-    if (secp256k1_ecdh_raw(pk, pub, out) != 0) {
+    if (ultrafast_secp256k1_ecdh_raw(pk, pub, out) != 0) {
         throw_exc(env, "ECDH raw failed");
         return NULL;
     }
@@ -353,7 +353,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_sha256
     uint8_t *dbuf = (uint8_t *)(*env)->GetByteArrayElements(env, data, NULL);
     if (!dbuf) { throw_exc(env, "sha256: GetByteArrayElements failed"); return NULL; }
     uint8_t out[32];
-    secp256k1_sha256(dbuf, (size_t)dlen, out);
+    ultrafast_secp256k1_sha256(dbuf, (size_t)dlen, out);
     (*env)->ReleaseByteArrayElements(env, data, (jbyte *)dbuf, JNI_ABORT);
     return make_byte_array(env, out, 32);
 }
@@ -366,7 +366,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_hash160
     uint8_t *dbuf = (uint8_t *)(*env)->GetByteArrayElements(env, data, NULL);
     if (!dbuf) { throw_exc(env, "hash160: GetByteArrayElements failed"); return NULL; }
     uint8_t out[20];
-    secp256k1_hash160(dbuf, (size_t)dlen, out);
+    ultrafast_secp256k1_hash160(dbuf, (size_t)dlen, out);
     (*env)->ReleaseByteArrayElements(env, data, (jbyte *)dbuf, JNI_ABORT);
     return make_byte_array(env, out, 20);
 }
@@ -385,7 +385,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_taggedHash
         return NULL;
     }
     uint8_t out[32];
-    secp256k1_tagged_hash(ctag, dbuf, (size_t)dlen, out);
+    ultrafast_secp256k1_tagged_hash(ctag, dbuf, (size_t)dlen, out);
     (*env)->ReleaseByteArrayElements(env, data, (jbyte *)dbuf, JNI_ABORT);
     (*env)->ReleaseStringUTFChars(env, tag, ctag);
     return make_byte_array(env, out, 32);
@@ -413,7 +413,7 @@ JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_addressP2pkh
 {
     (void)cls;
     CHECK_LEN(pubkey, 33, "pubkey");
-    return get_address(env, secp256k1_address_p2pkh, pubkey, 33, network);
+    return get_address(env, ultrafast_secp256k1_address_p2pkh, pubkey, 33, network);
 }
 
 JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_addressP2wpkh
@@ -421,7 +421,7 @@ JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_addressP2wpkh
 {
     (void)cls;
     CHECK_LEN(pubkey, 33, "pubkey");
-    return get_address(env, secp256k1_address_p2wpkh, pubkey, 33, network);
+    return get_address(env, ultrafast_secp256k1_address_p2wpkh, pubkey, 33, network);
 }
 
 JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_addressP2tr
@@ -429,7 +429,7 @@ JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_addressP2tr
 {
     (void)cls;
     CHECK_LEN(internalKeyX, 32, "internalKeyX");
-    return get_address(env, (int(*)(const uint8_t*, int, char*, size_t*))secp256k1_address_p2tr,
+    return get_address(env, (int(*)(const uint8_t*, int, char*, size_t*))ultrafast_secp256k1_address_p2tr,
                        internalKeyX, 32, network);
 }
 
@@ -444,7 +444,7 @@ JNIEXPORT jstring JNICALL Java_com_ultrafast_secp256k1_Secp256k1_wifEncode
     get_bytes(env, privkey, pk, 32);
     char wif[128];
     size_t wlen = 128;
-    if (secp256k1_wif_encode(pk, compressed ? 1 : 0, (int)network, wif, &wlen) != 0) {
+    if (ultrafast_secp256k1_wif_encode(pk, compressed ? 1 : 0, (int)network, wif, &wlen) != 0) {
         throw_exc(env, "WIF encode failed");
         return NULL;
     }
@@ -460,7 +460,7 @@ JNIEXPORT jobject JNICALL Java_com_ultrafast_secp256k1_Secp256k1_wifDecode
     if (!cwif) { throw_exc(env, "OOM: GetStringUTFChars"); return NULL; }
     uint8_t pk[32];
     int comp, net;
-    int rc = secp256k1_wif_decode(cwif, pk, &comp, &net);
+    int rc = ultrafast_secp256k1_wif_decode(cwif, pk, &comp, &net);
     (*env)->ReleaseStringUTFChars(env, wif, cwif);
     if (rc != 0) {
         throw_exc(env, "Invalid WIF");
@@ -486,7 +486,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_bip32MasterK
     uint8_t sbuf[64];
     get_bytes(env, seed, sbuf, slen);
     secp256k1_bip32_key key;
-    if (secp256k1_bip32_master_key(sbuf, (size_t)slen, &key) != 0) {
+    if (ultrafast_secp256k1_bip32_master_key(sbuf, (size_t)slen, &key) != 0) {
         throw_exc(env, "Master key generation failed");
         return NULL;
     }
@@ -503,7 +503,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_bip32DeriveC
     }
     secp256k1_bip32_key parent, child;
     get_bytes(env, parentKey, (uint8_t *)&parent, 79);
-    if (secp256k1_bip32_derive_child(&parent, (uint32_t)index, &child) != 0) {
+    if (ultrafast_secp256k1_bip32_derive_child(&parent, (uint32_t)index, &child) != 0) {
         throw_exc(env, "Child derivation failed");
         return NULL;
     }
@@ -522,7 +522,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_bip32DeriveP
     get_bytes(env, masterKey, (uint8_t *)&master, 79);
     const char *cpath = (*env)->GetStringUTFChars(env, path, NULL);
     if (!cpath) { throw_exc(env, "OOM: GetStringUTFChars"); return NULL; }
-    int rc = secp256k1_bip32_derive_path(&master, cpath, &out);
+    int rc = ultrafast_secp256k1_bip32_derive_path(&master, cpath, &out);
     (*env)->ReleaseStringUTFChars(env, path, cpath);
     if (rc != 0) {
         throw_exc(env, "Path derivation failed");
@@ -542,7 +542,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_bip32GetPriv
     secp256k1_bip32_key k;
     get_bytes(env, key, (uint8_t *)&k, 79);
     uint8_t pk[32];
-    if (secp256k1_bip32_get_privkey(&k, pk) != 0) {
+    if (ultrafast_secp256k1_bip32_get_privkey(&k, pk) != 0) {
         throw_exc(env, "Not a private key");
         return NULL;
     }
@@ -560,7 +560,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_bip32GetPubk
     secp256k1_bip32_key k;
     get_bytes(env, key, (uint8_t *)&k, 79);
     uint8_t pub[33];
-    if (secp256k1_bip32_get_pubkey(&k, pub) != 0) {
+    if (ultrafast_secp256k1_bip32_get_pubkey(&k, pub) != 0) {
         throw_exc(env, "Public key extraction failed");
         return NULL;
     }
@@ -583,7 +583,7 @@ JNIEXPORT jobject JNICALL Java_com_ultrafast_secp256k1_Secp256k1_taprootOutputKe
         mr = mrbuf;
     }
     int parity;
-    if (secp256k1_taproot_output_key(ik, mr, out, &parity) != 0) {
+    if (ultrafast_secp256k1_taproot_output_key(ik, mr, out, &parity) != 0) {
         throw_exc(env, "Taproot output key failed");
         return NULL;
     }
@@ -606,7 +606,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_ultrafast_secp256k1_Secp256k1_taprootTweak
         get_bytes(env, merkleRoot, mrbuf, 32);
         mr = mrbuf;
     }
-    if (secp256k1_taproot_tweak_privkey(pk, mr, out) != 0) {
+    if (ultrafast_secp256k1_taproot_tweak_privkey(pk, mr, out) != 0) {
         throw_exc(env, "Taproot tweak failed");
         return NULL;
     }
@@ -631,6 +631,6 @@ JNIEXPORT jboolean JNICALL Java_com_ultrafast_secp256k1_Secp256k1_taprootVerifyC
         get_bytes(env, merkleRoot, mrbuf, (jsize)mr_len);
         mr = mrbuf;
     }
-    return secp256k1_taproot_verify_commitment(ok, (int)parity, ik, mr, mr_len) == 1
+    return ultrafast_secp256k1_taproot_verify_commitment(ok, (int)parity, ik, mr, mr_len) == 1
         ? JNI_TRUE : JNI_FALSE;
 }

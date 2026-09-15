@@ -58,14 +58,14 @@ public final class Secp256k1 {
 
     /// Initialize the library (runs selftest).
     public init() throws {
-        guard CUltrafastSecp256k1.secp256k1_init() == 0 else {
+        guard CUltrafastSecp256k1.ultrafast_secp256k1_init() == 0 else {
             throw Secp256k1Error.initFailed
         }
     }
 
     /// Library version string.
     public var version: String {
-        String(cString: CUltrafastSecp256k1.secp256k1_version())
+        String(cString: CUltrafastSecp256k1.ultrafast_secp256k1_version())
     }
 
     // MARK: - Key Operations
@@ -76,7 +76,7 @@ public final class Secp256k1 {
         var out = Data(count: 33)
         let rc = privkey.withUnsafeBytes { pk in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_ec_pubkey_create(
+                CUltrafastSecp256k1.ultrafast_secp256k1_ec_pubkey_create(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     o.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -91,7 +91,7 @@ public final class Secp256k1 {
         var out = Data(count: 65)
         let rc = privkey.withUnsafeBytes { pk in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_ec_pubkey_create_uncompressed(
+                CUltrafastSecp256k1.ultrafast_secp256k1_ec_pubkey_create_uncompressed(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     o.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -108,7 +108,7 @@ public final class Secp256k1 {
         var out = Data(count: 33)
         let rc = input.withUnsafeBytes { inp in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_ec_pubkey_parse(
+                CUltrafastSecp256k1.ultrafast_secp256k1_ec_pubkey_parse(
                     inp.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     inp.count,
                     o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -122,7 +122,7 @@ public final class Secp256k1 {
     public func ecSeckeyVerify(privkey: Data) -> Bool {
         guard privkey.count == 32 else { return false }
         return privkey.withUnsafeBytes { pk in
-            CUltrafastSecp256k1.secp256k1_ec_seckey_verify(
+            CUltrafastSecp256k1.ultrafast_secp256k1_ec_seckey_verify(
                 pk.baseAddress!.assumingMemoryBound(to: UInt8.self)) == 1
         }
     }
@@ -132,7 +132,7 @@ public final class Secp256k1 {
         try checkLen(privkey, 32, "privkey")
         var out = privkey
         let rc = out.withUnsafeMutableBytes { buf in
-            CUltrafastSecp256k1.secp256k1_ec_privkey_negate(
+            CUltrafastSecp256k1.ultrafast_secp256k1_ec_privkey_negate(
                 buf.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
         guard rc == 0 else { throw Secp256k1Error.tweakFailed }
@@ -146,7 +146,7 @@ public final class Secp256k1 {
         var out = privkey
         let rc = out.withUnsafeMutableBytes { pk in
             tweak.withUnsafeBytes { tw in
-                CUltrafastSecp256k1.secp256k1_ec_privkey_tweak_add(
+                CUltrafastSecp256k1.ultrafast_secp256k1_ec_privkey_tweak_add(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     tw.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -162,7 +162,7 @@ public final class Secp256k1 {
         var out = privkey
         let rc = out.withUnsafeMutableBytes { pk in
             tweak.withUnsafeBytes { tw in
-                CUltrafastSecp256k1.secp256k1_ec_privkey_tweak_mul(
+                CUltrafastSecp256k1.ultrafast_secp256k1_ec_privkey_tweak_mul(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     tw.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -181,7 +181,7 @@ public final class Secp256k1 {
         let rc = msgHash.withUnsafeBytes { mh in
             privkey.withUnsafeBytes { pk in
                 sig.withUnsafeMutableBytes { s in
-                    CUltrafastSecp256k1.secp256k1_ecdsa_sign(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdsa_sign(
                         mh.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         s.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -198,7 +198,7 @@ public final class Secp256k1 {
         return msgHash.withUnsafeBytes { mh in
             sig.withUnsafeBytes { s in
                 pubkey.withUnsafeBytes { pk in
-                    CUltrafastSecp256k1.secp256k1_ecdsa_verify(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdsa_verify(
                         mh.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         s.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         pk.baseAddress!.assumingMemoryBound(to: UInt8.self)) == 1
@@ -215,7 +215,7 @@ public final class Secp256k1 {
         let rc = sig.withUnsafeBytes { s in
             der.withUnsafeMutableBytes { d in
                 withUnsafeMutablePointer(to: &derLen) { dl in
-                    CUltrafastSecp256k1.secp256k1_ecdsa_signature_serialize_der(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdsa_signature_serialize_der(
                         s.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         d.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         dl)
@@ -238,7 +238,7 @@ public final class Secp256k1 {
             privkey.withUnsafeBytes { pk in
                 sig.withUnsafeMutableBytes { s in
                     withUnsafeMutablePointer(to: &recid) { rid in
-                        CUltrafastSecp256k1.secp256k1_ecdsa_sign_recoverable(
+                        CUltrafastSecp256k1.ultrafast_secp256k1_ecdsa_sign_recoverable(
                             mh.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             s.baseAddress!.assumingMemoryBound(to: UInt8.self),
@@ -259,7 +259,7 @@ public final class Secp256k1 {
         let rc = msgHash.withUnsafeBytes { mh in
             sig.withUnsafeBytes { s in
                 pubkey.withUnsafeMutableBytes { pk in
-                    CUltrafastSecp256k1.secp256k1_ecdsa_recover(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdsa_recover(
                         mh.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         s.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         Int32(recid),
@@ -283,7 +283,7 @@ public final class Secp256k1 {
             privkey.withUnsafeBytes { pk in
                 auxRand.withUnsafeBytes { ar in
                     sig.withUnsafeMutableBytes { s in
-                        CUltrafastSecp256k1.secp256k1_schnorr_sign(
+                        CUltrafastSecp256k1.ultrafast_secp256k1_schnorr_sign(
                             m.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             ar.baseAddress!.assumingMemoryBound(to: UInt8.self),
@@ -302,7 +302,7 @@ public final class Secp256k1 {
         return msg.withUnsafeBytes { m in
             sig.withUnsafeBytes { s in
                 pubkeyX.withUnsafeBytes { px in
-                    CUltrafastSecp256k1.secp256k1_schnorr_verify(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_schnorr_verify(
                         m.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         s.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         px.baseAddress!.assumingMemoryBound(to: UInt8.self)) == 1
@@ -317,7 +317,7 @@ public final class Secp256k1 {
         var out = Data(count: 32)
         let rc = privkey.withUnsafeBytes { pk in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_schnorr_pubkey(
+                CUltrafastSecp256k1.ultrafast_secp256k1_schnorr_pubkey(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     o.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -336,7 +336,7 @@ public final class Secp256k1 {
         let rc = privkey.withUnsafeBytes { pk in
             pubkey.withUnsafeBytes { pub in
                 out.withUnsafeMutableBytes { o in
-                    CUltrafastSecp256k1.secp256k1_ecdh(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdh(
                         pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         pub.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -355,7 +355,7 @@ public final class Secp256k1 {
         let rc = privkey.withUnsafeBytes { pk in
             pubkey.withUnsafeBytes { pub in
                 out.withUnsafeMutableBytes { o in
-                    CUltrafastSecp256k1.secp256k1_ecdh_xonly(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdh_xonly(
                         pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         pub.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -374,7 +374,7 @@ public final class Secp256k1 {
         let rc = privkey.withUnsafeBytes { pk in
             pubkey.withUnsafeBytes { pub in
                 out.withUnsafeMutableBytes { o in
-                    CUltrafastSecp256k1.secp256k1_ecdh_raw(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_ecdh_raw(
                         pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         pub.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -392,7 +392,7 @@ public final class Secp256k1 {
         var out = Data(count: 32)
         data.withUnsafeBytes { d in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_sha256(
+                CUltrafastSecp256k1.ultrafast_secp256k1_sha256(
                     d.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     d.count,
                     o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -406,7 +406,7 @@ public final class Secp256k1 {
         var out = Data(count: 20)
         data.withUnsafeBytes { d in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_hash160(
+                CUltrafastSecp256k1.ultrafast_secp256k1_hash160(
                     d.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     d.count,
                     o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -420,7 +420,7 @@ public final class Secp256k1 {
         var out = Data(count: 32)
         data.withUnsafeBytes { d in
             out.withUnsafeMutableBytes { o in
-                CUltrafastSecp256k1.secp256k1_tagged_hash(
+                CUltrafastSecp256k1.ultrafast_secp256k1_tagged_hash(
                     tag,
                     d.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     d.count,
@@ -437,7 +437,7 @@ public final class Secp256k1 {
         try checkLen(pubkey, 33, "pubkey")
         return try getAddress { buf, len in
             pubkey.withUnsafeBytes { pk in
-                CUltrafastSecp256k1.secp256k1_address_p2pkh(
+                CUltrafastSecp256k1.ultrafast_secp256k1_address_p2pkh(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     network.rawValue, buf, len)
             }
@@ -449,7 +449,7 @@ public final class Secp256k1 {
         try checkLen(pubkey, 33, "pubkey")
         return try getAddress { buf, len in
             pubkey.withUnsafeBytes { pk in
-                CUltrafastSecp256k1.secp256k1_address_p2wpkh(
+                CUltrafastSecp256k1.ultrafast_secp256k1_address_p2wpkh(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     network.rawValue, buf, len)
             }
@@ -461,7 +461,7 @@ public final class Secp256k1 {
         try checkLen(internalKeyX, 32, "internalKeyX")
         return try getAddress { buf, len in
             internalKeyX.withUnsafeBytes { ik in
-                CUltrafastSecp256k1.secp256k1_address_p2tr(
+                CUltrafastSecp256k1.ultrafast_secp256k1_address_p2tr(
                     ik.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     network.rawValue, buf, len)
             }
@@ -475,7 +475,7 @@ public final class Secp256k1 {
         try checkLen(privkey, 32, "privkey")
         return try getAddress { buf, len in
             privkey.withUnsafeBytes { pk in
-                CUltrafastSecp256k1.secp256k1_wif_encode(
+                CUltrafastSecp256k1.ultrafast_secp256k1_wif_encode(
                     pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     compressed ? 1 : 0, network.rawValue, buf, len)
             }
@@ -490,7 +490,7 @@ public final class Secp256k1 {
         let rc = pk.withUnsafeMutableBytes { pkBuf in
             withUnsafeMutablePointer(to: &comp) { compPtr in
                 withUnsafeMutablePointer(to: &net) { netPtr in
-                    CUltrafastSecp256k1.secp256k1_wif_decode(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_wif_decode(
                         wif,
                         pkBuf.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         compPtr, netPtr)
@@ -511,7 +511,7 @@ public final class Secp256k1 {
         var key = Data(count: 79)
         let rc = seed.withUnsafeBytes { s in
             key.withUnsafeMutableBytes { k in
-                CUltrafastSecp256k1.secp256k1_bip32_master_key(
+                CUltrafastSecp256k1.ultrafast_secp256k1_bip32_master_key(
                     s.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     s.count,
                     k.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self))
@@ -527,7 +527,7 @@ public final class Secp256k1 {
         var child = Data(count: 79)
         let rc = parent.withUnsafeBytes { p in
             child.withUnsafeMutableBytes { c in
-                CUltrafastSecp256k1.secp256k1_bip32_derive_child(
+                CUltrafastSecp256k1.ultrafast_secp256k1_bip32_derive_child(
                     p.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self),
                     index,
                     c.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self))
@@ -543,7 +543,7 @@ public final class Secp256k1 {
         var key = Data(count: 79)
         let rc = master.withUnsafeBytes { m in
             key.withUnsafeMutableBytes { k in
-                CUltrafastSecp256k1.secp256k1_bip32_derive_path(
+                CUltrafastSecp256k1.ultrafast_secp256k1_bip32_derive_path(
                     m.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self),
                     path,
                     k.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self))
@@ -559,7 +559,7 @@ public final class Secp256k1 {
         var pk = Data(count: 32)
         let rc = key.withUnsafeBytes { k in
             pk.withUnsafeMutableBytes { p in
-                CUltrafastSecp256k1.secp256k1_bip32_get_privkey(
+                CUltrafastSecp256k1.ultrafast_secp256k1_bip32_get_privkey(
                     k.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self),
                     p.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -574,7 +574,7 @@ public final class Secp256k1 {
         var pub = Data(count: 33)
         let rc = key.withUnsafeBytes { k in
             pub.withUnsafeMutableBytes { p in
-                CUltrafastSecp256k1.secp256k1_bip32_get_pubkey(
+                CUltrafastSecp256k1.ultrafast_secp256k1_bip32_get_pubkey(
                     k.baseAddress!.assumingMemoryBound(to: secp256k1_bip32_key.self),
                     p.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
@@ -596,7 +596,7 @@ public final class Secp256k1 {
                 mr.withUnsafeBytes { m in
                     out.withUnsafeMutableBytes { o in
                         withUnsafeMutablePointer(to: &parity) { p in
-                            CUltrafastSecp256k1.secp256k1_taproot_output_key(
+                            CUltrafastSecp256k1.ultrafast_secp256k1_taproot_output_key(
                                 ik.baseAddress!.assumingMemoryBound(to: UInt8.self),
                                 m.baseAddress!.assumingMemoryBound(to: UInt8.self),
                                 o.baseAddress!.assumingMemoryBound(to: UInt8.self), p)
@@ -608,7 +608,7 @@ public final class Secp256k1 {
             rc = internalKeyX.withUnsafeBytes { ik in
                 out.withUnsafeMutableBytes { o in
                     withUnsafeMutablePointer(to: &parity) { p in
-                        CUltrafastSecp256k1.secp256k1_taproot_output_key(
+                        CUltrafastSecp256k1.ultrafast_secp256k1_taproot_output_key(
                             ik.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             nil,
                             o.baseAddress!.assumingMemoryBound(to: UInt8.self), p)
@@ -629,7 +629,7 @@ public final class Secp256k1 {
             rc = privkey.withUnsafeBytes { pk in
                 mr.withUnsafeBytes { m in
                     out.withUnsafeMutableBytes { o in
-                        CUltrafastSecp256k1.secp256k1_taproot_tweak_privkey(
+                        CUltrafastSecp256k1.ultrafast_secp256k1_taproot_tweak_privkey(
                             pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             m.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -639,7 +639,7 @@ public final class Secp256k1 {
         } else {
             rc = privkey.withUnsafeBytes { pk in
                 out.withUnsafeMutableBytes { o in
-                    CUltrafastSecp256k1.secp256k1_taproot_tweak_privkey(
+                    CUltrafastSecp256k1.ultrafast_secp256k1_taproot_tweak_privkey(
                         pk.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         nil,
                         o.baseAddress!.assumingMemoryBound(to: UInt8.self))
@@ -659,7 +659,7 @@ public final class Secp256k1 {
             internalKeyX.withUnsafeBytes { ik in
                 if let mr = merkleRoot {
                     return mr.withUnsafeBytes { m in
-                        CUltrafastSecp256k1.secp256k1_taproot_verify_commitment(
+                        CUltrafastSecp256k1.ultrafast_secp256k1_taproot_verify_commitment(
                             ok.baseAddress!.assumingMemoryBound(to: UInt8.self),
                             Int32(parity),
                             ik.baseAddress!.assumingMemoryBound(to: UInt8.self),
@@ -667,7 +667,7 @@ public final class Secp256k1 {
                             mrLen) == 1
                     }
                 } else {
-                    return CUltrafastSecp256k1.secp256k1_taproot_verify_commitment(
+                    return CUltrafastSecp256k1.ultrafast_secp256k1_taproot_verify_commitment(
                         ok.baseAddress!.assumingMemoryBound(to: UInt8.self),
                         Int32(parity),
                         ik.baseAddress!.assumingMemoryBound(to: UInt8.self),

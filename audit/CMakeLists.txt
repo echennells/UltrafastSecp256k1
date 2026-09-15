@@ -6022,13 +6022,25 @@ add_test(NAME regression_bch_schnorr_spec
     COMMAND test_regression_bch_schnorr_spec_standalone)
 set_tests_properties(regression_bch_schnorr_spec PROPERTIES TIMEOUT 60
     LABELS "audit;regression;standard-vectors;bch;schnorr;bchn;interop")
-# NOT added to unified_audit_runner. shim_schnorr_bch.cpp exports the C symbols
-# secp256k1_schnorr_sign / secp256k1_schnorr_verify, and bindings/c_api/
-# ultrafast_secp256k1.cpp -- already linked into the runner -- exports those same
-# two names for its own BIP-340 functions. Linking both multiply-defines them.
-# The runner therefore carries the ADVISORY_SKIP_CODE stub from
-# shim_run_stubs_unified.cpp and this standalone target is where the module
-# actually runs, the same split the shim-dependent modules above use.
+# Also a unified_audit_runner module. This only links because the legacy c_api
+# stopped squatting libsecp256k1's namespace: bindings/c_api once exported
+# secp256k1_schnorr_sign / secp256k1_schnorr_verify for its own BIP-340
+# functions, colliding with the BCHN names this shim source defines. Those 36
+# symbols are ultrafast_secp256k1_* now, so the two objects coexist.
+target_sources(unified_audit_runner PRIVATE
+    test_regression_bch_schnorr_spec.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp)
+# Scoped to these two sources, NOT the target. Several audit modules guard their
+# body with `__has_include("secp256k1.h")` and rely on shim_run_stubs_unified.cpp
+# to supply the symbol when the header is absent; putting the shim include
+# directory on the whole target flips those guards on and multiply-defines
+# test_regression_shim_security_v9_run and friends against their stubs.
+set_source_files_properties(
+    test_regression_bch_schnorr_spec.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp
+    TARGET_DIRECTORY unified_audit_runner
+    PROPERTIES INCLUDE_DIRECTORIES
+        "${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_bchn_shim/include;${CMAKE_CURRENT_SOURCE_DIR}/../compat/libsecp256k1_shim/include")
 
 # EXTERNAL-ANCHOR KAT — NIST SHA-512 + official BIP-341 vectors (common-mode defence, 2026-06-11)
 add_executable(test_external_anchor_kat_standalone

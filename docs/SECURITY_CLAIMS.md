@@ -2,6 +2,37 @@
 
 **UltrafastSecp256k1 v4.5.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-15 - The legacy c_api stopped squatting libsecp256k1's C namespace
+
+`bindings/c_api` exported 36 functions named `secp256k1_*` and `exports.map`
+published that whole prefix from the shared library. Eleven of the 36 are also
+defined by the bundled libsecp256k1 shim, with incompatible signatures.
+
+**The claim this repairs is ABI safety, not constant time.** No cryptographic path
+was edited; see [`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date. The
+hazard is argument-shape confusion across two meanings of one symbol:
+
+    ultrafast_secp256k1_ec_seckey_verify(privkey32)     <- ours
+    secp256k1_ec_seckey_verify(ctx, seckey32)           <- libsecp
+
+Statically, linking both objects is a duplicate-symbol error and the build stops.
+Dynamically -- two shared objects, an `LD_PRELOAD`, a plugin host -- the loader picks
+one and a caller compiled against the other passes its arguments one position out. A
+`secp256k1_context*` then lands where a 32-byte private key is expected, so the
+library reads 32 bytes of the context as key material; the reverse dereferences a
+private-key pointer as a context. Neither is a timing leak. Both are memory-safety
+failures on a secret-bearing call.
+
+The library now exports 36 `ultrafast_secp256k1_*` symbols and **zero**
+`secp256k1_*` symbols, verified with `nm -D --defined-only` on the built `.so`. All
+eleven language bindings were updated in the same commit and re-verified symbol by
+symbol against it. No compatibility aliases: an alias reintroduces the collision,
+and a header `#define` of `secp256k1_ecdsa_sign` in a translation unit that also
+includes real libsecp256k1 would be worse than the original defect.
+
+Nothing about the `ufsecp_*` context ABI, the libsecp256k1 shim, or any CT, ECDSA,
+Schnorr or recovery claim moves. KB `BCH-SCHNORR-CAPI-SYMBOL-COLLISION`.
+
 ### 2026-09-14 - BCH Schnorr shim: nonce shared with ECDSA (key recovery), and two spec violations
 
 Three defects in `compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp`, the
