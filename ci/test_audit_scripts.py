@@ -4555,7 +4555,16 @@ def check_windows_cuda_contract_fixtures() -> None:
     # file carries every published sha256 for 6.0.2, and --require-hashes makes
     # pip refuse anything else, so this fixture now pins the stronger property.
     requirements_file = ".github/requirements/gate-deps.txt"
+    # Check the RENDERED command, not the raw file text. A first attempt at this
+    # wrote the install as a two-line plain scalar ending in a backslash. The
+    # YAML was valid and every substring check below passed, but a plain scalar
+    # FOLDS its newline into a space, so the runner received
+    #   pip install ... --no-cache-dir \ --require-hashes -r ...
+    # and pip reported: Invalid requirement: '--require-hashes'. Preflight went
+    # red on dev. Substring checks against the file cannot see that; parsing the
+    # YAML and inspecting the step's actual `run` string can.
     required_fragments = ("--require-hashes", requirements_file)
+    step_name = "Install deterministic gate dependencies"
     for workflow_name in ("gate.yml", "doc-gates.yml", "preflight.yml"):
         workflow = LIB_ROOT / ".github" / "workflows" / workflow_name
         try:
@@ -4569,6 +4578,36 @@ def check_windows_cuda_contract_fixtures() -> None:
                 f"{workflow_name} does not hash-pin its Python gate dependencies "
                 f"(missing {', '.join(missing)})"
             )
+            continue
+
+        try:
+            import yaml as _yaml
+            parsed = _yaml.safe_load(workflow_text)
+        except Exception as exc:
+            failures.append(f"{workflow_name} does not parse as YAML: {exc}")
+            continue
+
+        runs = [
+            step.get("run", "")
+            for job in (parsed.get("jobs") or {}).values()
+            for step in (job.get("steps") or [])
+            if step.get("name") == step_name
+        ]
+        if not runs:
+            failures.append(f"{workflow_name} has no '{step_name}' step")
+            continue
+        for run in runs:
+            if "\\" in run:
+                failures.append(
+                    f"{workflow_name}: the '{step_name}' command carries a literal "
+                    f"backslash after YAML folding -- the shell will pass it to pip "
+                    f"as an argument. Use a single line or a block scalar."
+                )
+            if not all(f in run for f in required_fragments):
+                failures.append(
+                    f"{workflow_name}: the rendered '{step_name}' command does not "
+                    f"hash-pin ({run[:80]!r})"
+                )
 
     # The requirements file itself must exist and actually carry hashes --
     # --require-hashes against a hashless file is a pip error, not a silent pass.
