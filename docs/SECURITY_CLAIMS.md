@@ -2,6 +2,72 @@
 
 **UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-21 - v4.6.0 release claims: what a consumer must re-check on upgrade
+
+The v4.6.0 `CHANGELOG.md` section is the full account. This is the claims view of
+it: which of this release's 195 commits change what a consumer may assert, and
+which do not.
+
+**Claims that were WRONG before this release, in descending severity.**
+
+1. **Schnorr batch verification was not sound (P0).** `batch_weight()` captured a
+   `SHA256::Midstate` over a 32-byte seed. A midstate carries `state_` and
+   `total_` only, so it is well defined at 64-byte boundaries; all 32 seed bytes
+   were still in `buf_` and were discarded while `total_` kept counting them.
+   Every weight collapsed to a **public constant of the index** -- identical in
+   every batch on every machine -- and the 32 CSPRNG bytes added to make the
+   weights unpredictable were computed and thrown away. The small-exponents
+   proof requires the weights be drawn after and independently of the
+   signatures; with them public, defeating the check costs one modular
+   inversion, with reusable offsets and no key, grinding or discrete log.
+   Reachable above `kSchnorrBatchIndividualCutoff` (96). **If you relied on
+   `schnorr_batch_verify` for n > 96, treat prior verdicts as unproven.**
+
+2. **The BCH 2019 Schnorr shim leaked the private key.** It called the same
+   `rfc6979_nonce(d, msg)` that `ct::ecdsa_sign` uses, so signing one message
+   with one key under both schemes reused a single nonce. Exposure was limited --
+   the shim ships in no default build, which is also why the defect survived --
+   but that is a root cause, not a mitigation. See
+   [`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) under the same date.
+
+3. **Field arithmetic returned wrong answers for legal inputs.** `reduce()` lost
+   a carry two ways (an x86-64 GAS mask that was never built, and a portable
+   first fold that could not reach `result[4]`), and `FieldElement::sqrt()`
+   returned a non-root for ~18% of inputs. Neither is a timing or secrecy claim;
+   both are correctness claims, and both were false. The BIP-340 hot paths were
+   unaffected -- they run on `FieldElement52` -- which is why the KAT suites
+   stayed green and why *"the vectors pass"* was not sufficient evidence.
+   See [`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date.
+
+4. **GPU verify accepted out-of-range compact ECDSA scalars**, reducing `r`/`s`
+   ≥ n mod the group order instead of rejecting them, so `collect` and
+   `verify_batch` disagreed on the `s+n` congruent-malleation encoding and the
+   documented bit-identical-verdict invariant did not hold. Metal
+   `schnorr_verify_batch` separately bound its message and x-only pubkey
+   swapped, rejecting every valid signature -- a false negative, never a false
+   accept, but it made GPU Schnorr batch verify unusable on Apple hardware.
+
+**Claims about process, not cryptography.** Two of this release's repairs are
+about whether the evidence could be trusted at all:
+
+- **A `-Werror` gate that is red on every push is not enforcing anything.** A
+  static helper orphaned by `49925a1a` had been failing the Security Audit
+  workflow since 2026-09-15, and the library build stops at `point.cpp.o`, so
+  nothing after it was being checked either. A genuinely new warning would have
+  been indistinguishable from the standing failure.
+- **Two audit tests were leaking a fail-closed Metal shader-path override**, and
+  the audit binary then stopped building on macOS. The Metal parity test that
+  would have caught defect 4 above needs a real device, and `CI / macos (Release)`
+  never reached it. On the first macOS run that both built and executed the
+  suite, that test failed 3 of 24.
+
+**Claims that did NOT change.** The `ufsecp_*` C ABI (`UFSECP_ABI_VERSION` stays
+4); every CT boundary (see `CT_VERIFICATION.md`); the zeroization verdict (see
+`SECRET_LIFECYCLE.md`). The `bindings/c_api` rename is an ABI-safety repair, not
+a cryptographic one — its hazard was argument-shape confusion across two meanings
+of one symbol, which is a memory-safety failure on a secret-bearing call rather
+than a timing leak.
+
 ### 2026-09-21 - v4.6.0: a warning gate that was not enforcing, and a consumer build that was broken
 
 Two repairs, neither of them a cryptographic claim. Both reach the gate-watched

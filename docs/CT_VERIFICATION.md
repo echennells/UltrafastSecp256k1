@@ -13,6 +13,32 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-21 v4.6.0 — the field defects were correctness, not CT
+
+Two field bugs fixed in this release returned **wrong answers for legal inputs**,
+and it is worth being precise about what that does and does not say about the CT
+claims in this document.
+
+`reduce()` lost a carry two ways and `FieldElement::sqrt()` returned a non-root
+for ~18% of inputs. Neither is a timing or a secrecy defect: no branch or memory
+access became data-dependent, no secret was exposed through a side channel, and
+no CT boundary in the table below moved. They are correctness defects, and the CT
+claims here were never claims of correctness.
+
+What they do say is that **a green KAT suite is not evidence for a surface the
+KATs do not reach**. Both defects live on the 4x64 chain; the BIP-340 hot paths
+run on `FieldElement52`, so every standard vector stayed green while
+`ellswift`, `adaptor`, `zk`, `pedersen` and `address` were calling a `sqrt()`
+that returned a non-root almost one time in five. The affected callers that
+re-validate `y^2 == x^3+7` turned it into a false negative; the ones that do not
+propagated an off-curve y. The fix for `reduce()` is pinned by an exact-limb
+regression over the trigger family plus 200,000 randomised rows compared at
+32-byte granularity against big-integer ground truth — never through normalised
+`operator==`, which is exactly what hid it.
+
+CT surfaces in the table below are unaffected by both, and their evidence is
+unchanged.
+
 ### 2026-09-21 v4.6.0 — OpenCL scan-only guard and a dead co-Z helper (no CT boundary moved)
 
 Two changes reach the gate-watched surface (`CHANGELOG.md`); neither moves a CT

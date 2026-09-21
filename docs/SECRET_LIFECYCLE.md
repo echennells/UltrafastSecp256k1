@@ -2,6 +2,37 @@
 
 **Last updated**: 2026-09-21 | **Version**: 4.6.0
 
+### 2026-09-21 - v4.6.0 lifecycle review: one real defect, and it was nonce reuse
+
+**The defect: the BCH 2019 Schnorr shim shared its nonce with ECDSA.** This is a
+secret-lifecycle failure of the strictest kind — not a buffer that outlived its
+use, but the same nonce derived twice for two different schemes. The signer
+called `secp256k1::rfc6979_nonce(d, msg)`, the identical function with the
+identical arguments that `ct::ecdsa_sign` calls, so signing one message with one
+key under both schemes produced one `k` across `s1 = k^-1(z + r*d)` and the
+Schnorr form. Two equations, two unknowns, private key recovered.
+
+`rfc6979_nonce_libsecp_compat` now takes an optional `algo16` tag to separate the
+derivations; passing `nullptr` keeps every existing caller byte-for-byte on
+libsecp256k1's `"ECDSA\0..."` tag, so no other lifecycle changes.
+
+Why it survived: the BCH shim builds only under
+`SECP256K1_BCHN_SHIM_BUILD_TESTS`, which defaults OFF and which no workflow and
+no `ci/` script ever enabled. **The file was neither compiled nor tested by any
+gate.** That is the lifecycle lesson worth keeping: an unbuilt secret-bearing
+path has no evidence at all, and "it ships in no default build" describes the
+exposure, not the risk. `regression_bch_schnorr_spec` now compiles into the
+unified runner as a blocking module.
+
+**Everything else in this release: zeroization verdict unchanged.** No
+`secure_erase` call site, GPU buffer zeroing step or key-material lifetime is
+added, removed or moved by the field fixes, the Metal and CUDA repairs, the
+fixed-base cache relocation, or the performance work. One note on the cache,
+since it writes to disk: `cache_w18.bin` holds the **fixed-base generator
+table** — public precomputed multiples of G, no secret material — so relocating
+it to the per-user cache directory changes where a public artifact lands, not
+what is exposed.
+
 ### 2026-09-21 - v4.6.0: no lifecycle change (OpenCL scan-only guard, dead co-Z helper)
 
 Both changes reach the gate-watched surface (`CHANGELOG.md`); this answers the
