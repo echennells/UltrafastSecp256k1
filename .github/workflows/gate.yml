@@ -186,8 +186,27 @@ jobs:
     # produced for the Selftest smoke step) pulls in ~25 test_*.cpp compilations
     # which pushed cold-cache builds past the prior 30min limit (run 26349000352
     # hit "exceeded maximum execution time of 30m0s" after 30m16s).
+    #
+    # 2026-09-21: bumped 45→90 min, and this time the CAUSE is worth writing down
+    # because raising the number again is otherwise just papering over it.
+    #
+    # GitHub Actions caches are BRANCH-SCOPED: a run can restore caches created
+    # on its own branch or on the default branch, and nothing else. main IS the
+    # default branch, so a run on main can only use caches main itself created --
+    # every cache dev warms is invisible to it. main builds only when a release
+    # merge lands, so its ccache is effectively ALWAYS cold, while dev's is
+    # almost always warm. The restore-keys below cannot bridge that; the scoping
+    # happens before key matching.
+    #
+    # That is why the v4.6.0 merge (71da37e0) hit this twice in a row, both cut
+    # at the limit rather than failing on their own: 45m22s and 45m19s. Neither
+    # attempt revealed the true cold duration, because both were killed at 45.
+    # 90 is therefore a ceiling chosen to let the job FINISH and show what a cold
+    # main build actually costs -- not a measured figure. Once one run completes,
+    # replace this with the measured number plus headroom.
+    #
     # Starts ONLY after the security gate (Block 3) has completed.
-    timeout-minutes: 45
+    timeout-minutes: 90
     needs: [detect-impact, caas-gate]
     if: needs.detect-impact.outputs.docs_only != 'true'
     steps:
