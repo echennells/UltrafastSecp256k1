@@ -1,5 +1,63 @@
 # Audit Changelog
 
+## 2026-09-21 - the Security tab: three real fixes and one false positive
+
+Six open code-scanning alerts on the repository Security tab, triaged one by
+one. Dependabot is separately clean: alert #7 (setuptools MANIFEST.in exclusion
+bypass, medium) went to `fixed` with `dd7a5d8e`, and the two `ecdsa` highs are
+deliberate dismissals.
+
+**Scorecard `PinnedDependenciesID` x3 -- fixed.** `preflight.yml`, `gate.yml` and
+`doc-gates.yml` each ran
+
+    python3 -m pip install --disable-pip-version-check --no-cache-dir PyYAML==6.0.2
+
+A version pin still trusts whatever the index serves under that name. New
+`.github/requirements/gate-deps.txt` carries **all 53 sha256 digests PyPI
+publishes for 6.0.2**, fetched from the PyPI JSON API rather than written from
+memory, and the three workflows now install with `--require-hashes -r`. The
+repo already used this shape for `release-build.txt`, `cppcheck.txt` and the
+rest; the gate lane was the outlier. Verified by actually installing into a
+throwaway venv with `--require-hashes`: exit 0, `import yaml` gives 6.0.2.
+
+The `WIN-CUDA:workflow_contract_fixtures` self-test caught the change, because
+it asserted the old literal `pip install ... PyYAML==6.0.2` string. It now pins
+the stronger property instead -- `--require-hashes` and the requirements path
+present in all three workflows, and the requirements file itself carrying both
+the version pin and at least one `--hash=sha256:` entry, since
+`--require-hashes` against a hashless file is a pip error rather than a silent
+pass. Python audit self-test: 246 passed, 0 skipped.
+
+**CppCheck `uninitMemberVarPrivate` x2 -- suppressed deliberately, with the
+reason recorded.** `Point::infinity_` and `Point::is_generator_` are not
+initialised by `Point(Uninitialised)`. That is the declared purpose of that
+private constructor: it exists to remove fifteen 64-bit stores that the very
+next call overwrites, worth `Point::add` 225.5 -> 220.7 ns when it landed.
+Initialising the members would undo the measured win.
+
+Confirmed correct rather than assumed: the constructor has exactly two callers,
+`src/cpu/src/point.cpp:1764` and `:1774`, and each assigns `z_one_` and
+`is_generator_` itself before calling `jac52_add_mixed_to`, which writes x, y, z
+and infinity on every one of its exits. All six members are therefore written
+before any read. The header comment said only "x, y, z and infinity" and did not
+mention the two flags the call sites set -- accurate enough for whoever wrote it,
+misleading for the next reader auditing exactly this alert. It now names all six
+and states that a third caller must write all of them.
+
+Suppression proved to work rather than assumed: with `--inline-suppr` (which
+`cppcheck.yml` already passes) the point.hpp alerts are gone; without it all
+five `uninitMemberVarPrivate` rows still fire.
+
+**CodeQL `cpp/unused-local-variable` x1 -- false positive, dismissed.**
+`Variable window is not used` at `src/cpu/src/field.cpp:1730`. It is used, on the
+very next line, as the array bound `std::array<FieldElement, 1 << window>`;
+CodeQL does not count a `constexpr` consumed only in a type context. The
+enclosing `pow_p_minus_2_strauss` is live too -- `fe_inverse_strauss` calls it,
+that function is declared in the public `field.hpp` and exercised by
+`src/cpu/tests/test_comprehensive.cpp`. The source graph reports no incoming
+calls for it because the call is in the test tree, which is the kind of gap that
+makes "no callers" worth confirming before deleting anything.
+
 ## 2026-09-21 - the OpenCL scan-only embed stopped being self-contained (#415)
 
 Reported against `dev` @ `17fceb76` by a consumer validating CUDA and OpenCL

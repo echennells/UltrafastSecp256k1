@@ -4548,7 +4548,14 @@ def check_windows_cuda_contract_fixtures() -> None:
     """WIN-CUDA-001: reject silent CPU fallback and incomplete CUDA installs."""
     tag = "WIN-CUDA:workflow_contract_fixtures"
     failures = []
-    dependency_step = "python3 -m pip install --disable-pip-version-check --no-cache-dir PyYAML==6.0.2"
+    # The dependency install must be HASH-pinned, not merely version-pinned.
+    # Scorecard PinnedDependenciesID flagged the old
+    # `pip install ... PyYAML==6.0.2` form on all three workflows: a version pin
+    # still trusts whatever the index serves under that name. The requirements
+    # file carries every published sha256 for 6.0.2, and --require-hashes makes
+    # pip refuse anything else, so this fixture now pins the stronger property.
+    requirements_file = ".github/requirements/gate-deps.txt"
+    required_fragments = ("--require-hashes", requirements_file)
     for workflow_name in ("gate.yml", "doc-gates.yml", "preflight.yml"):
         workflow = LIB_ROOT / ".github" / "workflows" / workflow_name
         try:
@@ -4556,8 +4563,25 @@ def check_windows_cuda_contract_fixtures() -> None:
         except OSError as exc:
             failures.append(f"could not read {workflow_name}: {exc}")
             continue
-        if dependency_step not in workflow_text:
-            failures.append(f"{workflow_name} does not install pinned PyYAML before Python gates")
+        missing = [f for f in required_fragments if f not in workflow_text]
+        if missing:
+            failures.append(
+                f"{workflow_name} does not hash-pin its Python gate dependencies "
+                f"(missing {', '.join(missing)})"
+            )
+
+    # The requirements file itself must exist and actually carry hashes --
+    # --require-hashes against a hashless file is a pip error, not a silent pass.
+    reqs = LIB_ROOT / requirements_file
+    try:
+        reqs_text = reqs.read_text(encoding="utf-8")
+    except OSError as exc:
+        failures.append(f"could not read {requirements_file}: {exc}")
+    else:
+        if "PyYAML==6.0.2" not in reqs_text:
+            failures.append(f"{requirements_file} no longer pins PyYAML==6.0.2")
+        if "--hash=sha256:" not in reqs_text:
+            failures.append(f"{requirements_file} carries no --hash= entries")
 
     try:
         mod = _load_ci_module("check_windows_cuda_contract.py", "windows_cuda_contract_selftest")

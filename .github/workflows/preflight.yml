@@ -39,7 +39,8 @@ jobs:
           python-version: '3.12'
 
       - name: Install deterministic gate dependencies
-        run: python3 -m pip install --disable-pip-version-check --no-cache-dir PyYAML==6.0.2
+        run: python3 -m pip install --disable-pip-version-check --no-cache-dir \
+          --require-hashes -r .github/requirements/gate-deps.txt
 
       - name: Build project graph
         run: python3 ci/build_project_graph.py --rebuild
