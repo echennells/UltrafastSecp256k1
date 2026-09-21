@@ -1204,10 +1204,32 @@ inline void rfc6979_nonce_impl(const Scalar* priv, const uchar msg_hash[32], Sca
 // CT Primitives (needed for constant-time signing paths — Guardrails #8, #14)
 // =============================================================================
 // Include order matters: ct_ops → ct_field → ct_scalar → ct_point
+//
+// SECP256K1_OPENCL_SCAN_ONLY (GitHub issue #415, the OpenCL twin of #335):
+// a consumer that embeds only the scan subset of these kernels -- field, point,
+// gen_table_w8, this file, affine, bip352 -- concatenates them with every
+// #include line stripped and compiles the result at runtime. It builds a
+// scan-only kernel (a BIP-352 batch scanner, say) and never enqueues
+// ecdsa_sign / schnorr_sign / ecdh. The four ct_*.cl files below are not in
+// that embed set, so every ct_* symbol and CT* type they define is undefined
+// in such a build. OpenCL will not dead-strip a function whose callees are
+// unresolved -- the same thing Metal's AIR compiler does not guarantee -- so
+// the sign wrappers fail to compile even though nothing calls them:
+//
+//     <kernel>:3348:5: error: unknown type name 'CTJacobianPoint'
+//     <kernel>:3349:5: warning: implicit declaration of ct_generator_mul_impl
+//
+// Defining SECP256K1_OPENCL_SCAN_ONLY excludes these includes AND every
+// function and kernel that reaches them -- ecdsa_sign_impl, schnorr_sign_impl,
+// the ECDH block, ecdsa_sign_recoverable_impl, and the ecdsa_sign /
+// schnorr_sign kernels -- restoring self-containment for a scan-only embed.
+// This repo's own build never defines it, so the default kernels are unchanged.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 #include "secp256k1_ct_ops.cl"
 #include "secp256k1_ct_field.cl"
 #include "secp256k1_ct_scalar.cl"
 #include "secp256k1_ct_point.cl"
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 // =============================================================================
 // LAYER 4: ECDSA Sign / Verify
@@ -1296,6 +1318,9 @@ inline int lbtc_parse_opaque_signature(__global const uchar* opaque,
     return 1;
 }
 
+// Calls ct_generator_mul_impl / ct_point_to_jacobian / ct_scalar_inverse_impl —
+// see the SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 inline int ecdsa_sign_impl(const uchar msg_hash[32], const Scalar* priv, ECDSASignature* sig) {
     if (scalar_is_zero(priv)) return 0;
 
@@ -1351,6 +1376,7 @@ inline int ecdsa_sign_impl(const uchar msg_hash[32], const Scalar* priv, ECDSASi
 
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 inline int ecdsa_verify_impl(const uchar msg_hash[32], const JacobianPoint* pubkey, const ECDSASignature* sig) {
     if (scalar_is_zero(&sig->r) || scalar_is_zero(&sig->s)) return 0;
@@ -1504,6 +1530,10 @@ typedef struct {
     Scalar s;
 } SchnorrSignature;
 
+// Calls ct_generator_mul_impl / ct_point_to_jacobian — see the
+// SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+// SchnorrSignature above stays outside the guard: schnorr_verify_impl needs it.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
                                const uchar aux_rand[32], SchnorrSignature* sig) {
     if (scalar_is_zero(priv)) return 0;
@@ -1622,6 +1652,7 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
 
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
                                  const SchnorrSignature* sig) {
@@ -1678,6 +1709,9 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
 // LAYER 5b: ECDH
 // =============================================================================
 
+// The whole ECDH block reaches ct_point_to_jacobian / ct_jacobian_to_affine —
+// see the SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 // P1-SEC-001 FIX: constant-time scalar multiplication for ECDH on a variable
 // base point (AffinePoint input).  The GLV/wNAF path (scalar_mul_glv_impl) is
 // variable-time and MUST NOT be used when the scalar is a private key.
@@ -1766,6 +1800,7 @@ inline int ecdh_compute_impl(const Scalar* priv, const AffinePoint* peer, uchar 
     sha256_final(&ctx, out);
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 // =============================================================================
 // LAYER 5c: Key Recovery
@@ -1776,6 +1811,9 @@ typedef struct {
     int recid;
 } RecoverableSignature;
 
+// Calls ct_generator_mul_impl / ct_jacobian_to_affine — see the
+// SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 inline int ecdsa_sign_recoverable_impl(const uchar msg_hash[32], const Scalar* priv,
                                          RecoverableSignature* rsig) {
     if (scalar_is_zero(priv)) return 0;
@@ -1840,6 +1878,7 @@ inline int ecdsa_sign_recoverable_impl(const uchar msg_hash[32], const Scalar* p
     rsig->recid = recid;
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 // Lift x as FieldElement with parity control
 inline int lift_x_field_impl(const FieldElement* x_fe, int parity, JacobianPoint* p) {
@@ -2068,7 +2107,7 @@ inline void msm_pippenger_impl(const Scalar* scalars, const AffinePoint* points,
 // OpenCL Dispatch Kernels — Extended Operations
 // =============================================================================
 
-#ifndef SECP256K1_CT_SIGN_KERNELS
+#if !defined(SECP256K1_CT_SIGN_KERNELS) && !defined(SECP256K1_OPENCL_SCAN_ONLY)
 // Variable-time signing kernel — superseded by secp256k1_ct_extended.cl when
 // SECP256K1_CT_SIGN_KERNELS is defined. Do NOT dispatch on secret inputs.
 __kernel void ecdsa_sign(
@@ -2089,7 +2128,7 @@ __kernel void ecdsa_sign(
     success_flags[gid] = ecdsa_sign_impl(msg, &priv, &sig);
     signatures[gid] = sig;
 }
-#endif /* SECP256K1_CT_SIGN_KERNELS */
+#endif /* !SECP256K1_CT_SIGN_KERNELS && !SECP256K1_OPENCL_SCAN_ONLY */
 
 __kernel void ecdsa_verify(
     __global const uchar* msg_hashes,
@@ -2640,7 +2679,7 @@ __kernel void ecrecover_batch(
     }
 }
 
-#ifndef SECP256K1_CT_SIGN_KERNELS
+#if !defined(SECP256K1_CT_SIGN_KERNELS) && !defined(SECP256K1_OPENCL_SCAN_ONLY)
 // Variable-time signing kernel — superseded by secp256k1_ct_extended.cl when
 // SECP256K1_CT_SIGN_KERNELS is defined. Do NOT dispatch on secret inputs.
 __kernel void schnorr_sign(
@@ -2662,7 +2701,7 @@ __kernel void schnorr_sign(
     success_flags[gid] = schnorr_sign_impl(&priv, msg, aux, &sig);
     signatures[gid] = sig;
 }
-#endif /* SECP256K1_CT_SIGN_KERNELS */
+#endif /* !SECP256K1_CT_SIGN_KERNELS && !SECP256K1_OPENCL_SCAN_ONLY */
 
 __kernel void schnorr_verify(
     __global const uchar* pubkeys_x,

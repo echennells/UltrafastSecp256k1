@@ -1,5 +1,56 @@
 # Audit Changelog
 
+## 2026-09-21 - the OpenCL scan-only embed stopped being self-contained (#415)
+
+Reported against `dev` @ `17fceb76` by a consumer validating CUDA and OpenCL
+backends on an RTX 5080. CUDA was correct with zero changes. OpenCL was not.
+
+A scan-only consumer embeds six kernel files -- `secp256k1_field.cl`,
+`secp256k1_point.cl`, `secp256k1_gen_table_w8.cl`, `secp256k1_extended.cl`,
+`secp256k1_affine.cl`, `secp256k1_bip352.cl` -- concatenates them, strips every
+`#include` line (`clCreateProgramWithSource` has no include path), and compiles
+the result at runtime. It builds a BIP-352 batch scanner and never enqueues
+`ecdsa_sign`, `schnorr_sign` or `ecdh`.
+
+At v4.5.0 that embed compiled. Since then `secp256k1_extended.cl` gained four
+`#include "secp256k1_ct_*.cl"` lines and sign paths that call into them. Those
+four files are not in the embed set, so with includes stripped the NVIDIA
+compiler reports `unknown type name 'CTJacobianPoint'` and implicit declarations
+of `ct_generator_mul_impl`, `ct_point_to_jacobian`, `ct_scalar_inverse_impl` and
+`ct_jacobian_to_affine`. Nothing calls those wrappers -- OpenCL, like Metal's
+AIR, does not dead-strip a function whose callees are unresolved, so they break
+the compile anyway.
+
+**This is #335 reproduced in a second backend**, and it takes the same remedy.
+`SECP256K1_OPENCL_SCAN_ONLY` now excludes the four includes and everything that
+reaches them: `ecdsa_sign_impl`, `schnorr_sign_impl`, the whole ECDH block
+(`ct_ecdh_scalar_mul_affine`, `ecdh_compute_raw_impl`, `ecdh_compute_xonly_impl`,
+`ecdh_compute_impl`), `ecdsa_sign_recoverable_impl`, and the `ecdsa_sign` /
+`schnorr_sign` kernels. Following the call chain to the kernel entry points is
+the part that matters: guarding only the callee moves the error onto the
+wrapper. The `SchnorrSignature` and `RecoverableSignature` typedefs stay outside
+the guard -- `schnorr_verify_impl` needs the first, and neither references
+anything undefined.
+
+The repo's own build never defines the macro, so the default kernels are
+unchanged. Measured on the embed itself: 6 surviving `ct_*` / `CT*` references
+without the macro, **0** with it.
+
+The other five embed files were checked for the same defect and have no `ct_*`
+reference at all.
+
+**Test.** `audit/test_regression_opencl_kernel_closure.cpp`
+(`regression_opencl_kernel_closure`, section `memory_safety`, blocking, wired
+with a standalone CTest target). It reproduces the consumer's embed exactly --
+six files, that order, `#include` lines stripped -- and asserts that with the
+guard applied no `ct_*` identifier and no `CT*` type name survives (OKC-2).
+The negative control is the point: without the guard those references ARE
+present (OKC-3), so OKC-2 cannot pass vacuously if someone deletes the guard.
+OKC-1 pins that all six files resolve from any CWD; OKC-4 pins that no `#else`
+sits at the top level of a guarded region, which is the one shape the test's
+guard evaluator does not model. It is a source scan -- no OpenCL device, no
+vendor compiler, no host preprocessor -- so it runs everywhere. 5/5 checks pass.
+
 ## 2026-09-21 - a dead co-Z helper kept the -Werror gate red
 
 `49925a1a` made the co-Z table build the default and deleted the `#else` arm it

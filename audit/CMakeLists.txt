@@ -3677,6 +3677,22 @@ add_test(NAME regression_metal_shader_closure
 set_tests_properties(regression_metal_shader_closure PROPERTIES
     TIMEOUT 60 LABELS "audit;regression;metal;shaders")
 
+# -- OpenCL scan-only embed closure (GitHub issue #415) ------------------------
+# The OpenCL twin of the Metal check above. A consumer embeds six .cl files with
+# every #include stripped; four secp256k1_ct_*.cl includes in secp256k1_extended.cl
+# made that embed reference undefined ct_* symbols. Source scan, so it runs with
+# no OpenCL device and no vendor compiler.
+add_executable(test_regression_opencl_kernel_closure_standalone
+    test_regression_opencl_kernel_closure.cpp)
+audit_target_defaults(test_regression_opencl_kernel_closure_standalone)
+target_compile_definitions(test_regression_opencl_kernel_closure_standalone PRIVATE
+    STANDALONE_TEST
+    UFSECP_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME regression_opencl_kernel_closure
+    COMMAND test_regression_opencl_kernel_closure_standalone)
+set_tests_properties(regression_opencl_kernel_closure PROPERTIES
+    TIMEOUT 60 LABELS "audit;regression;opencl;kernels")
+
 # -- Metal dispatch buffer-binding order --------------------------------------
 # schnorr_verify_batch bound {pks, msgs, ...} against a kernel declaring
 # {msg_hashes, pubkeys_x, ...}, so every valid BIP-340 signature was verified
@@ -4496,6 +4512,8 @@ add_executable(unified_audit_runner
     test_regression_hmac_guard_fail_closed.cpp
     # Regression: the Metal shader include closure is complete and copied.
     test_regression_metal_shader_closure.cpp
+    # Regression: the OpenCL scan-only embed stays self-contained (#415).
+    test_regression_opencl_kernel_closure.cpp
     test_regression_metal_buffer_binding_order.cpp
     # Regression: fixed-base cache does not litter the working directory.
     test_regression_fixed_base_cache_lifecycle.cpp
