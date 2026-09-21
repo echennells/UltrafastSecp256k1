@@ -37,6 +37,17 @@ def main() -> int:
         if actual != expected:
             failures.append(f"{path}: expected is_test_file={expected}, got {actual}")
 
+    # Every retroactive-coverage entry must name test files that still exist.
+    # check_commit() turns a missing one into a hard FAIL on a commit that was
+    # already accepted, so a test deleted or renamed later would break the gate
+    # on an unrelated push. Catch it here instead, where the fix is obvious.
+    for sha, (test_files, _note) in gate.RETROACTIVELY_COVERED.items():
+        for test_file in test_files:
+            if not os.path.exists(os.path.join(ROOT, test_file)):
+                failures.append(
+                    f"RETROACTIVELY_COVERED[{sha}] names a missing file: {test_file}"
+                )
+
     if failures:
         print("check_security_fix_has_test self-test: FAILED")
         for failure in failures:

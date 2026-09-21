@@ -15,6 +15,7 @@ Deterministic output (no timestamps) so --check is stable.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -27,7 +28,27 @@ SKIP_PARTS = {
     "out", "_research_repos", "_libsecp256k1", "third_party", "build", ".git",
     "bitcoin-core-dev", "litecoin-core-dev", "dogecoin-core-dev", "libbitcoin-system",
     ".claude", "node_modules", "cmake-build-debug", "cmake-build-release",
+    # AIWorkHub per-task runtime worktrees (.aiworkhub/runtime/worktrees/<id>/worktree):
+    # full nested repo checkouts that other concurrent tasks create and tear
+    # down while this scan runs. See _iter_cmakelists() for why they must be
+    # pruned before descending, not just filtered after the fact.
+    ".aiworkhub",
 }
+
+# Local/scratch build-output directory NAME PATTERNS, not just the exact
+# literals above. Agents and developers routinely create ad-hoc build trees
+# such as "build-audit", "build_bench_run", "build-review-lbtc-gpu",
+# "out-review" — these contain CMake-*generated* probe files (e.g.
+# `CMakeFiles/CheckCUDA/CMakeLists.txt`) that must never feed the option scan
+# or the "Generated from:" footer. Without this, docs/BUILD_OPTIONS.md becomes
+# non-deterministic: --check passes or fails purely depending on which
+# transient build directories happen to exist on the machine that last ran
+# this generator, even when zero option() declarations actually changed.
+SKIP_PART_RE = re.compile(r"^(?:build|out|cmake-build)(?:[-_].*)?$")
+
+
+def _is_skipped_part(part: str) -> bool:
+    return part in SKIP_PARTS or bool(SKIP_PART_RE.match(part))
 
 # Map a CMakeLists' directory (relative to ROOT) to a human scope label + sort order.
 SCOPE_ORDER = [
@@ -52,6 +73,30 @@ def _scope_for(rel_dir: str) -> str:
         if rel_dir == d:
             return label
     return f"Other ({rel_dir})"
+
+
+# `# gen_build_options-default: <text>` above an option() whose default is a
+# variable. The text is what the table prints in the Default column.
+ANNOTATION_RE = re.compile(r"^\s*#\s*gen_build_options-default:\s*(\S.*?)\s*$")
+
+
+def _annotated_default(text: str, option_start: int) -> str | None:
+    """The nearest gen_build_options-default annotation above `option_start`.
+
+    Only comment lines are crossed, so the annotation must sit in the comment
+    block immediately above the declaration -- it cannot drift onto an
+    unrelated option further up the file.
+    """
+    lines = text[:option_start].splitlines()
+    for line in reversed(lines):
+        stripped = line.strip()
+        m = ANNOTATION_RE.match(line)
+        if m:
+            return m.group(1)
+        if stripped.startswith("#") or not stripped:
+            continue
+        return None
+    return None
 
 
 def parse_options(text: str):
@@ -94,23 +139,63 @@ def parse_options(text: str):
             j += 1
         dt = re.match(r"[^\s)]+", text[j:])
         default = dt.group(0) if dt else "?"
+        # A computed default (`option(X "..." ${some_var})`) has no literal to
+        # print, and rendering the raw `${some_var}` into the table tells a
+        # reader nothing. Require the declaration to say what the default
+        # actually is, in a machine-read comment directly above it:
+        #
+        #   # gen_build_options-default: ON, or OFF when CMAKE_BUILD_TYPE=Debug
+        #   option(SECP256K1_USE_LTO "..." ${_secp256k1_lto_default})
+        #
+        # Absent that, `default` keeps the `${...}` token and main() refuses to
+        # write the doc -- so a computed default can never silently render as a
+        # variable name.
+        if default.startswith("${"):
+            ann = _annotated_default(text, m.start())
+            if ann:
+                default = ann
         out.append((name, desc, default, kind))
         i = max(j, m.end())
     return out
+
+
+def _iter_cmakelists():
+    """Yield CMakeLists.txt paths under ROOT, pruning SKIP_PARTS directories
+    (including .aiworkhub) before descending into them.
+
+    Path.rglob() has no way to prune a subtree before entering it, so it would
+    still walk into .aiworkhub/runtime/worktrees/<id>/... — per-task AIWorkHub
+    checkouts that other concurrent tasks create and tear down while this scan
+    runs. Descending into one would pollute BUILD_OPTIONS.md with duplicate
+    option() entries from a nested repo copy (non-deterministic: depends on
+    which worktrees happen to exist at scan time) and risks the walk hitting a
+    directory that vanishes mid-scan. os.walk() lets us drop skipped directory
+    names from `dirnames` in place, so pruned subtrees are never entered and
+    can never race.
+    """
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if not _is_skipped_part(d)]
+        if "CMakeLists.txt" in filenames:
+            yield Path(dirpath) / "CMakeLists.txt"
 
 
 def collect():
     """Return {scope_label: {name: (desc, default, kind)}} deduped by richest description."""
     best: dict[str, tuple[str, str, str, str]] = {}  # name -> (desc, default, kind, scope)
     files = []
-    for p in sorted(ROOT.rglob("CMakeLists.txt")):
+    for p in sorted(_iter_cmakelists()):
         rel = p.relative_to(ROOT)
-        if any(part in SKIP_PARTS for part in rel.parts):
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            # Discovered by the walk, then removed before it could be read
+            # (e.g. a nested runtime worktree torn down mid-scan) — skip
+            # rather than crash the generator.
             continue
         files.append(rel)
         rel_dir = str(rel.parent) if str(rel.parent) != "." else "."
         scope = _scope_for(rel_dir)
-        for name, desc, default, kind in parse_options(p.read_text(errors="replace")):
+        for name, desc, default, kind in parse_options(text):
             prev = best.get(name)
             # keep the declaration with the longest (richest) description
             if prev is None or len(desc) > len(prev[0]):
@@ -174,7 +259,29 @@ def render() -> str:
     return "\n".join(lines)
 
 
+def _unresolved_defaults() -> list[str]:
+    """Options whose Default column would print a raw ${variable}."""
+    grouped, _total, _files = collect()
+    bad = []
+    for scope, opts in grouped.items():
+        for name, (_desc, default, _kind) in opts.items():
+            if default.startswith("${"):
+                bad.append(f"{name} (in {scope}) -> {default}")
+    return sorted(bad)
+
+
 def main() -> int:
+    unresolved = _unresolved_defaults()
+    if unresolved:
+        print("::error::option() default is a variable with no "
+              "`# gen_build_options-default:` annotation above it, so the "
+              "generated table would print the variable name instead of the "
+              "real default:")
+        for b in unresolved:
+            print(f"  - {b}")
+        print("Add a comment directly above the declaration, e.g.")
+        print("  # gen_build_options-default: ON, or OFF when CMAKE_BUILD_TYPE=Debug")
+        return 1
     content = render()
     if "--stdout" in sys.argv:
         sys.stdout.write(content)

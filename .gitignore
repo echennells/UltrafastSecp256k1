@@ -102,7 +102,6 @@ bindings/rust/Cargo.lock
 bindings/dart/.dart_tool/
 bindings/swift/.build/
 bindings/nodejs/node_modules/
-bindings/nodejs/package-lock.json
 bindings/ruby/*.gem
 bindings/csharp/**/bin/
 bindings/csharp/**/obj/
@@ -205,6 +204,9 @@ bindings/**/__pycache__/
 # Local developer overrides (machine-specific, never shared)
 local_settings.json
 .env.local
+
+# MCP server config (local-only, may contain credentials/tokens)
+.mcp.json
 
 # Generated report files (moved to out/reports/ as of 2026-05-01)
 out/reports/

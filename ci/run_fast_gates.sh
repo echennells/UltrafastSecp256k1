@@ -42,6 +42,7 @@ SUMMARY=0
 # always present, wiring checks always run, etc.
 MANDATORY_GATES=(
     "ci/check_exploit_wiring.py"
+    "ci/check_shim_test_reachability.py"  # round 8 (issue #335): shim CTest selection must be label-based, not a fragile name-substring regex
     "ci/check_security_fix_has_test.py"
     "ci/test_check_security_fix_has_test.py"
     # check_advisory_skip_returns.sh is NOT listed here: in fast_gates (pre-build)
@@ -50,7 +51,10 @@ MANDATORY_GATES=(
     "ci/test_audit_scripts.py"           # P3-PR-011: audit framework self-test is mandatory
     "ci/test_sync_module_count.py"       # DOC-DRIFT-COUNT: paired README counts must sync together
     "ci/check_version_sync.py"
+    "ci/test_check_version_sync.py"      # self-test: issue #335 round 11 version/count sync gate self-test
     "ci/check_abi_version_sync.py"       # REL-ABI: binding EXPECTED_ABI must equal library ABI (== MAJOR)
+    "ci/check_node_package_contract.py"  # NODE-PKG-001: FFI package must not declare ghost node-gyp inputs
+    "ci/check_windows_cuda_contract.py"  # WIN-CUDA-001: real nvcc build requires compiler/runtime development headers
     "ci/check_randomize_claim_consistency.py"  # REVIEWER-FRICTION-001: no doc may call context_randomize a no-op
     "ci/check_required_checks_match_jobs.py"   # CAAS-CI-001: branch-protection contexts must resolve to PR-triggered jobs
     "ci/check_sanitizer_result_assertions.py"  # CAAS6-01: required memcheck jobs must fail closed on "no logs produced"
@@ -74,9 +78,12 @@ MANDATORY_GATES=(
     "ci/check_nonce_erase_coverage.py"
     "ci/check_doc_drift.py"
     "ci/check_advisory_skip_ceiling.py"
+    "ci/test_check_audit_cwd_independence.py"  # self-test: dual-CWD gate must catch a vacuous-skip regression (issue #335 round 6)
+    "ci/check_installed_header_parity.py"      # real gate, wired round 12: a healthy CI runner always has cmake+a compiler
     "ci/check_test_assertions.py"        # TEST-001/§12: forbid non-asserting "documented open" probes (MSI-4 anti-pattern)
     "tools/render_repo_map.py"
     "ci/validate_assurance.py"
+    "ci/test_check_installed_header_parity.py"  # self-test: issue #335 round 10 generated-header parity detector
 )
 
 is_mandatory() {
@@ -141,10 +148,16 @@ run_sh() {
 
 run "Repo map check"          tools/render_repo_map.py --check
 run "Exploit wiring parity"  ci/check_exploit_wiring.py
+run "Exploit wiring gate self-test (proof-it-blocks)" ci/test_check_exploit_wiring.py
+run "Shim CTest reachability (structural)"     ci/check_shim_test_reachability.py
+run "Shim reachability gate self-test (proof-it-blocks)" ci/check_shim_test_reachability.py --self-test
 run "Advisory blocking twin (CAAS-FG-01)" ci/check_advisory_has_blocking_test.py
 run "Security fix has test"   ci/check_security_fix_has_test.py --commits 10
 run "Security-fix gate self-test" ci/test_check_security_fix_has_test.py
 run "Version + count sync"   ci/check_version_sync.py
+run "Node FFI package contract" ci/check_node_package_contract.py
+run "Windows CUDA workflow contract" ci/check_windows_cuda_contract.py
+run "Version sync gate self-test (proof-it-blocks)" ci/test_check_version_sync.py
 run "Canonical data sync"    ci/build_canonical_data.py --dry-run
 run "Docs from canonical"    ci/sync_docs_from_canonical.py --dry-run
 run "Module count sync"      ci/sync_module_count.py --dry-run
@@ -157,6 +170,7 @@ run "Assurance validation"   ci/validate_assurance.py
 # protocol invariant violations (root cause of confirmed red-team bugs C1–C8).
 run "Backend parity"                           ci/check_backend_parity.py
 run "GPU backend parity (CUDA/OpenCL/Metal)"   ci/check_gpu_backend_parity.py
+run "OpenCL generator w4 constant-table regression" ci/check_opencl_generator_w4.py
 run "ZK Fiat-Shamir tag conformance"           ci/check_zk_tag_conformance.py
 run "Tagged-hash tag conformance (all tags)"   ci/check_tag_conformance.py
 run "Secret parse strictness (Rule 11)"        ci/check_secret_parse_strictness.py
@@ -187,6 +201,7 @@ run "Required exploit-module floor (attack classes)" ci/check_required_exploit_m
 run "Required-module floor self-test (proof-it-blocks)" ci/test_check_required_exploit_modules.py
 run "Nonce erase coverage (BIP-327)"           ci/check_nonce_erase_coverage.py
 run "Doc drift (badges, removed files)"        ci/check_doc_drift.py
+run "README CI badges branch-aware (main/dev)" ci/check_readme_ci_badges.py
 run "Bench/doc consistency (banned patterns)" ci/check_bench_doc_consistency.py
 
 # Regression gates for the 2026-05-29 read-only-review fixes:
@@ -202,6 +217,7 @@ run "Sanitizer-assertion gate self-test"        ci/test_check_sanitizer_result_a
 run "Reviewer-doc module counts (CLAIMS-001)"   ci/check_doc_module_counts.py
 run "Build options doc sync"                    ci/gen_build_options.py --check
 run "Build options gate self-test"              ci/test_gen_build_options.py
+run "LTO default follows build type (LTO-DEBUG-001)" ci/check_lto_build_type_default.py
 run "Workflow trigger claims (CLAIM-07)"       ci/check_workflow_trigger_claims.py
 run "Secret-erase coverage (CT-04/RT-05)"      ci/check_secret_erase_coverage.py
 run "Secret-erase self-test (proof-it-blocks)" ci/test_check_secret_erase_coverage.py
@@ -214,6 +230,26 @@ run "Profile manifest consistency" ci/profile_manifest.py --quiet
 
 run_sh "Advisory skip returns (Rule 16)" ci/check_advisory_skip_returns.sh
 run "Advisory skip ceiling (TEST-004)"  ci/check_advisory_skip_ceiling.py
+run "Advisory-ceiling gate self-test (proof-it-blocks)" ci/test_check_advisory_skip_ceiling.py
+
+# ci/check_audit_cwd_independence.py itself needs a real compiled binary (run
+# twice, repo root + /tmp) and does NOT belong in this no-build fast tier —
+# it is wired into ci_local.sh --full instead. Its pure comparison logic is
+# unit-tested here (fast, no build) so a regression in the comparator itself
+# is still caught on every push.
+run "Audit CWD-independence gate self-test (proof-it-blocks)" ci/test_check_audit_cwd_independence.py
+
+# ci/check_installed_header_parity.py (issue #335): round 9 found
+# include/ufsecp/ufsecp_version.h.in missing UFSECP_DEPRECATED; round 10
+# disclosed it but, after mistakenly treating that file as out of scope,
+# never fixed it. Round 11 fixed it for real (verified: zero semantic drift,
+# real C/C++ consumers compile against the generated header). This isolated
+# check needs only a tiny configure_file()-equivalent templating step plus a
+# small real compile (~0.3s total, not a full project cmake configure), so
+# round 12 wires the REAL gate here rather than leaving only its self-test.
+run "Installed-header parity gate (real)" ci/check_installed_header_parity.py --json
+run "Installed-header parity gate self-test (proof-it-blocks)" ci/test_check_installed_header_parity.py
+
 run "Test assertions (non-asserting probe scan)" ci/check_test_assertions.py
 run "Section IDs consistency"        ci/check_section_ids.py
 

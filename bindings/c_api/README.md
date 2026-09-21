@@ -2,7 +2,19 @@
 
 Standalone C header-only API for [UltrafastSecp256k1](https://github.com/shrec/UltrafastSecp256k1) -- high-performance secp256k1 elliptic curve cryptography.
 
-This is a **stateless** API with `secp256k1_*` naming (no context object). It differs from the main `ufsecp_*` context-based API.
+This is a **stateless** API with `ultrafast_secp256k1_*` naming (no context object). It differs from the main `ufsecp_*` context-based API.
+
+> **Renamed 2026-09-15 (BREAKING).** Every symbol on this surface used to be spelled
+> `secp256k1_*`, which is libsecp256k1's C namespace. Eleven of the thirty-six names
+> were defined by *both* this library and the bundled libsecp256k1 shim, with
+> incompatible signatures -- `secp256k1_ecdsa_sign(msg, privkey, sig_out)` here
+> against `secp256k1_ecdsa_sign(ctx, sig, msg32, seckey, noncefp, ndata)` there.
+> Linking both produced a duplicate-symbol error at best; resolving to the wrong one
+> at load time would have passed a context pointer where a private key was expected.
+> The prefix is now `ultrafast_secp256k1_`, and `exports.map` exports only that.
+> Migration is a mechanical rename: `secp256k1_foo` -> `ultrafast_secp256k1_foo`.
+> No compatibility aliases are provided, deliberately -- an alias would reintroduce
+> the collision it exists to remove.
 
 > Warning: this legacy stateless surface is not the standardized secure binding model.
 > For secret-bearing integrations, prefer the `ufsecp_*` context-based ABI and the binding standard in `docs/BINDINGS_USAGE_STANDARD.md`.
@@ -37,19 +49,19 @@ This is a **stateless** API with `secp256k1_*` naming (no context object). It di
 ```c
 #include "ultrafast_secp256k1.h"
 
-secp256k1_init();
+ultrafast_secp256k1_init();
 
 uint8_t privkey[32] = {0};
 privkey[31] = 1;
 
 uint8_t pubkey[33];
-secp256k1_ec_pubkey_create(privkey, pubkey);
+ultrafast_secp256k1_ec_pubkey_create(privkey, pubkey);
 
 uint8_t msg[32] = {0};
 uint8_t sig[64];
-secp256k1_ecdsa_sign(msg, privkey, sig);
+ultrafast_secp256k1_ecdsa_sign(msg, privkey, sig);
 
-int ok = secp256k1_ecdsa_verify(msg, sig, pubkey);
+int ok = ultrafast_secp256k1_ecdsa_verify(msg, sig, pubkey);
 ```
 
 ## API Differences
@@ -57,8 +69,8 @@ int ok = secp256k1_ecdsa_verify(msg, sig, pubkey);
 | Feature | `ufsecp_*` (main) | `secp256k1_*` (this) |
 |---------|-------------------|----------------------|
 | Context | Required | None (global init) |
-| Init | `ufsecp_ctx_create()` | `secp256k1_init()` |
-| Naming | `ufsecp_ecdsa_sign` | `secp256k1_ecdsa_sign` |
+| Init | `ufsecp_ctx_create()` | `ultrafast_secp256k1_init()` |
+| Naming | `ufsecp_ecdsa_sign` | `ultrafast_secp256k1_ecdsa_sign` |
 | Thread safety | Per-context | Global state |
 
 ## Architecture Note

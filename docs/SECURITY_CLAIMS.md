@@ -1,6 +1,476 @@
 # Security Claims & API Contract
 
-**UltrafastSecp256k1 v4.5.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
+**UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
+
+### 2026-09-21 - v4.6.0 release claims: what a consumer must re-check on upgrade
+
+The v4.6.0 `CHANGELOG.md` section is the full account. This is the claims view of
+it: which of this release's 195 commits change what a consumer may assert, and
+which do not.
+
+**Claims that were WRONG before this release, in descending severity.**
+
+1. **Schnorr batch verification was not sound (P0).** `batch_weight()` captured a
+   `SHA256::Midstate` over a 32-byte seed. A midstate carries `state_` and
+   `total_` only, so it is well defined at 64-byte boundaries; all 32 seed bytes
+   were still in `buf_` and were discarded while `total_` kept counting them.
+   Every weight collapsed to a **public constant of the index** -- identical in
+   every batch on every machine -- and the 32 CSPRNG bytes added to make the
+   weights unpredictable were computed and thrown away. The small-exponents
+   proof requires the weights be drawn after and independently of the
+   signatures; with them public, defeating the check costs one modular
+   inversion, with reusable offsets and no key, grinding or discrete log.
+   Reachable above `kSchnorrBatchIndividualCutoff` (96). **If you relied on
+   `schnorr_batch_verify` for n > 96, treat prior verdicts as unproven.**
+
+2. **The BCH 2019 Schnorr shim leaked the private key.** It called the same
+   `rfc6979_nonce(d, msg)` that `ct::ecdsa_sign` uses, so signing one message
+   with one key under both schemes reused a single nonce. Exposure was limited --
+   the shim ships in no default build, which is also why the defect survived --
+   but that is a root cause, not a mitigation. See
+   [`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) under the same date.
+
+3. **Field arithmetic returned wrong answers for legal inputs.** `reduce()` lost
+   a carry two ways (an x86-64 GAS mask that was never built, and a portable
+   first fold that could not reach `result[4]`), and `FieldElement::sqrt()`
+   returned a non-root for ~18% of inputs. Neither is a timing or secrecy claim;
+   both are correctness claims, and both were false. The BIP-340 hot paths were
+   unaffected -- they run on `FieldElement52` -- which is why the KAT suites
+   stayed green and why *"the vectors pass"* was not sufficient evidence.
+   See [`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date.
+
+4. **GPU verify accepted out-of-range compact ECDSA scalars**, reducing `r`/`s`
+   ≥ n mod the group order instead of rejecting them, so `collect` and
+   `verify_batch` disagreed on the `s+n` congruent-malleation encoding and the
+   documented bit-identical-verdict invariant did not hold. Metal
+   `schnorr_verify_batch` separately bound its message and x-only pubkey
+   swapped, rejecting every valid signature -- a false negative, never a false
+   accept, but it made GPU Schnorr batch verify unusable on Apple hardware.
+
+**Claims about process, not cryptography.** Two of this release's repairs are
+about whether the evidence could be trusted at all:
+
+- **A `-Werror` gate that is red on every push is not enforcing anything.** A
+  static helper orphaned by `49925a1a` had been failing the Security Audit
+  workflow since 2026-09-15, and the library build stops at `point.cpp.o`, so
+  nothing after it was being checked either. A genuinely new warning would have
+  been indistinguishable from the standing failure.
+- **Two audit tests were leaking a fail-closed Metal shader-path override**, and
+  the audit binary then stopped building on macOS. The Metal parity test that
+  would have caught defect 4 above needs a real device, and `CI / macos (Release)`
+  never reached it. On the first macOS run that both built and executed the
+  suite, that test failed 3 of 24.
+
+**Claims that did NOT change.** The `ufsecp_*` C ABI (`UFSECP_ABI_VERSION` stays
+4); every CT boundary (see `CT_VERIFICATION.md`); the zeroization verdict (see
+`SECRET_LIFECYCLE.md`). The `bindings/c_api` rename is an ABI-safety repair, not
+a cryptographic one — its hazard was argument-shape confusion across two meanings
+of one symbol, which is a memory-safety failure on a secret-bearing call rather
+than a timing leak.
+
+### 2026-09-21 - v4.6.0: a warning gate that was not enforcing, and a consumer build that was broken
+
+Two repairs, neither of them a cryptographic claim. Both reach the gate-watched
+surface (`CHANGELOG.md`), and this answers the classification rather than waiving
+it. See [`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date for the
+CT-boundary reasoning and [`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) for the
+zeroization verdict.
+
+**The claim repaired first is gate integrity.** `49925a1a` deleted the `#else`
+arm that held the only call to `jac52_add_mixed_inplace_zr`, leaving a static
+function with no callers. GCC 14 calls that `defined but not used`, the Security
+Audit workflow builds with `-DSECP256K1_WERROR=ON`, and its `Build with -Werror`
+job had failed on every push since 2026-09-15. **A gate that is red on every push
+is not enforcing anything** — a genuinely new warning would have been
+indistinguishable from the standing failure. The library build stops at
+`point.cpp.o`, so nothing after it was being checked either. Reproduced locally
+with the workflow's exact configure line and `ninja -k 0`, which keeps building
+past a failure: `point.cpp.o` was the only failing object in the whole tree.
+Deleting the function restores the gate; it changes no behaviour, because a
+static function with no callers contributes no code.
+
+**The claim repaired second is consumer buildability, not a vulnerability.**
+GitHub issue #415: a consumer that embeds the six scan-only OpenCL kernel files
+with `#include` lines stripped could no longer compile them, because
+`secp256k1_extended.cl` had grown four `secp256k1_ct_*.cl` includes and sign
+paths that call into them, and OpenCL — like Metal's AIR — does not dead-strip a
+function whose callees are unresolved. Nothing was exploitable: the failure is a
+compile error in a downstream build, and no shipped kernel misbehaved.
+
+What makes it worth a claims entry is that this is **the second instance of one
+failure class in three months**, after #335 in Metal. `SECP256K1_OPENCL_SCAN_ONLY`
+mirrors `SECP256K1_METAL_SCAN_ONLY`, and the class is now gated on every push by
+a blocking audit module (`regression_opencl_kernel_closure`) that rebuilds the
+consumer's embed and fails if any `ct_*` symbol or `CT*` type survives it, with a
+live negative control so it cannot pass vacuously. The default build is
+unaffected and that is verified, not asserted: preprocessing the kernel with no
+macro defined, before and after, yields 2169 identical lines and an empty diff.
+
+### 2026-09-15 - The legacy c_api stopped squatting libsecp256k1's C namespace
+
+`bindings/c_api` exported 36 functions named `secp256k1_*` and `exports.map`
+published that whole prefix from the shared library. Eleven of the 36 are also
+defined by the bundled libsecp256k1 shim, with incompatible signatures.
+
+**The claim this repairs is ABI safety, not constant time.** No cryptographic path
+was edited; see [`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date. The
+hazard is argument-shape confusion across two meanings of one symbol:
+
+    ultrafast_secp256k1_ec_seckey_verify(privkey32)     <- ours
+    secp256k1_ec_seckey_verify(ctx, seckey32)           <- libsecp
+
+Statically, linking both objects is a duplicate-symbol error and the build stops.
+Dynamically -- two shared objects, an `LD_PRELOAD`, a plugin host -- the loader picks
+one and a caller compiled against the other passes its arguments one position out. A
+`secp256k1_context*` then lands where a 32-byte private key is expected, so the
+library reads 32 bytes of the context as key material; the reverse dereferences a
+private-key pointer as a context. Neither is a timing leak. Both are memory-safety
+failures on a secret-bearing call.
+
+The library now exports 36 `ultrafast_secp256k1_*` symbols and **zero**
+`secp256k1_*` symbols, verified with `nm -D --defined-only` on the built `.so`. All
+eleven language bindings were updated in the same commit and re-verified symbol by
+symbol against it. No compatibility aliases: an alias reintroduces the collision,
+and a header `#define` of `secp256k1_ecdsa_sign` in a translation unit that also
+includes real libsecp256k1 would be worse than the original defect.
+
+Nothing about the `ufsecp_*` context ABI, the libsecp256k1 shim, or any CT, ECDSA,
+Schnorr or recovery claim moves. KB `BCH-SCHNORR-CAPI-SYMBOL-COLLISION`.
+
+### 2026-09-14 - BCH Schnorr shim: nonce shared with ECDSA (key recovery), and two spec violations
+
+Three defects in `compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp`, the
+Bitcoin Cash 2019 EC-Schnorr surface `OP_CHECKDATASIG` accepts. All fixed.
+
+**1. Nonce reuse across schemes -- private key recoverable (P1).** The signer
+called `secp256k1::rfc6979_nonce(d, msg)`: the same function, with the same
+arguments, that `ct::ecdsa_sign` calls (`src/cpu/src/ct_sign.cpp:50`). Signing one
+32-byte message with one key under both schemes reused a single nonce `k` across
+two equations,
+
+    ECDSA    s1 = k^-1 (z + r*d)
+    Schnorr  s2 = k + e*d
+    =>       d  = (s1*s2 - z) / (r + s1*e)   mod n
+
+and both signatures are public. Demonstrated rather than inferred: over 16 fixed
+(key, message) pairs the pre-fix shim's Schnorr `r` was byte-equal to the ECDSA
+`r` in 16/16 cases, and the formula recovered **16 of 16 private keys** from the
+signature pairs alone. Fixed by the RFC 6979 domain separator the spec mandates,
+`algo16 = "Schnorr+SHA256  "` -- which is precisely what makes the two nonce
+streams disjoint, and the concrete reason that tag is a security control rather
+than a formatting detail.
+
+**2. `Jacobi(R.y) == 1` absent on both sides.** The signer never negated its
+nonce for a non-residue `R.y`; the verifier never applied verification step 10.
+Self-concealing: our verifier accepted such signatures precisely because it
+skipped the check BCHN and Libauth apply. Over the same 16 pairs, only 6 had a
+residue `R.y` -- **10 of 16 signatures would have been rejected by a BCH node**
+while our own verifier took all 16.
+
+**3. Signature bytes matched no other implementation.** Consequence of (1): 0 of
+16 were byte-identical to BCHN/Libauth for the same key and message. Now 16 of 16.
+
+**Exposure.** The BCH shim builds only under `SECP256K1_BCHN_SHIM_BUILD_TESTS`,
+which defaults `OFF` and which no GitHub workflow and no `ci/` script has ever
+set, so it shipped in no default build and no gate ever executed it. That is the
+root cause of all three surviving, and it is not a mitigation to rely on.
+
+**Claim scope unchanged elsewhere.** `rfc6979_nonce_libsecp_compat` gained an
+optional `algo16` argument; passing `nullptr` keeps every existing caller
+byte-for-byte on libsecp256k1's `"ECDSA\0..."` tag, so no ECDSA, Schnorr (BIP-340)
+or recovery claim moves. New CTest module `regression_bch_schnorr_spec` pins all
+three: 8 known-answer vectors from an independent implementation of the spec, the
+`-R` twin negative control, and a direct nonce-collision probe. Reported under
+issue #374.
+
+### 2026-09-14 - The default build is now the build the canonical benchmark measured
+
+The co-Z table construction and the CT SafeGCD field inverse are the default
+build; `-DREPSEARCH_COZ_TABLE=1` and `-DREPSEARCH_CT_SAFEGCD_INV=1` no longer
+exist. Recorded here because the secret-path gate classifies
+`src/cpu/src/ct_point.cpp` and `CHANGELOG.md` as CT secret-bearing surfaces.
+
+**No security claim weakens, and one documentation claim stops being
+conditional.** The CT analysis is in [`CT_VERIFICATION.md`](CT_VERIFICATION.md)
+under the same date: both changes swap one constant-time implementation for
+another inside an unchanged boundary, and the table build was a function of the
+base point rather than of the secret scalar both before and after.
+
+What is repaired is an evidence claim. `docs/bench_unified_2026-09-07_gcc14_x86-64.json`
+was produced WITH both flags set — its `build` field records the exact cmake
+invocation — so every ratio in `docs/canonical_numbers.json`, and every document
+the sync scripts derive from it, described a binary that
+`cmake --preset cpu-release` did not produce. Any reader reproducing the numbers
+from the documented preset would have measured a different binary. The default
+preset now produces that binary.
+
+Established as code identity rather than as a fresh measurement: `point.cpp` and
+`ct_point.cpp` compiled from the default tree emit assembly identical to the
+previous tree compiled with both macros (same `compile_commands.json` flags plus
+`-fno-lto -g0 -S`; 101364 and 83201 lines; empty diff once the temp-filename
+static-init symbol is normalised).
+
+### 2026-09-10 - Strict compact-ECDSA range (`r`,`s` in `[1, n-1]`) enforced uniformly on every GPU verify path
+
+The compact-ECDSA strictness guard added in this wave is a verification-contract
+alignment, not a CT boundary change. It is recorded here because the secret-path
+gate classifies the GPU verify sources and `CHANGELOG.md` as CT secret-bearing
+surfaces.
+
+**1. The disagreement it removes**
+
+For a 64-byte compact signature, "valid" previously depended on which GPU route
+handled the row. CUDA's batch kernel and the OpenCL parsers rejected `r >= n`
+or `s >= n` (strict compact parse). The defect was on the `s` side: CUDA's
+collect kernel converted the host-side compact bytes with
+`bytes_to_ecdsa_sig` -> `bytes_to_scalar` (no mod-`n` reduction) and its verify
+path compared the unreduced `s`, so the non-canonical `(r, s + n)` encoding
+(congruent mod `n`, and representable in 32 bytes whenever `s < 2^256 - n`)
+verified exactly like the canonical one. The `r` side was already tight
+pre-fix: the final `R.x` comparison is against the unreduced `r`, so `(r + n, s)`
+and `(r + n, s + n)` were already rejected everywhere before this change, and
+those rows are kept in the regression corpus as a guard against future change,
+not a reproduced bug. [Measured on an RTX 5060 Ti: CUDA collect accepted
+`(r, s + n)` while both `verify_batch` and the CPU oracle rejected it; `r + n`
+rows were rejected on every entrypoint.] The same 64 bytes changed meaning by
+entrypoint, which also broke the documented guarantee in
+`src/gpu/src/gpu_backend_cuda.cu` that the collect verdict is bit-identical to
+`verify_batch`. Metal's batch/collect paths and the device-side single-verify
+overload show the same unreduced-limbs pattern by source analysis (guard
+placement verified against the kernel/overload wiring in
+`src/metal/shaders/secp256k1_extended.h`); no Metal hardware was exercised, so
+those statements are inferred, not measured.
+
+- **Security claim: one uniform contract.** Every device-side `ecdsa_verify()`
+  (the single choke point shared by the single/batch/collect entrypoints and the
+  sign-and-verify countermeasure) now rejects `r >= n || s >= n` up front.
+  Boundary inputs verify identically against the CPU strict oracle
+  (`ufsecp_ecdsa_verify`, `parse_compact_strict` + low-S), so a compact
+  signature either verifies everywhere or nowhere across CPU, CUDA, OpenCL and
+  Metal.
+- **No CT boundary change:** `r` and `s` are PUBLIC bytes of the signature. The
+  guard is a fixed-limb `>=` comparison with no secret-dependent branch or
+  memory access, and it runs before any secret-touching verify math.
+- **No secret lifecycle change:** no new resident secret buffer, no added or
+  removed `secure_erase` site — see `docs/SECRET_LIFECYCLE.md` for the pairing.
+- **Tests:** `audit/test_gpu_ecdsa_compact_range.cpp` — `[A]` a
+  CPU-only source gate pins the guard inside each backend's `ecdsa_verify()`
+  body (before `scalar_inverse`), so a guard stranded in a helper no verify
+  path calls cannot satisfy it; `[B]` an on-device boundary differential over
+  a small-`(r, s)` recovered base and its congruent malleations
+  `(r, s+n)/(r+n, s)/(r+n, s+n)` plus the `{0, n-1, n, 2^256-1}` extremes,
+  through both batch and collect, checked row-by-row against the CPU oracle.
+  Invalid rows stay at the seeded marker (fail-closed). Rows are synced into
+  `docs/CT_VERIFICATION.md` / `docs/TEST_MATRIX.md` by `ci/sync_all_docs.py`.
+
+### 2026-09-07 - Fixed-base disk cache OFF by default, FE52 kernels always inlined, PT_TLS alignment (build-surface changes; no CT boundary moves)
+
+Three changes in this wave touch the root `CMakeLists.txt` and the FE52 field
+kernels, both of which the secret-path change gate classifies as CT
+secret-bearing surfaces. **None of them moves a CT boundary.** Each is recorded
+here so that classification is answered rather than waived.
+
+**1. `SECP256K1_FIXED_BASE_DISK_CACHE` (new CMake option, default OFF)**
+
+`FixedBaseConfig::use_cache` previously defaulted to `true` with an empty
+`cache_dir`, and the path resolver consulted `cache_dir` only when a file was
+already there — so the first run of any caller wrote the fixed-base comb table
+into its **current working directory** (`cache_w18.bin`, 255 MB at the default
+`window_bits = 18`). Reported by Eric Voskuil against libbitcoin's test suite.
+
+- **Security claim: PUBLIC DATA, no secret ever reached that file.** The
+  fixed-base table is precomputed multiples of the generator `G` — the same
+  values any observer can derive. This is a filesystem side-effect defect, not
+  a key-material disclosure, and no advisory is warranted for shipped versions
+  on that basis.
+- **What changed (final state):** the table is built **once** and reused. The
+  default location is the per-user cache directory the platform reserves for
+  this — `$XDG_CACHE_HOME/secp256k1` or `~/.cache/secp256k1`,
+  `~/Library/Caches/secp256k1`, `%LOCALAPPDATA%\secp256k1` — created if missing
+  and kept, so a later process loads it instead of recomputing. **Never the
+  working directory, in any mode.** The system temp directory is only a fallback
+  for when none of those can be determined, and that fallback is the one case
+  removed at exit. `-DSECP256K1_FIXED_BASE_DISK_CACHE=OFF` opts out entirely
+  (nothing written, table rebuilt per process); the macro is defined as 0 or 1
+  either way so the header default cannot disagree with the compiled library.
+- **Ownership:** a cache file in a caller-named directory is the caller's and is
+  never deleted by the library. `set_cache_directory()` / `SECP256K1_CACHE_DIR`
+  create the directory on the first save rather than requiring it to exist.
+- **Why not "write nothing":** an intermediate revision defaulted the cache off
+  entirely. That fixed the litter but made every process rebuild a ~250 MB
+  table, which is the wrong trade for a table whose purpose is to be computed
+  once; it is what turned `audit/test_exploit_selftest_api` from 6.6 s into a
+  120 s CI timeout on every platform. The location was the defect, not the
+  caching.
+- **Test:** `audit/test_regression_fixed_base_cache_lifecycle.cpp`, checks
+  FBC-1..4, which exercise both modes regardless of how the library was built.
+
+**2. FE52 kernels are `always_inline` on every target**
+
+`UFSECP_FE52_FORCE_INLINE_KERNELS` is removed, not flipped: `fe52_mul_inner`
+and `fe52_sqr_inner` are now `always_inline` wherever `field_52_impl.hpp`
+compiles.
+
+- **Security claim: NO CT BOUNDARY CHANGE.** A 5x52 field multiply is
+  straight-line `__int128` arithmetic with no data-dependent branch and no
+  secret-dependent memory access; it is timing-invariant whether it is inlined
+  or called. Inlining changes instruction scheduling, not data dependence. The
+  same two kernels back both the `fast::` and the `ct::` paths, and their
+  operand-independence is what the CT claim in section 7 rests on — that
+  property is unaffected.
+- **What it also removes:** the previous per-build macro was an ODR hazard.
+  `FieldElement52::operator*` and its siblings are `always_inline`
+  external-linkage inlines whose bodies call these kernels, so a binary linked
+  from TUs that disagreed about the macro was a silent mismatch rather than a
+  diagnostic. One shape everywhere removes that failure mode.
+- **Evidence:** x86-64 A/B (i5-14400F, GCC 14.2, governor pinned, turbo off,
+  cpu0, `nice -20`) moved 90 of 104 engine operations >= 500 ns by more than 2%;
+  ARM64 confirmed on two independent machines — a Rockchip RK3588 Cortex-A76
+  here, and an Apple M5 Max by the reporter of GitHub issue #336 on a
+  10,356,829-row BIP-352 scan (14.04-14.52s -> 12.40-12.83s, against a
+  re-measured v3.68.0 baseline of 12.3-12.7s). Cost: `libfastsecp256k1.a` grows
+  14.84% on x86-64 and 22.4% on arm64.
+
+**3. `alignas(64)` on `tl_context_owner` (PT_TLS segment alignment)**
+
+Every `thread_local` in the library was naturally 8- or 16-aligned, so the
+linker emitted `PT_TLS p_align = 8` — and Android arm64 Bionic **refuses to
+load** an executable whose TLS segment is aligned below 64
+("executable's TLS segment is underaligned"). No Android arm64 binary linking
+this library could start.
+
+- **Security claim: NO SECRET LIFETIME CHANGE.** `tl_context_owner` holds a
+  `shared_ptr` to the fixed-base precompute context — public multiples of `G`,
+  the same data as item 1. Raising its alignment changes segment layout, not
+  what is stored or how long it lives. Secret-bearing thread-locals are
+  unaffected and their erasure contracts are unchanged.
+- **Test:** `audit/test_regression_tls_segment_alignment.cpp`, TLS-ALIGN-1/2,
+  which parses the running binary's own program headers via `AT_PHDR` rather
+  than scanning source, so a future `thread_local` added anywhere cannot
+  silently drop the segment alignment back to 8.
+
+### 2026-07-15 - `ufsecp_gpu_bip352_scan_batch_multispend` added: GPU BIP-352 multi-spend-key scan (GitHub issue #335, paired with `include/ufsecp/ufsecp_gpu.h`)
+
+Added `GpuBackend::bip352_scan_batch_multispend` / C ABI
+`ufsecp_gpu_bip352_scan_batch_multispend` (native CUDA, OpenCL, and Metal
+kernels; `GpuBackend::bip352_scan_batch_multispend` is now a **pure virtual**
+method — every concrete backend must implement it, a stub returning
+`GpuError::Unsupported` is a compile error, not a runtime fallback). This is
+the reason `include/ufsecp/ufsecp_gpu.h` (a secret-path file per this repo's
+secret-path change gate) was touched in the GitHub issue #335 acceptance
+repair (round 1 and round 2).
+
+**Security claim: SECRET-BEARING (`scan_privkey32`) — CT/erasure contract
+identical to the pre-existing single-spend `ufsecp_gpu_bip352_scan_batch`,
+which this function now backs internally** (`ufsecp_gpu_bip352_scan_batch`
+is a thin `n_spend == 1` wrapper around this function; the two are
+byte-identical at `n_spend == 1`, covered by `SW-BIP352-M*` in
+`audit/test_gpu_bip352_scan.cpp`). `spend_pubkeys33` / `tweak_pubkeys33` /
+`prefix64_out` are all public data (BIP-352 sender-visible tweak/spend
+public keys and their scan output) — only `scan_privkey32` is secret.
+
+- **Key parsing:** `scan_privkey32` is parsed via
+  `Scalar::parse_bytes_strict_nonzero` on every backend (CUDA, OpenCL,
+  Metal) — zero and `>= group order` are rejected with
+  `UFSECP_ERR_BAD_KEY` / `GpuError::BadKey`. This is the SEC-002 regression
+  (`audit/test_regression_opencl_bip352_scan_key_boundary.cpp`, SKB-1..5):
+  the earlier reversed-limb-order scan implementation risked a `from_bytes`-
+  style silent mod-n reduction path; the fixed implementation never accepts
+  a scan key that is not in `[1, n)`.
+- **Erasure:** the scan scalar / GLV sub-scalars / device-side scan-key and
+  scan-plan buffers are `secure_erase`d on every return path (success and
+  failure) on all three backends — CUDA `FailClosedOutputGuard` /
+  `CudaKeyGuard` pattern, OpenCL `HostPlanGuard` +
+  `DevicePlanGuard`/`clEnqueueFillBuffer` zero-fill-before-release, Metal
+  `MetalScalarEraseGuard` + explicit `secure_erase` on the pooled scan-key
+  buffer.
+- **Fail-closed output:** on ANY non-OK return from any of the three
+  backends, `prefix64_out` is fully zeroed for its validated
+  `n_tweaks * n_spend` size before return — no partial/stale prefix data is
+  ever observable after a failed call. This is enforced at three layers:
+  (1) `ufsecp_gpu_bip352_scan_batch_multispend` (C ABI,
+  `src/cpu/src/ufsecp_gpu_impl.cpp`) pre-zeroes the caller's output buffer
+  before dispatch and re-zeroes on any non-OK backend return; (2) each
+  backend independently fails closed on its own internal error paths
+  (`fail()` lambda / `FailClosedOutputGuard` / `fail_dispatch()` lambda —
+  the last added 2026-07-15 round 2 for Metal, see below); (3) OpenCL's
+  `bip352_fault_injection` mockable control-call layer (round 2,
+  `src/gpu/src/gpu_backend_opencl.cpp`) proves this holds even under an
+  injected driver-call failure (`SW-FI-E2E-1/2`,
+  `audit/test_exploit_gpu_bip352_multispend_failclosed.cpp`), not just the
+  hand-picked null/bad-key negative cases.
+- **ABI-level overlap rejection (round 1, 2026-07-15):** the C ABI wrapper
+  rejects any pointer-range overlap between `prefix64_out` and
+  `scan_privkey32` / `spend_pubkeys33` / `tweak_pubkeys33` with
+  `UFSECP_ERR_BAD_INPUT` before the pre-zero step runs (overflow-safe
+  `ranges_overlap()`/`checked_add_size`, `src/cpu/src/ufsecp_gpu_impl.cpp`)
+  — an aliased output buffer could otherwise have its zeroing corrupt input
+  data the backend reads immediately afterward. Zero-length ranges
+  (`n_tweaks==0`/`n_spend==0`) never overlap, preserving no-op semantics.
+  Covered by `FC-1..5` in `audit/test_exploit_gpu_bip352_multispend_failclosed.cpp`.
+- **Local (defense-in-depth) bounds validation:** every concrete backend
+  (not just the C ABI wrapper) independently validates `n_spend`,
+  `n_tweaks`, and `n_tweaks * n_spend` against overflow and against the same
+  caps the ABI enforces (`kMaxGpuBatchN = 2^26`, `kMaxBip352Spend = 2^16`)
+  before any allocation or kernel launch — because `GpuBackend` virtuals are
+  an established direct-call surface in this codebase, not private to the C
+  ABI wrapper.
+- **Round 2 (2026-07-15) Metal dispatch-failure propagation:** added
+  `MetalRuntime::dispatch_sync_checked()` (`src/metal/include/metal_runtime.h`,
+  `src/metal/src/metal_runtime.mm`) returning `false` on a Metal
+  command-buffer error (device lost, shader fault, driver timeout) or a
+  non-`Completed` terminal status; `bip352_scan_batch_multispend`
+  (`src/gpu/src/gpu_backend_metal.mm`) now checks both dispatch calls and
+  fails closed (zero output, erase scan-key buffer, `GpuError::Launch`)
+  instead of silently proceeding to read back stale buffer contents as
+  success — closing a gap explicitly documented as a known limitation in
+  round 1 (that round could not touch `metal_runtime.h`; round 2 can).
+  `dispatch_sync()` (void, ~29 other call sites across unrelated GPU
+  operations) is intentionally left unchanged in this repair — migrating it
+  is a separate follow-up requiring macOS build/test coverage this
+  development environment does not have.
+- **Same-context concurrency (Metal, round 1+2):** `bip352_pool_mtx_`
+  serializes the whole per-call span (pool grow, host→device copies, both
+  dispatches, readback, secret erase) for concurrent callers on the same
+  `MetalBackend` instance; `MetalBackend::shutdown()` now frees all three
+  buffer pools (previously only `msm_pool_`), preventing stale-device-buffer
+  reuse across a destroy+recreate cycle. Covered by `SW-BIP352-METAL-1..3`
+  (`audit/test_gpu_bip352_scan.cpp`) — advisory-skips on this
+  no-Apple-hardware development machine; see
+  `benchmarks/github_issue_335/macos_replay.sh` for the one-command macOS
+  replay bundle a real-hardware run needs. Verdict for any Metal *runtime*
+  claim remains `METAL_RUNTIME_CONFIRMATION_PENDING` until that replay
+  produces real output.
+- **Round 3 (2026-07-16) OpenCL every-control-call-site fail-closed +
+  no production test-hooks:** the round-2 `bip352_fault_injection` mockable
+  control-call layer's 4 `extern "C"` hook functions are now gated behind
+  `#if defined(SECP256K1_BUILD_FAULT_INJECTION_TESTS)` (undefined for every
+  normal build — no test-only attack surface reachable in a shipped
+  library/binary; `audit/test_regression_opencl_bip352_faultinject_symbols_absent.cpp`
+  proves their absence from a normal build's static AND dynamic symbol
+  tables via `nm`/`nm -D`). `SITE_QUEUE_INFO`/both `SITE_WG_INFO_*` queries
+  no longer fall back to a default local work-group size on failure — every
+  one of the 18 documented OpenCL control-call sites in
+  `bip352_scan_batch_multispend` is now fail-closed, not just `clFinish`/
+  readback (round 2). Verified with a REAL end-to-end run on this machine's
+  RTX 5060 Ti (not a synthetic probe): each site individually armed via a
+  genuine `ufsecp_gpu_bip352_scan_batch_multispend` dispatch through the
+  public C ABI, confirmed hit, confirmed non-OK return, confirmed
+  `prefix64_out` fully zeroed — `Result: 37 passed, 0 failed,
+  0 inconclusive/advisory-skip` (`audit/test_exploit_opencl_bip352_control_call_failclosed.cpp`).
+
+Covered by: `audit/test_gpu_bip352_scan.cpp` (SW-BIP352-M*, byte-exact vs
+independent CPU oracle `ufsecp_silent_payment_create_output`, SW-BIP352-METAL-1..3),
+`audit/test_exploit_gpu_bip352_scalar_limb_order.cpp` (P0 limb-order
+regression + wallet-scan-miss impact PoC), `audit/test_exploit_gpu_bip352_multispend_failclosed.cpp`
+(FC-1..7/10/11, SW-FI-PROBE-1..8, SW-FI-E2E-1..2),
+`audit/test_exploit_opencl_bip352_control_call_failclosed.cpp` (all 18
+OpenCL control-call sites, real end-to-end),
+`audit/test_regression_opencl_bip352_faultinject_symbols_absent.cpp`
+(SAS-1..3, production symbol-table hygiene),
+`audit/test_regression_bip352_ct_varbase.cpp` (CRIT-02 byte-exact oracle at
+every 64-bit limb boundary), `audit/test_regression_opencl_bip352_scan_key_boundary.cpp`
+(SEC-002, SKB-1..5).
 
 ### 2026-07-06 - `ufsecp_gpu_hash256_var` added: batch variable-length HASH256, no new secret-bearing surface
 
@@ -21,6 +491,22 @@ contract: `ctx==NULL`/null buffer with `n>0` -> `UFSECP_ERR_NULL_ARG`; `n==0` ->
 digest on any rejected call. Covered by `audit/test_regression_hash256_var_batch.cpp`,
 `audit/test_regression_hash256_var_parity.cpp` (cross-backend byte-identical output),
 and `audit/test_exploit_hash256_var_bounds.cpp` (hostile-input bounds).
+
+### 2026-07-08 - `ufsecp_gpu_merkle_pair_hash` added: batch Merkle pair HASH256, no new secret-bearing surface
+
+Added `GpuBackend::merkle_pair_hash` / C ABI `ufsecp_gpu_merkle_pair_hash` (native CUDA,
+OpenCL, and Metal kernels). Computes SHA256(SHA256(left32 || right32)) for batch Merkle
+tree construction — fixed 2×32-byte input per row (Structure-of-Arrays column layout).
+**Security claim: PUBLIC-DATA / variable-time only.** Every input (Merkle tree preimage
+bytes) is public on-chain Bitcoin block data; no private key, nonce, signing share, or ECDH
+scalar is ever passed through this path, so no `ct::*` boundary applies (see the CT-vs-VT
+boundary rule). Fail-closed contract: `ctx==NULL`/null buffer with `n>0` → `UFSECP_ERR_NULL_ARG`;
+`n==0` → no-op `UFSECP_OK`; `n > kMaxGpuBatchN` → `UFSECP_ERR_BAD_INPUT`; `out32` is never
+left holding a partial or stale digest on any rejected call, and is zeroed on null-buffer
+rejects (fail-closed, per the clear-output-before-processing guardrail). Covered by
+`audit/test_regression_merkle_pair_hash.cpp` (differential KAT + cross-backend parity),
+`audit/test_exploit_merkle_pair_bounds.cpp` (hostile-input bounds), and
+`compat/libbitcoin_direct/tests/test_direct_verify.cpp` (byte-identical vs hash256 oracle).
 
 ### 2026-07-06 - `ufsecp_gpu.h` C ABI banner corrected for the six lbtc-batch ops (doc-only, no claim change)
 
@@ -1496,4 +1982,4 @@ Every release must answer: **"Did the CT scope change?"**
 
 <!-- 2026-05-28: shim_ecdsa.cpp + shim_recovery.cpp + shim_ellswift.cpp + bip32.cpp — secret-key stack-residue hardening (CT-01/SHIM-01/02/CT-02). Claim: parsed private-key scalars and BIP-324 handshake key material do not persist on the stack after the call returns. (CT-01) shim ECDSA sign / sign_recoverable secure_erase the parsed key scalar (`k` / `privkey_scalar`) on every return path; (SHIM-01/02) ellswift_create and ellswift_xdh erase `sk`+`kb` on all returns (success, parse-fail, and the three xdh error branches), completing SHIM-006; (CT-02) BIP-32 hardened derive_child erases the HMAC-derived `il_scalar` on all 7 return paths. Also RT-02: secp256k1_ecdsa_signature_parse_der now requires exact SEQUENCE consumption (`p == end`), rejecting trailing bytes inside the SEQUENCE — matching upstream + the native C ABI parser. Output bytes written before erase; no behavioral change. Regression guard: audit/test_regression_shim_seckey_erase.cpp. -->
 
-*UltrafastSecp256k1 v4.5.0 -- Security Claims*
+*UltrafastSecp256k1 v4.6.0 -- Security Claims*

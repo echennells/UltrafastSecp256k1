@@ -4,6 +4,7 @@
 #endif
 #include "secp256k1/glv.hpp"
 #include "secp256k1/ct/point.hpp"
+#include "secp256k1/ct/field.hpp"   // ct::field_inv -- the CT SafeGCD inverse
 #if defined(__SIZEOF_INT128__) && !defined(__EMSCRIPTEN__)
 #include "secp256k1/field_52.hpp"
 #endif
@@ -47,7 +48,7 @@ namespace {
 // For W=15 on a 128-bit scalar: ~9 non-zero digits out of ~129 positions.
 // Old code: 128+ iterations of 4-limb shift + multi-word arithmetic per bit.
 // New code: ~129 iterations of 1 bit-test + ~9 word-extractions total.
-// Saves ~800-1200ns per verify (4 wNAF computations).
+// Saving per verify: not measured -- benchmark required.
 template<typename T>
 static void compute_wnaf_into(const Scalar& scalar, unsigned window_width,
                                T* out, std::size_t out_capacity,
@@ -488,6 +489,11 @@ SECP256K1_HOT_FUNCTION
 // Core doubling on raw FE52 references (zero struct-copy overhead)
 // In-place variant: reads and writes through same x/y/z references.
 static inline void jac52_double_coords(FieldElement52& x, FieldElement52& y, FieldElement52& z) noexcept {
+    // The representation search generated an alternative sign placement for this
+    // body (dbl_prod_alt_sign: same 3M+4S, negations pushed onto the X3 and Y3
+    // subtractions instead of carried through T). Measured +1.17% -- refuted.
+    // See experiments/representation_search/README.md before re-deriving it.
+
     // S = Y1^2 (1S) -- computed before y is reused
     FieldElement52 s = y.square();         // mag 1
 
@@ -675,12 +681,19 @@ static void jac52_add_mixed_inplace(JacobianPoint52& p, const AffinePoint52& q) 
     s2.mul_assign(p.z);                                       // S2 = Y2 * Z1^3
 
     // H = U2 - X1
-    FieldElement52 const negX1 = p.x.negate(8);     // mag 9 (jac52_add x max: 7)
-    FieldElement52 const h = u2 + negX1;                      // mag 6
+    // Magnitudes through this block, since they were annotated wrong before:
+    // u2 is a product, so magnitude 1. p.x is at most 8 here, and negate(m)
+    // yields m+1, so negX1 is 9 and their sum is 10 -- not the 6 that used to
+    // be written here. Nothing downstream cares: normalize_weak absorbs any
+    // magnitude up to ~4000 (see field_52_impl.hpp), so the real margin is two
+    // orders of magnitude, and the old annotation understated it rather than
+    // hiding a violation.
+    FieldElement52 const negX1 = p.x.negate(8);               // mag 9
+    FieldElement52 const h = u2 + negX1;                      // mag 10
 
     // Variable-time zero check (prob ~2^-256)
     if (SECP256K1_UNLIKELY(h.normalizes_to_zero_var())) {
-        FieldElement52 const negY1 = p.y.negate(4);           // GEJ_Y_MAG_MAX=4
+        FieldElement52 const negY1 = p.y.negate(4);           // mag 5 (p.y <= GEJ_Y_MAG_MAX = 4)
         FieldElement52 const diff = s2 + negY1;
         if (diff.normalizes_to_zero_var()) {
             jac52_double_inplace(p);
@@ -855,11 +868,14 @@ static inline void jac52_add_mixed_to(
     FieldElement52 s2 = q_y * zz;
     s2.mul_assign(in_z);
 
-    FieldElement52 const negX1 = in_x.negate(8);     // mag 9 (jac52_add x max: 7)
-    FieldElement52 const h = u2 + negX1;                      // mag 6
+    // Magnitudes: u2 is a product (1), in_x is at most 8 and negate(m) yields
+    // m+1, so negX1 is 9 and h is 10 -- see the note in
+    // jac52_add_mixed_inplace. normalize_weak absorbs up to ~4000.
+    FieldElement52 const negX1 = in_x.negate(8);              // mag 9
+    FieldElement52 const h = u2 + negX1;                      // mag 10
 
     if (SECP256K1_UNLIKELY(h.normalizes_to_zero_var())) {
-        FieldElement52 const negY1 = in_y.negate(4);          // GEJ_Y_MAG_MAX=4
+        FieldElement52 const negY1 = in_y.negate(4);          // mag 5 (in_y <= GEJ_Y_MAG_MAX = 4)
         FieldElement52 const diff = s2 + negY1;
         if (diff.normalizes_to_zero_var()) {
             jac52_double_to(in_x, in_y, in_z, out_x, out_y, out_z);
@@ -896,71 +912,6 @@ static inline void jac52_add_mixed_to(
     out_infinity = false;
 }
 
-// -- In-place Mixed Addition with Z-ratio output (5x52) -----------------------
-// Identical to jac52_add_mixed_inplace but additionally outputs the z-ratio
-// (Z3/Z1 = H for the h2-negation formula) needed by table_set_globalz.
-// Only used during P table construction (never in the hot main loop).
-SECP256K1_NOINLINE
-static void jac52_add_mixed_inplace_zr(JacobianPoint52& p,
-                                        const AffinePoint52& q,
-                                        FieldElement52& zr_out) noexcept {
-    if (SECP256K1_UNLIKELY(p.infinity)) {
-        p.x = q.x; p.y = q.y; p.z = FieldElement52::one(); p.infinity = false;
-        zr_out = FieldElement52::one();
-        return;
-    }
-
-    FieldElement52 const zz = p.z.square();
-    FieldElement52 const u2 = q.x * zz;
-    FieldElement52 s2 = q.y * zz;
-    s2.mul_assign(p.z);
-
-    FieldElement52 const negX1 = p.x.negate(8);     // mag 9 (jac52_add x max: 7)
-    FieldElement52 const h = u2 + negX1;                      // mag 6
-
-    if (SECP256K1_UNLIKELY(h.normalizes_to_zero_var())) {
-        FieldElement52 const negY1 = p.y.negate(4);           // GEJ_Y_MAG_MAX=4
-        FieldElement52 const diff = s2 + negY1;
-        if (diff.normalizes_to_zero_var()) {
-            jac52_double_inplace(p);
-            zr_out = FieldElement52::one();
-            return;
-        }
-        p = {FieldElement52::zero(), FieldElement52::one(), FieldElement52::zero(), true};
-        zr_out = FieldElement52::zero();
-        return;
-    }
-
-    // Output z-ratio: Z3/Z1 = H for the h2-negation formula.
-    zr_out = h;                                               // zr = H, mag 6
-
-    // i = S1 - S2 = Y1 - S2
-    FieldElement52 const negS2 = s2.negate(1);                // mag 2
-    FieldElement52 const i_val = p.y + negS2;                 // mag 12
-
-    FieldElement52 h2 = h.square();
-    FieldElement52 const i2 = i_val.square();                  // ILP: adjacent independent square
-    h2.negate_assign(1);                                      // h2 = -H^2, mag 2
-
-    FieldElement52 h3 = h2 * h;                               // -H^3
-    FieldElement52 t = p.x * h2;                              // -X1*H^2
-
-    FieldElement52 x3 = i2 + h3;                              // mag 2
-    x3.add_assign(t);                                         // mag 3
-    x3.add_assign(t);                                         // mag 4
-
-    t.add_assign(x3);                                         // t = t + X3, mag 5
-    FieldElement52 y3 = t * i_val;                               // i_val is i
-    h3.mul_assign(p.y);                                       // (-H^3)*Y1
-    y3.add_assign(h3);                                        // Y3, mag 2
-
-    p.z.mul_assign(h);                                        // Z3 = Z1*H
-
-    p.x = x3;
-    p.y = y3;
-    p.infinity = false;
-}
-
 // -- In-Place Zinv Addition (5x52): p += (b.x, b.y, 1/bzinv) ----------------
 // Adds the affine point b as if it has effective Z = 1/bzinv.
 // Equivalent to: scaling b into the bzinv frame then doing mixed addition,
@@ -975,9 +926,14 @@ static void jac52_add_mixed_inplace_zr(JacobianPoint52& p,
 // Cost: 9M + 3S + ~11A
 // Saves 1S per G/H lookup vs the previous approach (2M scale + 7M+4S mixed add).
 // Also avoids modifying the G/H table entry (no cache-line dirtying).
-// NOT force-inlined: inlining both add_mixed and add_zinv causes ~1100 ns
-// regression due to I-cache pressure (hot loop exceeds ~5 KB threshold).
-// Only add_mixed is inlineable; add_zinv stays NOINLINE.
+// Inlining this was once measured as a ~1100 ns regression from I-cache pressure,
+// the hot loop crossing a ~5 KB threshold. That predates the field kernels being
+// force-inlined, so it was re-measured (interleaved A/B, 10 samples per arm,
+// cpu0, turbo off): the regression is GONE, and so is any gain -- ecdsa_verify
+// -0.46%, schnorr_verify -0.44%, dual_mul -0.87%, every range overlapping.
+// It stays NOINLINE because nothing argues for changing it, not because the old
+// number still holds. Anyone re-opening the question on a different target
+// (ARM64, RISC-V, a smaller I-cache) changes the attribute here and measures.
 SECP256K1_HOT_FUNCTION SECP256K1_NOINLINE
 static void jac52_add_zinv_inplace(JacobianPoint52& p,
                                     const AffinePoint52& b,
@@ -1119,6 +1075,117 @@ static inline JacobianPoint52 jac52_negate(const JacobianPoint52& p) {
 // -- GLV + Shamir helpers (shared by scalar_mul_glv52 / scalar_mul_with_plan_glv52 /
 //    dual_scalar_mul_gen_point) -----------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Co-Z (Meloni) table construction, from experiments/representation_search.
+//
+// Co-Z (Meloni) table construction. Both operands share one Z, so the four
+// heavy operations a mixed add spends reconciling two different Z values --
+// zz = Z1^2, X2*zz, Y2*zz, *Z1 -- do not exist. 7 heavy operations per entry
+// instead of 11.
+//
+// Verified before it was written: experiments/representation_search models both
+// constructions exactly and checks they denote the same points against repeated
+// affine addition, over table sizes 2..32 and 8 curve points
+// (tests/test_table_build.py). Measured on the addition alone: -34.7%.
+// ---------------------------------------------------------------------------
+
+// DBLU: double an affine point AND hand back P re-expressed on the new Z.
+// The co-Z copy of P is FREE: the doubling already computes both values it
+// needs, D = 4*X*B is X on the new Z and 8C is Y on the new Z.
+// Cost 1M+5S. Outputs are normalized so the chain starts from magnitude 1 and
+// the setup contributes no magnitude growth at all (one normalize per table).
+// Takes a JACOBIAN P, not an affine one: the caller's P has a general Z. The
+// co-Z outputs are unaffected -- D = 4*X*Y^2 and 8*Y^4 are X and Y scaled by
+// (2Y)^2 and (2Y)^3 regardless of Z -- only the new Z picks up a factor Z,
+// so Z_new = 2*Y*Z costs one extra multiply. Total 2M+5S against the 11 heavy
+// operations the current setup spends (double + C^2 + C^3 + two iso muls).
+SECP256K1_NOINLINE
+static void jac52_dblu(const FieldElement52& x, const FieldElement52& y,
+                       const FieldElement52& zin,
+                       FieldElement52& out_dx, FieldElement52& out_dy,
+                       FieldElement52& out_px, FieldElement52& out_py,
+                       FieldElement52& out_z) noexcept {
+    FieldElement52 const A = x.square();                   // X^2
+    FieldElement52 const B = y.square();                   // Y^2
+    FieldElement52 const C = B.square();                   // Y^4
+
+    FieldElement52 t = x + B;
+    t = t.square();
+    t.add_assign(A.negate(1));
+    t.add_assign(C.negate(1));                             // (X+B)^2 - A - C = 2XB
+    FieldElement52 D = t; D.add_assign(t);                 // D = 4XB = X on new Z
+
+    FieldElement52 E = A; E.mul_int_assign(3);             // 3X^2
+    FieldElement52 const F = E.square();
+
+    FieldElement52 twoD = D; twoD.add_assign(D);
+    FieldElement52 X2 = F; X2.add_assign(twoD.negate(20)); // X(2P) = F - 2D
+
+    FieldElement52 dmx = D; dmx.add_assign(X2.negate(22));
+    FieldElement52 Y2 = E * dmx;
+    FieldElement52 eightC = C; eightC.mul_int_assign(8);   // 8Y^4 = Y on new Z
+    Y2.add_assign(eightC.negate(8));                       // Y(2P) = E(D-X2) - 8C
+
+    FieldElement52 Z = y; Z.add_assign(y);                 // 2Y
+    Z.mul_assign(zin);                                     // Z_new = 2*Y*Z
+
+    // One normalize per table build: cheap here, and it lets every magnitude
+    // downstream be reasoned about from a clean magnitude-1 start.
+    X2.normalize_weak(); Y2.normalize_weak();
+    D.normalize_weak();  eightC.normalize_weak(); Z.normalize_weak();
+
+    out_dx = X2; out_dy = Y2;      // 2P
+    out_px = D;  out_py = eightC;  // P, on the same Z
+    out_z  = Z;
+}
+
+// ZADDU: (P, Q) sharing Z -> (P+Q, P) both on the new Z, plus the z-ratio.
+//
+// OPERAND ORDER IS LOAD-BEARING. This returns its FIRST operand on the new Z.
+// The caller's accumulator is replaced by the sum anyway, so the operand that
+// must survive is the constant 2P -- pass it FIRST. Passing them the other way
+// still produces a correct table, just one that needs a 3M+1S rescale every
+// step, which eats almost the entire saving and no correctness test would
+// notice. See tests/test_table_build.py::test_operand_order_is_load_bearing.
+//
+// Returns false when X1 == X2, which ZADDU cannot represent (the caller then
+// falls back exactly as the z-ratio path does).
+SECP256K1_NOINLINE
+static bool jac52_zaddu_zr(FieldElement52& x1, FieldElement52& y1,
+                           const FieldElement52& x2, const FieldElement52& y2,
+                           FieldElement52& z,
+                           FieldElement52& sum_x, FieldElement52& sum_y,
+                           FieldElement52& zr_out) noexcept {
+    FieldElement52 dx = x2; dx.add_assign(x1.negate(8));       // X2 - X1
+    if (SECP256K1_UNLIKELY(dx.normalizes_to_zero_var())) {
+        return false;
+    }
+    FieldElement52 dy = y2; dy.add_assign(y1.negate(8));       // Y2 - Y1
+
+    FieldElement52 const A = dx.square();
+    FieldElement52 const B = x1 * A;                            // X1 on new Z
+    FieldElement52 const C = x2 * A;
+    FieldElement52 const D = dy.square();
+
+    FieldElement52 x3 = D;
+    x3.add_assign(B.negate(1));
+    x3.add_assign(C.negate(1));                                 // X3 = D - B - C
+
+    FieldElement52 cb = C; cb.add_assign(B.negate(1));          // C - B
+    FieldElement52 const y1cb = y1 * cb;                        // Y1 on new Z
+
+    FieldElement52 bx3 = B; bx3.add_assign(x3.negate(5));       // B - X3
+    FieldElement52 y3 = dy * bx3;
+    y3.add_assign(y1cb.negate(1));                              // Y3 = dy(B-X3) - Y1cb
+
+    zr_out = dx;                                                // Z_new / Z_old
+    z.mul_assign(dx);                                           // Z3 = Z * dx
+
+    sum_x = x3; sum_y = y3;
+    x1 = B; y1 = y1cb;                                          // P on the new Z
+    return true;
+}
+
 // Builds odd-multiple table [1P, 3P, ..., (2T-1)P] in FE52 using the z-ratio
 // technique (zero field inversions).  All table entries share an implied
 // Z = globalz on the secp256k1 curve.
@@ -1129,38 +1196,37 @@ static bool build_glv52_table_zr(
     int table_size,
     FieldElement52& globalz)
 {
-    // d = 2*P (Jacobian)
-    JacobianPoint52 const d = jac52_double(P52);
-    FieldElement52 const C  = d.z;
-    FieldElement52 const C2 = C.square();
-    FieldElement52 const C3 = C2 * C;
-
-    // d as affine on iso curve (Z cancels in isomorphism)
-    AffinePoint52 const d_aff = {d.x, d.y};
-
-    // Transform P onto iso curve: (P.X*C^2, P.Y*C^3, P.Z)
-    JacobianPoint52 ai = {P52.x * C2, P52.y * C3, P52.z, false};
-    tbl[0].x = ai.x;
-    tbl[0].y = ai.y;
-
-    // Z-ratio array: zr[i] = Z_i / Z_{i-1} for the accumulator
+    // Co-Z construction. Same table, same shared-Z contract, same backward
+    // sweep. The difference is that the accumulator and the constant 2P are
+    // kept on ONE Z, so the four heavy operations a mixed add spends bridging
+    // two Z values never happen: 7 heavy operations per entry instead of 11.
     constexpr int kMaxZr = 32;
     assert(table_size <= kMaxZr);
     FieldElement52 zr[kMaxZr];
-    zr[0] = C;  // first z-ratio is C (from iso mapping)
 
-    // Build rest using mixed adds on iso curve with z-ratio output
+    FieldElement52 dX, dY, aX, aY, chainZ;
+    jac52_dblu(P52.x, P52.y, P52.z, dX, dY, aX, aY, chainZ);
+
+    tbl[0].x = aX;
+    tbl[0].y = aY;
+    zr[0] = FieldElement52::one();   // never read by the sweep; set for clarity
+
     for (int i = 1; i < table_size; i++) {
-        jac52_add_mixed_inplace_zr(ai, d_aff, zr[i]);
-        if (SECP256K1_UNLIKELY(ai.infinity)) {
+        FieldElement52 sx, sy;
+        // (d, acc): d FIRST, so ZADDU hands it back on the new Z for free.
+        if (SECP256K1_UNLIKELY(!jac52_zaddu_zr(dX, dY, aX, aY, chainZ,
+                                               sx, sy, zr[i]))) {
             return false;
         }
-        tbl[i].x = ai.x;
-        tbl[i].y = ai.y;
+        aX = sx;
+        aY = sy;
+        tbl[i].x = aX;
+        tbl[i].y = aY;
     }
 
-    // globalz = final_Z * C (maps from iso curve back to secp256k1)
-    globalz = ai.z * C;
+    // No isomorphism to undo: the chain worked on the curve directly, so the
+    // shared Z is simply the Z the chain ended on.
+    globalz = chainZ;
 
     // Backward sweep: rescale table entries so all share implied Z = Z_last.
     // zs accumulates the product zr[n-1] * ... * zr[i+1] = Z_last / Z_i.
@@ -1200,7 +1266,16 @@ static void derive_phi52_table(
     for (int i = 0; i < table_size; i++) {
         tbl_phiP[i].x = tbl_P[i].x * kBeta52_pt;
         if (flip_phi) {
-            // negate(1) gives magnitude 1 — normalize_weak() is redundant.
+            // negate(1) yields magnitude 2, NOT 1 -- an earlier comment here
+            // claimed 1, which is false and is exactly the kind of wrong
+            // magnitude claim that leads to a silent underflow elsewhere
+            // (see GitHub #396, #397). The normalize_weak is nonetheless
+            // redundant, for the real reason: every consumer of tbl_phiP[i].y
+            // is either a multiply (which accepts any magnitude inside the
+            // accumulator bound and returns magnitude 1) or a
+            // conditional_negate_assign at magnitude 1, which is an exact
+            // involution of this negate. No negate() call site downstream
+            // declares a magnitude this value could exceed.
             tbl_phiP[i].y = tbl_P[i].y.negate(1);
         } else {
             tbl_phiP[i].y = tbl_P[i].y;
@@ -1359,10 +1434,10 @@ static Point scalar_mul_glv52(const Point& base, const Scalar& scalar) {
     compute_wnaf_into(decomp.k2, glv_window,
                       wnaf2_buf.data(), wnaf2_buf.size(), wnaf2_len);
 
-    // Trim trailing zeros -- GLV half-scalars are ~128 bits but wNAF
-    // always outputs 256+ positions. This halves the doubling count.
-    // compute_wnaf_into already sets out_len = last_set_bit + 1, excluding
-    // trailing zeros. The trim loops below are no-ops; removed (A-13).
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1
+    // and every digit it stores is odd, so out[out_len-1] is never zero and a
+    // trim loop cannot iterate. The loops that used to sit here were removed
+    // (A-13); the same reasoning removed the ones in dual_scalar_mul_gen_point.
 
     // -- Precompute odd multiples [1P, 3P, 5P, ..., 15P] in 5x52 ------
     std::array<AffinePoint52, glv_table_size> tbl_P;
@@ -1686,7 +1761,7 @@ Point Point::add(const Point& other) const {
     // Mixed-add fast path: other is affine (z=1) -> 8M+3S instead of 12M+5S
     // NRVO: write directly to result Point's members, zero intermediate copies.
     if (!other.infinity_ && (other.z_one_ || fe52_is_one_raw(other.z_))) {
-        Point r;
+        Point r{Uninitialised{}};   // every field below is written before use
         r.z_one_ = false;
         r.is_generator_ = false;
         jac52_add_mixed_to(x_, y_, z_, infinity_,
@@ -1696,7 +1771,7 @@ Point Point::add(const Point& other) const {
     }
     // Symmetric: this is affine, other is Jacobian -> swap roles
     if (!infinity_ && (z_one_ || fe52_is_one_raw(z_))) {
-        Point r;
+        Point r{Uninitialised{}};   // every field below is written before use
         r.z_one_ = false;
         r.is_generator_ = false;
         jac52_add_mixed_to(other.x_, other.y_, other.z_, other.infinity_,
@@ -2442,9 +2517,10 @@ Point Point::scalar_mul(const Scalar& scalar) const {
     constexpr unsigned glv_window = 5;
     constexpr int glv_table_size = (1 << (glv_window - 2));  // 8
 
-    // Note: compute_wnaf_into always processes full 256-bit Scalar even
-    // though GLV half-scalars are ~128 bits, so buffer must be 260.
-    // GLV half-scalars bounded by ~2^128; max wNAF output = 128+window = 133.
+    // GLV half-scalars are bounded by ~2^128, so max wNAF output is
+    // 128 + window = 133 positions. (compute_wnaf_into now stops at the scalar's
+    // top set bit rather than always walking 256 positions; the buffer bound is
+    // set by the OUTPUT length either way.)
     // 140 gives safety margin (was 260 — 2× over-provisioned saves 480B stack).
     // No {} init: compute_wnaf_into() memsets before writing (avoids double-zero).
     std::array<int32_t, 140> wnaf1_buf, wnaf2_buf;
@@ -2814,10 +2890,9 @@ static Point scalar_mul_with_plan_glv52(const Point& base, const KPlan& plan) {
     const int32_t* wnaf1_ptr = plan.wnaf1.data();
     const int32_t* wnaf2_ptr = plan.wnaf2.data();
 
-    // Trim trailing zeros -- GLV half-scalars are ~128 bits but wNAF
-    // always outputs 256+ positions.  This halves the doubling count.
-    while (wnaf1_len > 0 && wnaf1_ptr[wnaf1_len - 1] == 0) --wnaf1_len;
-    while (wnaf2_len > 0 && wnaf2_ptr[wnaf2_len - 1] == 0) --wnaf2_len;
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1
+    // and every digit it stores is odd, so wnaf[len-1] is never zero and a trim
+    // loop cannot iterate. Same reasoning as dual_scalar_mul_gen_point.
 
     // -- Precompute odd multiples [1P, 3P, ..., (2T-1)P] in 5x52 -----
     std::array<AffinePoint52, kMaxGlvTableSize> tbl_P;
@@ -2868,8 +2943,9 @@ static void scalar_mul_with_plan_glv52_4x(
     std::size_t wnaf2_len = plan.wnaf2_len;
     const int32_t* wnaf1_ptr = plan.wnaf1.data();
     const int32_t* wnaf2_ptr = plan.wnaf2.data();
-    while (wnaf1_len > 0 && wnaf1_ptr[wnaf1_len - 1] == 0) --wnaf1_len;
-    while (wnaf2_len > 0 && wnaf2_ptr[wnaf2_len - 1] == 0) --wnaf2_len;
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1
+    // and every digit it stores is odd, so wnaf[len-1] is never zero and a trim
+    // loop cannot iterate. Same reasoning as dual_scalar_mul_gen_point.
 
     const bool flip_phi = (plan.neg1 != plan.neg2);
 
@@ -2944,8 +3020,8 @@ std::array<std::uint8_t, 33> Point::to_compressed() const {
     // Fast path: Z == 1, coordinates are already affine
     if (z_one_) {
 #if defined(SECP256K1_FAST_52BIT)
-        // z_one_ guarantees FE52 is pre-normalized by make_affine_inplace:
-        // skip fe52_normalize_inline (saves ~5 ns per field element).
+        // z_one_ guarantees FE52 is pre-normalized by make_affine_inplace, so
+        // fe52_normalize_inline is skipped. Saving: not measured.
         out[0] = (y_.n[0] & 1) ? 0x03 : 0x02;
         x_.store_b32_prenorm(out.data() + 1);
 #else
@@ -2989,8 +3065,8 @@ std::array<std::uint8_t, 65> Point::to_uncompressed() const {
     // Fast path: Z == 1, coordinates are already affine
     if (z_one_) {
 #if defined(SECP256K1_FAST_52BIT)
-        // z_one_ guarantees FE52 is pre-normalized by make_affine_inplace:
-        // skip fe52_normalize_inline (saves ~10 ns for two field elements).
+        // z_one_ guarantees FE52 is pre-normalized by make_affine_inplace, so
+        // fe52_normalize_inline is skipped for both x and y. Saving: not measured.
         out[0] = 0x04;
         x_.store_b32_prenorm(out.data() + 1);
         y_.store_b32_prenorm(out.data() + 33);
@@ -3128,7 +3204,9 @@ void Point::normalize() {
 }
 
 // -- Fast x-only: 32-byte x-coordinate (no Y recovery) -----------------------
-// Saves one multiply vs x_bytes_and_parity() by skipping Z^(-3)*Y.
+// Skips the Y recovery that x_bytes_and_parity() performs: that costs a further
+// multiply for z_inv^3, a multiply for y_ * z_inv^3, and a normalize of the
+// result -- two multiplies and one normalize, not one multiply.
 std::array<uint8_t, 32> Point::x_only_bytes() const {
     if (infinity_) return {};
     // Fast path: Z == 1
@@ -3186,7 +3264,14 @@ static void batch_z_inv(const Point* points, size_t n,
         if (points[i].is_infinity()) {
             partials[i] = running; // skip infinity, don't multiply
         } else {
+            // Stash the converted Z in the caller's slot so the backward pass
+            // can reuse it instead of repeating Point::z() -- an FE52 copy,
+            // normalize and 4-limb repack -- for the identical value. The
+            // backward pass reads the slot before overwriting it, and infinity
+            // rows are still never written, so the "undefined for infinity"
+            // contract above and the set of skipped rows are both unchanged.
             FieldElement const z_fe = points[i].z();
+            out_z_inv[i] = z_fe;
             partials[i] = running;
             running *= z_fe;
         }
@@ -3200,7 +3285,7 @@ static void batch_z_inv(const Point* points, size_t n,
         if (points[i].is_infinity()) {
             continue;
         }
-        FieldElement const z_fe = points[i].z();
+        FieldElement const z_fe = out_z_inv[i];   // stashed by the forward pass
         out_z_inv[i] = partials[i] * inv;
         inv *= z_fe;
     }
@@ -3240,8 +3325,9 @@ void Point::batch_scalar_mul_fixed_k(const KPlan& plan,
     size_t wnaf2_len = plan.wnaf2_len;
     const int32_t* wnaf1 = plan.wnaf1.data();
     const int32_t* wnaf2 = plan.wnaf2.data();
-    while (wnaf1_len > 0 && wnaf1[wnaf1_len - 1] == 0) --wnaf1_len;
-    while (wnaf2_len > 0 && wnaf2[wnaf2_len - 1] == 0) --wnaf2_len;
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1
+    // and every digit it stores is odd, so wnaf[len-1] is never zero and a trim
+    // loop cannot iterate. Same reasoning as dual_scalar_mul_gen_point.
     const size_t max_len = (wnaf1_len > wnaf2_len) ? wnaf1_len : wnaf2_len;
 
     // Process in chunks to keep the working set in L2/L3 (~1 MB target).
@@ -3317,7 +3403,27 @@ void Point::batch_scalar_mul_fixed_k(const KPlan& plan,
                         pts[chunk_start + i].scalar_mul_with_plan(plan);
                 continue;
             }
-            FE52 inv = s_prefix[total - 1].inverse();
+            // Bernstein-Yang SafeGCD, constant-time.
+            //
+            // This is the ONE field inverse on the fast:: track, and it must be
+            // constant-time: the value inverted is the Montgomery prefix product
+            // of Z-coordinates derived from the KPlan's scalar, and the callers
+            // pass a SECRET one:
+            //   src/bch/src/bch_scan.cpp             KPlan::from_scalar(scan_privkey)
+            //   src/cpu/src/sp_scan_batch_impl.hpp   BIP-352 silent payments
+            //   src/cpu/src/address.cpp
+            // CLAUDE.md lists the BIP-352 scan key under CT-mandatory. Nothing in
+            // the code said so; recorded as KB BATCH-SCALAR-MUL-FIXED-K-CT-STATUS.
+            //
+            // ct::field_inv carries that guarantee -- 10 x 59 = 590 branchless
+            // divsteps, a port of libsecp256k1's secp256k1_modinv64 (the CT
+            // variant) -- at 1555.0 ns measured against the Fermat chain's
+            // 3847.5 ns, 2.47x.
+            //
+            // Amortisation caveat: Montgomery's trick means this is ONE inversion
+            // for the whole batch, so the saving is a small share of a scan. The
+            // ECDH site in ct_point.cpp is where this swap actually pays.
+            FE52 inv = FE52::from_fe(ct::field_inv(s_prefix[total - 1].to_fe()));
             for (size_t k = total; k-- > 0; ) {
                 if (s_tables[k].is_infinity()) {
                     s_tbl_P_x[k] = FE52::zero();
@@ -3360,11 +3466,19 @@ void Point::batch_scalar_mul_fixed_k(const KPlan& plan,
                 if (d1 != 0) {
                     const size_t idx = static_cast<size_t>(
                         (d1 > 0 ? d1 - 1 : -d1 - 1) / 2);
+                    // Signed-digit add without materialising the entry. The
+                    // manual form copied two 40-byte FE52s, negated, and then
+                    // normalize_weak'd on every negative digit -- about 21.5 of
+                    // the ~129 wNAF positions per GLV half. add_mixed52_neg_inplace
+                    // folds the sign into the add itself and takes the table
+                    // entries by const reference, so the copies go too. This is
+                    // the same shape multiscalar.cpp already uses, which this
+                    // function's own comment says it was adapted from.
                     for (size_t i = 0; i < chunk_n; ++i) {
-                        FE52 lx = s_tbl_P_x[i * table_size + idx];
-                        FE52 ly = s_tbl_P_y[i * table_size + idx];
-                        if (d1 < 0) { ly.negate_assign(1); ly.normalize_weak(); }
-                        s_acc[i].add_mixed52_inplace(lx, ly);
+                        const FE52& lx = s_tbl_P_x[i * table_size + idx];
+                        const FE52& ly = s_tbl_P_y[i * table_size + idx];
+                        if (d1 > 0) s_acc[i].add_mixed52_inplace(lx, ly);
+                        else        s_acc[i].add_mixed52_neg_inplace(lx, ly);
                     }
                 }
             }
@@ -3376,10 +3490,10 @@ void Point::batch_scalar_mul_fixed_k(const KPlan& plan,
                     const size_t idx = static_cast<size_t>(
                         (d2 > 0 ? d2 - 1 : -d2 - 1) / 2);
                     for (size_t i = 0; i < chunk_n; ++i) {
-                        FE52 lx = s_tbl_phi_x[i * table_size + idx];
-                        FE52 ly = s_tbl_phi_y[i * table_size + idx];
-                        if (d2 < 0) { ly.negate_assign(1); ly.normalize_weak(); }
-                        s_acc[i].add_mixed52_inplace(lx, ly);
+                        const FE52& lx = s_tbl_phi_x[i * table_size + idx];
+                        const FE52& ly = s_tbl_phi_y[i * table_size + idx];
+                        if (d2 > 0) s_acc[i].add_mixed52_inplace(lx, ly);
+                        else        s_acc[i].add_mixed52_neg_inplace(lx, ly);
                     }
                 }
             }
@@ -3501,8 +3615,9 @@ void Point::batch_scan_run(const PointScanCacheHandle& cache,
     std::size_t wnaf2_len = plan.wnaf2_len;
     const int32_t* wnaf1_ptr = plan.wnaf1.data();
     const int32_t* wnaf2_ptr = plan.wnaf2.data();
-    while (wnaf1_len > 0 && wnaf1_ptr[wnaf1_len - 1] == 0) --wnaf1_len;
-    while (wnaf2_len > 0 && wnaf2_ptr[wnaf2_len - 1] == 0) --wnaf2_len;
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1
+    // and every digit it stores is odd, so wnaf[len-1] is never zero and a trim
+    // loop cannot iterate. Same reasoning as dual_scalar_mul_gen_point.
 
     for (size_t i = 0; i < n; ++i) {
         const size_t ci = cache_offset + i;
@@ -3553,8 +3668,9 @@ void Point::batch_scan_run_lockstep(const PointScanCacheHandle& cache,
     std::size_t wnaf2_len = plan.wnaf2_len;
     const int32_t* wnaf1_ptr = plan.wnaf1.data();
     const int32_t* wnaf2_ptr = plan.wnaf2.data();
-    while (wnaf1_len > 0 && wnaf1_ptr[wnaf1_len - 1] == 0) --wnaf1_len;
-    while (wnaf2_len > 0 && wnaf2_ptr[wnaf2_len - 1] == 0) --wnaf2_len;
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1
+    // and every digit it stores is odd, so wnaf[len-1] is never zero and a trim
+    // loop cannot iterate. Same reasoning as dual_scalar_mul_gen_point.
     const std::size_t max_len = (wnaf1_len > wnaf2_len) ? wnaf1_len : wnaf2_len;
 
     const JacobianPoint52 inf52 = {
@@ -3593,9 +3709,12 @@ void Point::batch_scan_run_lockstep(const PointScanCacheHandle& cache,
                 for (std::size_t i = 0; i < chunk_n; ++i) {
                     const std::size_t ci = base_ci + i;
                     if (SECP256K1_LIKELY(impl->valid[ci])) {
-                        AffinePoint52 pt = impl->tbl_P[ci * static_cast<std::size_t>(ts) + idx];
-                        pt.y.negate_assign(1); pt.y.normalize_weak();
-                        jac52_add_mixed_inplace(acc[i], pt);
+                        // jac52_add_mixed_neg_inplace folds the sign into the
+                        // addition, so the 80-byte AffinePoint52 copy, the
+                        // negate and the normalize_weak all disappear. It was
+                        // written for exactly this and had no caller until now.
+                        jac52_add_mixed_neg_inplace(
+                            acc[i], impl->tbl_P[ci * static_cast<std::size_t>(ts) + idx]);
                     }
                 }
             }
@@ -3615,9 +3734,8 @@ void Point::batch_scan_run_lockstep(const PointScanCacheHandle& cache,
                 for (std::size_t i = 0; i < chunk_n; ++i) {
                     const std::size_t ci = base_ci + i;
                     if (SECP256K1_LIKELY(impl->valid[ci])) {
-                        AffinePoint52 pt = impl->tbl_phiP[ci * static_cast<std::size_t>(ts) + idx];
-                        pt.y.negate_assign(1); pt.y.normalize_weak();
-                        jac52_add_mixed_inplace(acc[i], pt);
+                        jac52_add_mixed_neg_inplace(
+                            acc[i], impl->tbl_phiP[ci * static_cast<std::size_t>(ts) + idx]);
                     }
                 }
             }
@@ -3926,15 +4044,19 @@ void Point::batch_to_compressed(const Point* points, size_t n,
             out[i].fill(0);
             continue;
         }
-        auto x_bytes = aff_x[i].to_bytes();
         out[i][0] = (aff_y[i].limbs()[0] & 1U) ? 0x03 : 0x02;
-        std::copy(x_bytes.begin(), x_bytes.end(), out[i].begin() + 1);
+        // Serialize straight into the output slot -- same byte layout as
+        // to_bytes(), without the returned array temporary and its copy
+        // (matches the non-FE52 path in to_compressed()).
+        aff_x[i].to_bytes_into(out[i].data() + 1);
     }
 }
 
 // -- Batch x_only_bytes: extract N x-coordinates with ONE inversion -----------
 // Uses batch_z_inv for the Montgomery trick, then computes only x = X*Z^(-2)
-// (skips the Y*Z^(-3) multiply that batch_normalize does -- ~33% fewer muls).
+// (skips the Y * Z^-3 step that batch_normalize performs). batch_normalize does
+// 1 square + 3 multiplies per point and this does 1 square + 1 multiply, so it is
+// half the multiplies, not a third fewer.
 void Point::batch_x_only_bytes(const Point* points, size_t n,
                                std::array<uint8_t, 32>* out) {
     if (n == 0) return;
@@ -3985,7 +4107,7 @@ void Point::batch_x_only_bytes(const Point* points, size_t n,
         FieldElement z_inv2 = z_inv[i];
         z_inv2.square_inplace();
         FieldElement const x_aff = points[i].X() * z_inv2;
-        out[i] = x_aff.to_bytes();
+        x_aff.to_bytes_into(out[i].data());   // same bytes, no array temporary
     }
 }
 
@@ -4000,8 +4122,31 @@ void Point::batch_x_only_bytes(const Point* points, size_t n,
 // Initialized once on first use. NOT inside the function to allow sharing.
 #if defined(SECP256K1_FE52_COMPUTE) && !defined(SECP256K1_USE_4X64_POINT_OPS)
 namespace {
+    // EXPERIMENT (experiments/representation_search): the window width is a pure
+    // representation parameter -- table size traded against additions per scalar --
+    // and it has a cache dimension no operation count contains. Overridable so the
+    // trade can be measured instead of assumed; the default is unchanged at 15.
+    //
+    //   window  entries   KB/table   KB for G+H   ~additions/scalar
+    //     11       512       40         80             24
+    //     12      1024       80        160             22
+    //     13      2048      160        320             20
+    //     14      4096      320        640             19
+    //     15      8192      640       1280             18   <- current default
+    //
+    // Raptor Cove L2 is 2048 KB per P-core, so the default spends 62.5% of L2 on
+    // these two tables. Note the measurement hazard: an isolated benchmark calls
+    // dual_scalar_mul_gen_point repeatedly with nothing else competing, which keeps
+    // the whole table resident and systematically FLATTERS the large window. A real
+    // workload (ConnectBlock, batch verify) interleaves other data that evicts it.
+    // So ConnectBlock is the metric that matters here, not the micro one.
+    // Windows 13 and 12 were built and measured against 15 on ConnectBlock --
+    // the metric named above, not the micro one -- frequency-locked, taskset -c 0,
+    // 5 runs per arm at -min-time 3000 and again at 10000. 13 was never faster on
+    // any profile arm and ran ~2% slower on Schnorr. KB
+    // DUALMUL-WINDOW-CONNECTBLOCK-NO-WIN.
     constexpr unsigned kDualMulWindowG    = 15;
-    constexpr int kDualMulGTableSize      = (1 << (kDualMulWindowG - 2)); // 8192
+    constexpr int kDualMulGTableSize      = (1 << (kDualMulWindowG - 2)); // 8192 at w=15
     constexpr unsigned kDualMulWindowP    = 5;
     constexpr int kDualMulPTableSize      = (1 << (kDualMulWindowP - 2)); // 8
 
@@ -4094,7 +4239,15 @@ Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const P
     GLVDecomposition const decomp_b = glv_decompose(b);
 
     // -- Window widths: w=15 for G (precomputed), w=6 for P (per-call) ---
-    constexpr unsigned WINDOW_G = 15;             // -> 2^13 = 8192 entries per G/H table
+    // WINDOW_G MUST equal kDualMulWindowG: that constant sizes the static tbl_G /
+    // tbl_H arrays, and this one drives both the wNAF recoding width and the table
+    // indexing. They were separately written literals, so changing one alone
+    // indexed past the end of the table -- a segfault, not a test failure. Derived
+    // from the single source now, matching what dual_scalar_mul_gen_prebuilt below
+    // already did correctly.
+    constexpr unsigned WINDOW_G = kDualMulWindowG;  // -> 2^(w-2) entries per G/H table
+    static_assert(WINDOW_G == kDualMulWindowG,
+                  "WINDOW_G must match the width the static G/H tables were sized for");
     constexpr unsigned WINDOW_P = kDualMulWindowP; // -> 2^4 = 16 entries per P/psiP table
     [[maybe_unused]] constexpr int G_TABLE_SIZE = (1 << (WINDOW_G - 2));  // 8192
     constexpr int P_TABLE_SIZE = kDualMulPTableSize;      // 16
@@ -4149,11 +4302,12 @@ Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const P
     compute_wnaf_into(decomp_b.k1, WINDOW_P, wnaf_b1.data(), wnaf_b1.size(), len_b1);
     compute_wnaf_into(decomp_b.k2, WINDOW_P, wnaf_b2.data(), wnaf_b2.size(), len_b2);
 
-    // Trim trailing zeros
-    while (len_a_lo > 0 && wnaf_a_lo[len_a_lo - 1] == 0) --len_a_lo;
-    while (len_a_hi > 0 && wnaf_a_hi[len_a_hi - 1] == 0) --len_a_hi;
-    while (len_b1 > 0 && wnaf_b1[len_b1 - 1] == 0) --len_b1;
-    while (len_b2 > 0 && wnaf_b2[len_b2 - 1] == 0) --len_b2;
+    // No trailing-zero trim: compute_wnaf_into sets out_len = last_set_bit + 1,
+    // and every digit it stores is odd -- the digit branch is entered only when
+    // the scalar bit differs from the carry, so bit 0 of (extracted + carry) is
+    // 1, and subtracting carry<<w (w >= 2) cannot clear it. wnaf[len-1] is
+    // therefore never zero and a trim loop cannot iterate. Same reasoning as
+    // scalar_mul_glv52 above.
 
     // -- 4-stream Shamir interleaved scan -----------------------------
     JacobianPoint52 result52 = {
@@ -4273,10 +4427,8 @@ Point Point::dual_scalar_mul_gen_prebuilt(
     compute_wnaf_into(a_hi,  WINDOW_G, wnaf_a_hi.data(), wnaf_a_hi.size(), len_a_hi);
     compute_wnaf_into(decomp_b.k1, WINDOW_P, wnaf_b1.data(), wnaf_b1.size(), len_b1);
     compute_wnaf_into(decomp_b.k2, WINDOW_P, wnaf_b2.data(), wnaf_b2.size(), len_b2);
-    while (len_a_lo > 0 && wnaf_a_lo[len_a_lo-1] == 0) --len_a_lo;
-    while (len_a_hi > 0 && wnaf_a_hi[len_a_hi-1] == 0) --len_a_hi;
-    while (len_b1 > 0 && wnaf_b1[len_b1-1] == 0) --len_b1;
-    while (len_b2 > 0 && wnaf_b2[len_b2-1] == 0) --len_b2;
+    // No trailing-zero trim -- every digit compute_wnaf_into stores is odd, so
+    // wnaf[len-1] is never zero (see dual_scalar_mul_gen_point above).
 
     // -- 4-stream scan (same structure as dual_scalar_mul_gen_point) ----------
     JacobianPoint52 result52 = {

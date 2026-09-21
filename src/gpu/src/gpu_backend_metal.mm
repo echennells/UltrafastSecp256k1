@@ -15,11 +15,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <fstream>
 #include <filesystem>
+#include <system_error>
 #include <sstream>
+#include <limits>
+#include <mutex>
 
 /* -- Metal Runtime (Layer 1) ----------------------------------------------- */
 #include "metal_runtime.h"
@@ -206,40 +210,83 @@ static bool sec1_33_to_metal_affine(const uint8_t pub33[33], MetalAffinePoint& o
     return true;
 }
 
-/** Concatenate Metal shader sources into a single string for runtime
- *  compilation.  Tries a list of candidate directories. */
+/** Build a single translation unit for newLibraryWithSource() by expanding the
+ *  kernel entry file's own `#include "..."` directives, recursively, against a
+ *  candidate shader directory.
+ *
+ *  This used to be a hardcoded four-header concatenation:
+ *      secp256k1_field.h, secp256k1_point.h, secp256k1_bloom.h, secp256k1_extended.h
+ *  followed by secp256k1_kernels.metal. Two things were wrong with it, and the
+ *  net effect was that the runtime-source fallback could never succeed:
+ *
+ *    1. `secp256k1_bloom.h` does not exist -- not in src/metal/shaders, not
+ *       anywhere in the tree. Any missing header made metal_load_file() return
+ *       "" and the whole directory was skipped, so the function returned {} for
+ *       every candidate, always.
+ *    2. Even with that removed, the list named 4 of the 11 headers
+ *       secp256k1_kernels.metal includes, and said nothing about the nested
+ *       includes (point -> field, extended -> point, zk -> extended). A
+ *       concatenation cannot leave those `#include "..."` lines in place:
+ *       newLibraryWithSource has no include path, so each one is a hard error.
+ *
+ *  Expanding from the entry file removes the list that could drift: whatever
+ *  the kernel includes is what gets compiled, in the kernel's own order.
+ *  `#include <...>` (metal_stdlib) is left for the Metal compiler. Each quoted
+ *  header is expanded at most once, matching the `#pragma once` the headers
+ *  already carry.
+ */
+static bool metal_expand_includes(const std::string& dir,
+                                  const std::string& file,
+                                  std::vector<std::string>& seen,
+                                  std::string& out,
+                                  int depth) {
+    if (depth > 16) return false;                 // cycle guard
+    std::string const src = metal_load_file(dir + "/" + file);
+    if (src.empty()) return false;
+
+    std::size_t pos = 0;
+    while (pos < src.size()) {
+        std::size_t const eol = src.find('\n', pos);
+        std::size_t const len = (eol == std::string::npos ? src.size() : eol + 1) - pos;
+        std::string const line = src.substr(pos, len);
+        pos += len;
+
+        // Only quoted includes are ours; <metal_stdlib> stays for the compiler.
+        std::size_t const h = line.find_first_not_of(" \t");
+        bool quoted_include = false;
+        std::string name;
+        if (h != std::string::npos && line[h] == '#') {
+            std::size_t k = line.find("include", h);
+            if (k != std::string::npos) {
+                std::size_t const q1 = line.find('"', k);
+                std::size_t const q2 = (q1 == std::string::npos)
+                                           ? std::string::npos : line.find('"', q1 + 1);
+                if (q1 != std::string::npos && q2 != std::string::npos) {
+                    quoted_include = true;
+                    name = line.substr(q1 + 1, q2 - q1 - 1);
+                }
+            }
+        }
+
+        if (!quoted_include) { out += line; continue; }
+
+        if (std::find(seen.begin(), seen.end(), name) != seen.end()) continue;
+        seen.push_back(name);
+        if (!metal_expand_includes(dir, name, seen, out, depth + 1)) return false;
+        out += "\n";
+    }
+    return true;
+}
+
+/** Try each candidate directory until one yields a complete translation unit. */
 static std::string metal_load_combined_source(const std::vector<std::string>& shader_dirs) {
-    static const char* kHeaders[] = {
-        "secp256k1_field.h",
-        "secp256k1_point.h",
-        "secp256k1_bloom.h",
-        "secp256k1_extended.h",
-        nullptr
-    };
-    static const char* kKernels[] = {
-        "secp256k1_kernels.metal",
-        nullptr
-    };
+    static const char* const kEntry = "secp256k1_kernels.metal";
 
     for (const auto& dir : shader_dirs) {
         std::string combined;
-        bool ok = true;
-
-        for (int i = 0; kHeaders[i]; i++) {
-            std::string src = metal_load_file(dir + "/" + kHeaders[i]);
-            if (src.empty()) { ok = false; break; }
-            combined += src; combined += "\n";
-        }
-        if (!ok) continue;
-
-        for (int i = 0; kKernels[i]; i++) {
-            std::string src = metal_load_file(dir + "/" + kKernels[i]);
-            if (src.empty()) { ok = false; break; }
-            combined += src; combined += "\n";
-        }
-        if (!ok) continue;
-
-        return combined;
+        std::vector<std::string> seen;
+        if (metal_expand_includes(dir, kEntry, seen, combined, 0) && !combined.empty())
+            return combined;
     }
     return {};
 }
@@ -280,6 +327,160 @@ struct MetalMsmPool {
         buf_partials = secp256k1::metal::MetalBuffer{};
         buf_blocks   = secp256k1::metal::MetalBuffer{};
         capacity = 0;
+    }
+};
+
+/* Sighash-descriptor persistent buffer pool — grow-only, avoids per-call
+ * alloc_buffer_shared overhead (mirrors MetalMsmPool above).
+ * The four metadata buffers (col_offsets/strides/fixed_lens/varlen_offsets)
+ * plus the two scalar buffers (num_fields/count) are bounded by the
+ * compile-time MAX_FIELDS cap in sighash_descriptor_hash, so they are sized
+ * once at the max and never regrow. packed_cols/packed_varlens/out depend on
+ * which fields are referenced and on row count, so each tracks its own
+ * grow-only capacity. */
+struct MetalSighashPool {
+    static constexpr size_t kMaxFields = 64;  // must match sighash_descriptor_hash::MAX_FIELDS
+
+    secp256k1::metal::MetalBuffer buf_col_offsets;     // kMaxFields x uint64  (fixed size)
+    secp256k1::metal::MetalBuffer buf_strides;         // kMaxFields x uint32  (fixed size)
+    secp256k1::metal::MetalBuffer buf_fixed_lens;      // kMaxFields x uint32  (fixed size)
+    secp256k1::metal::MetalBuffer buf_varlen_offsets;  // kMaxFields x uint32  (fixed size)
+    secp256k1::metal::MetalBuffer buf_num_fields;      // 1 x uint32           (fixed size)
+    secp256k1::metal::MetalBuffer buf_count;           // 1 x uint32           (fixed size)
+    bool   metadata_ready = false;
+
+    secp256k1::metal::MetalBuffer buf_packed_cols;     // grow-only, sized in bytes
+    secp256k1::metal::MetalBuffer buf_packed_varlens;  // grow-only, sized in bytes
+    secp256k1::metal::MetalBuffer buf_out;             // grow-only, sized in bytes
+    size_t packed_cols_capacity    = 0;
+    size_t packed_varlens_capacity = 0;
+    size_t out_capacity            = 0;
+
+    void ensure(size_t packed_cols_bytes, size_t packed_varlens_bytes, size_t out_bytes,
+                secp256k1::metal::MetalRuntime* rt) {
+        if (!metadata_ready) {
+            buf_col_offsets    = rt->alloc_buffer_shared(kMaxFields * sizeof(uint64_t));
+            buf_strides        = rt->alloc_buffer_shared(kMaxFields * sizeof(uint32_t));
+            buf_fixed_lens     = rt->alloc_buffer_shared(kMaxFields * sizeof(uint32_t));
+            buf_varlen_offsets = rt->alloc_buffer_shared(kMaxFields * sizeof(uint32_t));
+            buf_num_fields     = rt->alloc_buffer_shared(sizeof(uint32_t));
+            buf_count          = rt->alloc_buffer_shared(sizeof(uint32_t));
+            metadata_ready = buf_col_offsets.valid() && buf_strides.valid() &&
+                             buf_fixed_lens.valid() && buf_varlen_offsets.valid() &&
+                             buf_num_fields.valid() && buf_count.valid();
+        }
+        if (packed_cols_bytes > packed_cols_capacity) {
+            buf_packed_cols = rt->alloc_buffer_shared(packed_cols_bytes);
+            packed_cols_capacity = buf_packed_cols.valid() ? packed_cols_bytes : 0;
+        }
+        if (packed_varlens_bytes > packed_varlens_capacity) {
+            buf_packed_varlens = rt->alloc_buffer_shared(packed_varlens_bytes);
+            packed_varlens_capacity = buf_packed_varlens.valid() ? packed_varlens_bytes : 0;
+        }
+        if (out_bytes > out_capacity) {
+            buf_out = rt->alloc_buffer_shared(out_bytes);
+            out_capacity = buf_out.valid() ? out_bytes : 0;
+        }
+    }
+
+    /* True once metadata buffers exist and every grow-only buffer's capacity
+     * covers this call's requirement. */
+    bool ready(size_t packed_cols_bytes, size_t packed_varlens_bytes, size_t out_bytes) const {
+        return metadata_ready &&
+               packed_cols_capacity    >= packed_cols_bytes &&
+               packed_varlens_capacity >= packed_varlens_bytes &&
+               out_capacity            >= out_bytes;
+    }
+
+    // Repair (issue #335 acceptance repair): this pool previously had no
+    // free_all(), unlike its MetalMsmPool/MetalBip352Pool siblings, so
+    // MetalBackend::shutdown() could never release it -- meaning a
+    // shutdown()+init() cycle on one MetalBackend instance would reuse
+    // MetalBuffers bound to the destroyed device/queue (see shutdown()'s
+    // comment for the concrete failure mode this causes).
+    void free_all() {
+        buf_col_offsets    = secp256k1::metal::MetalBuffer{};
+        buf_strides        = secp256k1::metal::MetalBuffer{};
+        buf_fixed_lens     = secp256k1::metal::MetalBuffer{};
+        buf_varlen_offsets = secp256k1::metal::MetalBuffer{};
+        buf_num_fields     = secp256k1::metal::MetalBuffer{};
+        buf_count          = secp256k1::metal::MetalBuffer{};
+        buf_packed_cols    = secp256k1::metal::MetalBuffer{};
+        buf_packed_varlens = secp256k1::metal::MetalBuffer{};
+        buf_out            = secp256k1::metal::MetalBuffer{};
+        packed_cols_capacity = packed_varlens_capacity = out_capacity = 0;
+        metadata_ready = false;
+    }
+};
+
+/* BIP-352 multi-spend-key scan persistent buffer pool — grow-only, avoids
+ * per-call alloc_buffer_shared overhead for repeated large batches (issue
+ * #335 "minor": Metal allocates fresh shared buffers on every call today).
+ * Mirrors MetalMsmPool/MetalSighashPool above. buf_tweaks/buf_prefix scale
+ * with n_tweaks (and n_tweaks*n_spend for buf_prefix); buf_spend33/
+ * buf_spend_points/buf_spend_valid scale with n_spend only; buf_scan/
+ * buf_count_* are fixed-size and allocated once. */
+struct MetalBip352Pool {
+    secp256k1::metal::MetalBuffer buf_tweaks;        // n_tweaks * 33 bytes
+    secp256k1::metal::MetalBuffer buf_scan;          // sizeof(MetalScalar256), fixed
+    secp256k1::metal::MetalBuffer buf_spend33;       // n_spend * 33 bytes
+    secp256k1::metal::MetalBuffer buf_spend_points;  // n_spend * sizeof(MetalAffinePoint)
+    secp256k1::metal::MetalBuffer buf_spend_valid;   // n_spend bytes
+    secp256k1::metal::MetalBuffer buf_prefix;        // n_tweaks * n_spend * 8 bytes
+    secp256k1::metal::MetalBuffer buf_count_tweaks;  // 4 bytes, fixed
+    secp256k1::metal::MetalBuffer buf_count_spend;   // 4 bytes, fixed
+    size_t tweaks_capacity = 0;
+    size_t spend_capacity  = 0;
+    size_t rows_capacity   = 0;
+    bool   fixed_ready     = false;
+
+    void ensure(size_t n_tweaks, size_t n_spend, secp256k1::metal::MetalRuntime* rt) {
+        if (!fixed_ready) {
+            buf_scan         = rt->alloc_buffer_shared(sizeof(MetalScalar256));
+            buf_count_tweaks = rt->alloc_buffer_shared(sizeof(uint32_t));
+            buf_count_spend  = rt->alloc_buffer_shared(sizeof(uint32_t));
+            fixed_ready = buf_scan.valid() && buf_count_tweaks.valid() && buf_count_spend.valid();
+        }
+        if (n_tweaks > tweaks_capacity) {
+            buf_tweaks = rt->alloc_buffer_shared(n_tweaks * 33);
+            tweaks_capacity = buf_tweaks.valid() ? n_tweaks : 0;
+        }
+        if (n_spend > spend_capacity) {
+            buf_spend33      = rt->alloc_buffer_shared(n_spend * 33);
+            buf_spend_points = rt->alloc_buffer_shared(n_spend * sizeof(MetalAffinePoint));
+            buf_spend_valid  = rt->alloc_buffer_shared(n_spend);
+            spend_capacity = (buf_spend33.valid() && buf_spend_points.valid() &&
+                              buf_spend_valid.valid()) ? n_spend : 0;
+        }
+        const size_t n_rows = n_tweaks * n_spend;
+        if (n_rows > rows_capacity) {
+            buf_prefix = rt->alloc_buffer_shared(n_rows * sizeof(uint64_t));
+            rows_capacity = buf_prefix.valid() ? n_rows : 0;
+        }
+    }
+
+    /* True once fixed-size buffers exist and every grow-only buffer's
+     * capacity covers this call's requirement (bounded peak memory: buffers
+     * only ever grow to the largest n_tweaks/n_spend/n_rows seen so far on
+     * this backend instance, never shrink, never unboundedly duplicate). */
+    bool ready(size_t n_tweaks, size_t n_spend) const {
+        return fixed_ready &&
+               tweaks_capacity >= n_tweaks &&
+               spend_capacity  >= n_spend &&
+               rows_capacity   >= (n_tweaks * n_spend);
+    }
+
+    void free_all() {
+        buf_tweaks = secp256k1::metal::MetalBuffer{};
+        buf_scan   = secp256k1::metal::MetalBuffer{};
+        buf_spend33 = secp256k1::metal::MetalBuffer{};
+        buf_spend_points = secp256k1::metal::MetalBuffer{};
+        buf_spend_valid  = secp256k1::metal::MetalBuffer{};
+        buf_prefix = secp256k1::metal::MetalBuffer{};
+        buf_count_tweaks = secp256k1::metal::MetalBuffer{};
+        buf_count_spend  = secp256k1::metal::MetalBuffer{};
+        tweaks_capacity = spend_capacity = rows_capacity = 0;
+        fixed_ready = false;
     }
 };
 
@@ -391,6 +592,26 @@ public:
     }
 
     void shutdown() override {
+        // Repair (issue #335 acceptance repair): every grow-only buffer pool
+        // (msm_pool_, sighash_pool_, bip352_pool_) is a MetalBackend member
+        // whose MetalBuffers wrap id<MTLBuffer> objects bound to the
+        // about-to-be-destroyed runtime_'s device/queue, but pool capacity
+        // bookkeeping (tweaks_capacity/spend_capacity/rows_capacity/
+        // fixed_ready etc.) is independent of runtime_'s lifetime. Without
+        // freeing here, a subsequent init() on this same instance creates a
+        // NEW device/queue while ready()/ensure() still see the OLD
+        // capacity counters as satisfied for equal-or-smaller n_tweaks/
+        // n_spend, so the next dispatch would bind stale buffers from a
+        // destroyed device into a compute encoder created against the new
+        // device/queue -- undefined behavior under Metal's resource
+        // validation. free_all() resets every buffer to a default-constructed
+        // (empty) MetalBuffer and zeroes the capacity counters, forcing a
+        // fresh allocation against the new runtime_ on next use.
+        std::lock_guard<std::mutex> bip352_lock(bip352_pool_mtx_);
+        std::lock_guard<std::mutex> sighash_lock(sighash_pool_mtx_);
+        msm_pool_.free_all();
+        sighash_pool_.free_all();
+        bip352_pool_.free_all();
         runtime_.reset();
         lib_ready_          = false;
         lib_init_attempted_ = false;
@@ -435,8 +656,12 @@ public:
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("generator_mul_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_scalars, &buf_results, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_scalars, &buf_results, &buf_count})) {
+            std::memset(out_pubkeys33, 0, count * 33);
+            return set_error(GpuError::Launch,
+                             "Metal: generator_mul_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* aff = static_cast<const MetalAffinePoint*>(buf_results.contents());
         for (size_t i = 0; i < count; ++i)
@@ -456,30 +681,51 @@ public:
         if (!msg_hashes32 || !pubkeys33 || !sigs64 || !out_results)
             return set_error(GpuError::NullArg, "NULL buffer");
 
+        std::memset(out_results, 0, count);
+
         auto err = ensure_library();
         if (err != GpuError::Ok) return err;
 
         /* Pass 33-byte compressed pubkeys directly — GPU decompresses via lbtc_point_from_compressed */
         auto buf_msgs = runtime_->alloc_buffer_shared(count * 32);
-        std::memcpy(buf_msgs.contents(), msg_hashes32, count * 32);
-
         auto buf_pubs = runtime_->alloc_buffer_shared(count * 33);
-        std::memcpy(buf_pubs.contents(), pubkeys33, count * 33);
-
         auto buf_sigs = runtime_->alloc_buffer_shared(count * 64);
-        std::memcpy(buf_sigs.contents(), sigs64, count * 64);
-
         auto buf_res = runtime_->alloc_buffer_shared(count * sizeof(uint32_t));
-
-        uint32_t n32 = (uint32_t)count;
         auto buf_count = runtime_->alloc_buffer_shared(sizeof(uint32_t));
+
+        if (!buf_msgs.valid() || !buf_pubs.valid() || !buf_sigs.valid() ||
+            !buf_res.valid() || !buf_count.valid())
+            return set_error(GpuError::Memory,
+                             "Metal: ecdsa_verify_batch buffer allocation failed");
+
+        std::memcpy(buf_msgs.contents(), msg_hashes32, count * 32);
+        std::memcpy(buf_pubs.contents(), pubkeys33, count * 33);
+        std::memcpy(buf_sigs.contents(), sigs64, count * 64);
+        uint32_t n32 = (uint32_t)count;
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("ecdsa_verify_batch_compressed");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_msgs, &buf_pubs, &buf_sigs, &buf_res, &buf_count});
+        if (!pipe.valid())
+            return set_error(GpuError::Launch,
+                             "Metal: ecdsa_verify_batch kernel missing from loaded library");
+
+        constexpr uint32_t kUnwritten = 0xFFFFFFFFu;
+        auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
+        for (size_t i = 0; i < count; ++i) res_seed[i] = kUnwritten;
+
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                 {&buf_msgs, &buf_pubs, &buf_sigs, &buf_res, &buf_count})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                              "Metal: ecdsa_verify_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
+        for (size_t i = 0; i < count; ++i)
+            if (res[i] == kUnwritten)
+                return set_error(GpuError::Launch,
+                                 "Metal: ecdsa_verify_batch dispatch left results "
+                                 "unwritten (command-buffer failure) — declining to CPU");
         for (size_t i = 0; i < count; ++i)
             out_results[i] = res[i] ? 1 : 0;
 
@@ -519,8 +765,12 @@ public:
         if (!pipe.valid())
             return set_error(GpuError::Launch,
                              "Metal: ecdsa_verify_lbtc_rows kernel missing from loaded library");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_rows, &buf_stride, &buf_res, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_rows, &buf_stride, &buf_res, &buf_count})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: ecdsa_verify_lbtc_rows dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < count; ++i)
@@ -540,30 +790,54 @@ public:
         if (!msg_hashes32 || !pubkeys_x32 || !sigs64 || !out_results)
             return set_error(GpuError::NullArg, "NULL buffer");
 
+        std::memset(out_results, 0, count);
+
         auto err = ensure_library();
         if (err != GpuError::Ok) return err;
 
-        /* schnorr_verify_batch: pubkeys_x (N×32), msgs (N×32), sigs (N×64) */
+        /* schnorr_verify_batch kernel signature, in [[buffer(N)]] order:
+         *   0 msg_hashes (N×32)  1 pubkeys_x (N×32)  2 signatures (N×64)
+         *   3 results (N×uint32) 4 count
+         * The dispatch list below must be in that order. */
         auto buf_pks  = runtime_->alloc_buffer_shared(count * 32);
-        std::memcpy(buf_pks.contents(), pubkeys_x32, count * 32);
-
         auto buf_msgs = runtime_->alloc_buffer_shared(count * 32);
-        std::memcpy(buf_msgs.contents(), msg_hashes32, count * 32);
-
         auto buf_sigs = runtime_->alloc_buffer_shared(count * 64);
-        std::memcpy(buf_sigs.contents(), sigs64, count * 64);
-
         auto buf_res = runtime_->alloc_buffer_shared(count * sizeof(uint32_t));
-
-        uint32_t n32 = (uint32_t)count;
         auto buf_count = runtime_->alloc_buffer_shared(sizeof(uint32_t));
+
+        if (!buf_pks.valid() || !buf_msgs.valid() || !buf_sigs.valid() ||
+            !buf_res.valid() || !buf_count.valid())
+            return set_error(GpuError::Memory,
+                             "Metal: schnorr_verify_batch buffer allocation failed");
+
+        std::memcpy(buf_pks.contents(), pubkeys_x32, count * 32);
+        std::memcpy(buf_msgs.contents(), msg_hashes32, count * 32);
+        std::memcpy(buf_sigs.contents(), sigs64, count * 64);
+        uint32_t n32 = (uint32_t)count;
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("schnorr_verify_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_pks, &buf_msgs, &buf_sigs, &buf_res, &buf_count});
+        if (!pipe.valid())
+            return set_error(GpuError::Launch,
+                             "Metal: schnorr_verify_batch kernel missing from loaded library");
+
+        constexpr uint32_t kUnwritten = 0xFFFFFFFFu;
+        auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
+        for (size_t i = 0; i < count; ++i) res_seed[i] = kUnwritten;
+
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                 {&buf_msgs, &buf_pks, &buf_sigs, &buf_res, &buf_count})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                              "Metal: schnorr_verify_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
+        for (size_t i = 0; i < count; ++i)
+            if (res[i] == kUnwritten)
+                return set_error(GpuError::Launch,
+                                 "Metal: schnorr_verify_batch dispatch left results "
+                                 "unwritten (command-buffer failure) — declining to CPU");
         for (size_t i = 0; i < count; ++i)
             out_results[i] = res[i] ? 1 : 0;
 
@@ -637,8 +911,17 @@ public:
             auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
             for (size_t i = 0; i < n; ++i) res_seed[i] = kUnwritten;
 
-            runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                    {&buf_dig, &buf_pub, &buf_sig, &buf_res, &buf_count});
+            // Primary detector: dispatch_sync_checked()'s own command-buffer
+            // status/error check (issue #335 round-3 repair). The kUnwritten
+            // sentinel scan below is kept as a second, independent detector
+            // (defense-in-depth) rather than removed -- it also catches the
+            // theoretical case of a "completed" command buffer that still
+            // left a row unwritten for a reason other than a hard error.
+            if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                    {&buf_dig, &buf_pub, &buf_sig, &buf_res, &buf_count}))
+                return set_error(GpuError::Launch,
+                                 "Metal: ecdsa_verify_lbtc_columns dispatch failed "
+                                 "(GPU command-buffer error) — declining to CPU");
 
             const auto* res = static_cast<const uint32_t*>(buf_res.contents());
             for (size_t i = 0; i < n; ++i)
@@ -710,8 +993,14 @@ public:
             auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
             for (size_t i = 0; i < n; ++i) res_seed[i] = kUnwritten;
 
-            runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                    {&buf_dig, &buf_xon, &buf_sig, &buf_res, &buf_count});
+            // Primary detector: dispatch_sync_checked()'s command-buffer
+            // status/error check; the kUnwritten sentinel scan below stays as
+            // a second, independent detector (defense-in-depth).
+            if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                    {&buf_dig, &buf_xon, &buf_sig, &buf_res, &buf_count}))
+                return set_error(GpuError::Launch,
+                                 "Metal: schnorr_verify_lbtc_columns dispatch failed "
+                                 "(GPU command-buffer error) — declining to CPU");
 
             const auto* res = static_cast<const uint32_t*>(buf_res.contents());
             for (size_t i = 0; i < n; ++i)
@@ -795,17 +1084,19 @@ public:
             uint32_t canary0 = 0u;
             std::memcpy(buf_canary.contents(), &canary0, sizeof(canary0));
 
-            runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                    {&buf_dig, &buf_pub, &buf_sig, &buf_keys,
-                                     &buf_count, &buf_canary});
-
-            // dispatch_sync is void and only cerr-logs a command-buffer fault; a
-            // surviving canary 0 proves the kernel did not run -> decline to CPU
+            // Primary detector: dispatch_sync_checked()'s command-buffer
+            // status/error check (issue #335 round-3 repair; dispatch_sync()
+            // was void and only cerr-logged a fault). The canary readback
+            // below stays as a second, independent detector: a surviving
+            // canary 0 also proves the kernel did not run -> decline to CPU
             // WITHOUT copyback (caller seed stays = all-rejected). Never emit
             // all-zero, never zero a rejected row.
+            const bool dispatch_ok = runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                    {&buf_dig, &buf_pub, &buf_sig, &buf_keys,
+                                     &buf_count, &buf_canary});
             uint32_t ran = 0u;
             std::memcpy(&ran, buf_canary.contents(), sizeof(ran));
-            if (ran == 0u)
+            if (!dispatch_ok || ran == 0u)
                 return set_error(GpuError::Launch,
                                  "Metal: lbtc_ecdsa_verify_collect dispatch did not run "
                                  "(command-buffer failure) — declining to CPU");
@@ -868,13 +1159,16 @@ public:
             uint32_t canary0 = 0u;
             std::memcpy(buf_canary.contents(), &canary0, sizeof(canary0));
 
-            runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
+            // Primary detector: dispatch_sync_checked()'s command-buffer
+            // status/error check; the canary readback stays as a second,
+            // independent detector (defense-in-depth) -- see
+            // ecdsa_verify_collect above for the full rationale.
+            const bool dispatch_ok = runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
                                     {&buf_dig, &buf_xon, &buf_sig, &buf_keys,
                                      &buf_count, &buf_canary});
-
             uint32_t ran = 0u;
             std::memcpy(&ran, buf_canary.contents(), sizeof(ran));
-            if (ran == 0u)
+            if (!dispatch_ok || ran == 0u)
                 return set_error(GpuError::Launch,
                                  "Metal: lbtc_schnorr_verify_collect dispatch did not run "
                                  "(command-buffer failure) — declining to CPU");
@@ -923,7 +1217,10 @@ public:
         auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < n; ++i) res_seed[i] = kUnwritten;
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u, {&buf_keys, &buf_res, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u, {&buf_keys, &buf_res, &buf_count}))
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_xonly_validate dispatch failed "
+                             "(GPU command-buffer error) — declining to CPU");
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < n; ++i)
@@ -971,7 +1268,10 @@ public:
         auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < n; ++i) res_seed[i] = kUnwritten;
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u, {&buf_pk, &buf_res, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u, {&buf_pk, &buf_res, &buf_count}))
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_pubkey_validate dispatch failed "
+                             "(GPU command-buffer error) — declining to CPU");
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < n; ++i)
@@ -1030,8 +1330,11 @@ public:
         auto* res_seed = static_cast<uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < n; ++i) res_seed[i] = kUnwritten;
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                {&buf_ix, &buf_tw, &buf_tx, &buf_par, &buf_res, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                {&buf_ix, &buf_tw, &buf_tx, &buf_par, &buf_res, &buf_count}))
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_commitment_verify dispatch failed "
+                             "(GPU command-buffer error) — declining to CPU");
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < n; ++i)
@@ -1084,8 +1387,12 @@ public:
         uint32_t n32 = (uint32_t)n;
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                {&buf_th, &buf_msgs, &buf_msglen, &buf_out, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                {&buf_th, &buf_msgs, &buf_msglen, &buf_out, &buf_count})) {
+            std::memset(out32, 0, n * 32);
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_tagged_hash dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(out32, buf_out.contents(), n * 32);
 
@@ -1130,8 +1437,12 @@ public:
         uint32_t n32 = (uint32_t)n;
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                {&buf_th, &buf_msgs, &buf_lens, &buf_stride, &buf_out, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                {&buf_th, &buf_msgs, &buf_lens, &buf_stride, &buf_out, &buf_count})) {
+            std::memset(out32, 0, n * 32);
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_tagged_hash_var dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(out32, buf_out.contents(), n * 32);
 
@@ -1170,8 +1481,12 @@ public:
         uint32_t n32 = (uint32_t)n;
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                {&buf_in, &buf_inlen, &buf_out, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                {&buf_in, &buf_inlen, &buf_out, &buf_count})) {
+            std::memset(out32, 0, n * 32);
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_hash256 dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(out32, buf_out.contents(), n * 32);
 
@@ -1220,10 +1535,364 @@ public:
         uint32_t n32 = (uint32_t)n;
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
-        runtime_->dispatch_sync(pipe, (uint32_t)n, 64u,
-                                {&buf_in, &buf_lens, &buf_stride, &buf_out, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                {&buf_in, &buf_lens, &buf_stride, &buf_out, &buf_count})) {
+            std::memset(out32, 0, n * 32);
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_hash256_var dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(out32, buf_out.contents(), n * 32);
+
+        clear_error();
+        return GpuError::Ok;
+    }
+
+    /* libbitcoin-bridge: Merkle-tree parent hashing, SoA layout.
+     * out[i] = SHA256(SHA256(left32[i] || right32[i])). PUBLIC-data hashing only.
+     * Native Metal parity with CudaBackend::merkle_pair_hash. */
+    GpuError merkle_pair_hash(
+        const uint8_t* left32, const uint8_t* right32,
+        size_t n, uint8_t* out32) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (n == 0) { clear_error(); return GpuError::Ok; }
+        if (!left32 || !right32 || !out32) return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_library();
+        if (err != GpuError::Ok) return err;
+        auto pipe = runtime_->make_pipeline("lbtc_merkle_pair");
+        if (!pipe.valid())
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_merkle_pair kernel missing from loaded library");
+
+        auto buf_left  = runtime_->alloc_buffer_shared(n * 32);
+        auto buf_right = runtime_->alloc_buffer_shared(n * 32);
+        auto buf_out   = runtime_->alloc_buffer_shared(n * 32);
+        auto buf_count = runtime_->alloc_buffer_shared(sizeof(uint32_t));
+        if (!buf_left.valid() || !buf_right.valid() || !buf_out.valid() || !buf_count.valid())
+            return set_error(GpuError::Memory,
+                             "Metal: lbtc_merkle_pair buffer allocation failed");
+
+        std::memcpy(buf_left.contents(), left32, n * 32);
+        std::memcpy(buf_right.contents(), right32, n * 32);
+        uint32_t n32 = (uint32_t)n;
+        std::memcpy(buf_count.contents(), &n32, sizeof(n32));
+
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)n, 64u,
+                                {&buf_left, &buf_right, &buf_out, &buf_count})) {
+            std::memset(out32, 0, n * 32);
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_merkle_pair dispatch failed (GPU command-buffer error)");
+        }
+
+        std::memcpy(out32, buf_out.contents(), n * 32);
+
+        clear_error();
+        return GpuError::Ok;
+    }
+
+    /* out32[i] = HASH256(descriptor-shaped concatenation of per-row field
+     * columns) -- Bitcoin sighash preimage hashing without a CPU-assembled
+     * per-row preimage. This codebase has no argument-buffer/pointer-array
+     * precedent on Metal (confirmed: every kernel here binds a small number
+     * of explicit [[buffer(N)]] slots), so referenced field columns are
+     * copied via memcpy directly into sighash_pool_'s shared (unified-memory)
+     * storage -- columns copied verbatim, never a row-assembled preimage --
+     * plus a small per-field metadata table (byte offset / stride /
+     * fixed_len / var-lens offset) the kernel uses to locate each field.
+     * Mirrors OpenCLBackend::sighash_descriptor_hash's packed-buffer design
+     * exactly.
+     *
+     * Full descriptor grammar validation is repeated here rather than
+     * trusted from the caller: this method is reachable both from the
+     * libbitcoin direct API (which fully validates before dispatch) and
+     * directly from the ufsecp_gpu C ABI (which only pre-checks
+     * length/terminator/mid-0xFF) -- field-id/duplicate/nHashType/var-len/
+     * preimage-size checks are this backend's own responsibility.
+     * Public data only, variable-time, no secret material -- relies on the
+     * blanket MetalBuffer::~MetalBuffer() zero-on-destruct (Rule 10), same
+     * as hash256_var/merkle_pair_hash; no explicit secure_erase needed.
+     *
+     * Thread-safety: `sighash_pool_` is a plain MetalBackend member (not
+     * thread_local like OpenCL's pool), so its buffers -- and their
+     * contents, since Metal shared buffers are memcpy'd into directly --
+     * would race if two threads called this on the same backend instance
+     * concurrently. `sighash_pool_mtx_` serializes the whole span from pool
+     * allocation through the final device->host readback below; this
+     * deliberately trades concurrency for correctness on one instance. */
+    GpuError sighash_descriptor_hash(
+        const uint8_t* descriptor, size_t descriptor_len,
+        const uint8_t* const* field_data, const uint32_t* field_lengths,
+        const uint32_t* const* field_var_lens, size_t count,
+        uint8_t* out32) override
+    {
+        // count==0 and out32==NULL are checked before anything else: neither
+        // can be resolved by zeroing out32 (0 rows means nothing should be
+        // written; a NULL out32 has nothing to zero). Every other failure
+        // mode below -- not-ready context, a NULL descriptor/field_data/
+        // field_lengths, malformed descriptor, per-row bounds, pool
+        // allocation, launch, readback -- is deferred until AFTER out_bytes
+        // is computed and out32 is zeroed, so it is fail-closed: a caller
+        // that passes a valid non-NULL out32 alongside some other bad
+        // argument gets an all-zero digest back, never untouched/stale
+        // memory.
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!out32) return set_error(GpuError::NullArg, "NULL buffer");
+
+        // Overflow-safe output size, checked before any use in allocation or
+        // copy -- this backend is directly reachable from the C ABI, not
+        // just the pre-validated C++ direct-API caller, so `count` cannot be
+        // trusted to keep count*32 within size_t, nor to fit uint32_t: every
+        // later use (dispatch thread count, buf_count upload, the per-field
+        // varlen-offset multiply below) casts count down to uint32_t, and an
+        // unchecked huge count would silently truncate there -- wrong
+        // dispatch size, wrong on-device row count, wrong varlen indexing.
+        // count alone (no pointer dereference) is enough to compute and
+        // apply this bound, so it can run before the is_ready()/NULL checks
+        // below.
+        constexpr uint64_t kU64Max = (std::numeric_limits<uint64_t>::max)();
+        const uint64_t count64 = static_cast<uint64_t>(count);
+        if (count64 > 0xFFFFFFFFull)
+            return set_error(GpuError::BadInput, "count exceeds uint32_t range");
+        if (count64 > kU64Max / 32u)
+            return set_error(GpuError::BadInput, "count overflows output size");
+        const size_t out_bytes = static_cast<size_t>(count64 * 32u);
+        std::memset(out32, 0, out_bytes);
+
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (!descriptor || !field_data || !field_lengths)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        // ── Descriptor pre-dispatch validation (mirrors libbitcoin.hpp / CUDA parser) ──
+        constexpr size_t MAX_FIELDS = 64;
+        constexpr size_t MAX_PREIMAGE = 4u * 1024u * 1024u;  // 4 MiB per row
+        struct HostPlan { uint16_t field_id; bool has_len; uint32_t fixed_len; };
+        HostPlan plan[MAX_FIELDS];
+        size_t num_fields = 0;
+        bool has_nHashType = false;
+
+        if (descriptor_len < 1 || descriptor_len > 129) return set_error(GpuError::BadInput, "descriptor_len");
+        if ((descriptor_len & 1u) == 0) return set_error(GpuError::BadInput, "descriptor_len even");
+        if (descriptor[descriptor_len - 1] != 0xFF) return set_error(GpuError::BadInput, "no terminator");
+        for (size_t i = 0; i < descriptor_len - 1; i += 2)
+            if (descriptor[i] == 0xFF) return set_error(GpuError::BadInput, "mid-0xFF");
+
+        const uint8_t* p = descriptor;
+        const uint8_t* dend = descriptor + descriptor_len;
+        while (p < dend && *p != 0xFF) {
+            if (num_fields >= MAX_FIELDS) return set_error(GpuError::BadInput, "too many fields");
+            if (p + 1 >= dend) return set_error(GpuError::BadInput, "truncated ref");
+            const uint16_t fid = static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1] & 0x0Fu) << 8);
+            const uint8_t flags_nib = p[1] >> 4;
+            if ((flags_nib & 0x0Cu) != 0) return set_error(GpuError::BadInput, "reserved flags");
+            if ((fid & 0xFFu) == 0xFFu) return set_error(GpuError::BadInput, "reserved low-byte");
+            for (size_t j = 0; j < num_fields; ++j)
+                if (plan[j].field_id == fid) return set_error(GpuError::BadInput, "duplicate field");
+            const bool has_len = (flags_nib & 0x01u) != 0;
+            uint32_t flen = 0;
+            switch (fid) {
+            case 0x00: flen = 4;  break; case 0x01: flen = 32; break; case 0x02: flen = 32; break;
+            case 0x03: flen = 36; break; case 0x04: /*var*/    break; case 0x05: flen = 8;  break;
+            case 0x06: flen = 4;  break; case 0x07: flen = 32; break; case 0x08: flen = 4;  break;
+            case 0x09: flen = 4;  has_nHashType = true; break;
+            case 0x0A: flen = 36; break; case 0x0B: flen = 4;  break;
+            // 0x0C..0x0F are reserved for BIP-341 TapSighash fields (annex,
+            // tapleaf_hash, key_version, codesep_pos). This op computes
+            // legacy/BIP143-style HASH256, not TapSighash — reject them.
+            case 0x0C: case 0x0D: case 0x0E: case 0x0F:
+                return set_error(GpuError::BadInput, "reserved taproot field id");
+            case 0xF0: /*var*/ break;
+            default: return set_error(GpuError::BadInput, "unsupported field_id");
+            }
+            const bool is_var = (flen == 0);
+            if (is_var && !has_len)  return set_error(GpuError::BadInput, "var w/o HAS_LENGTH");
+            if (!is_var && has_len)  return set_error(GpuError::BadInput, "fixed w/ HAS_LENGTH");
+            if (!field_data[fid])    return set_error(GpuError::BadInput, "null field_data");
+            if (field_lengths[fid] == 0) return set_error(GpuError::BadInput, "zero stride");
+            // Fixed-field stride must be >= its fixed serialized length --
+            // otherwise a row's fixed-length read would run past the bytes the
+            // caller actually populated for that field (undersized declared
+            // stride vs. protocol-fixed width). Mirrors the CPU direct parser
+            // (compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp) and the
+            // CUDA backend (gpu_backend_cuda.cu); same error text as CUDA.
+            if (!is_var && field_lengths[fid] < flen)
+                return set_error(GpuError::BadInput, "stride < fixed_len");
+            if (is_var && (!field_var_lens || !field_var_lens[fid]))
+                return set_error(GpuError::BadInput, "null var_lens");
+            plan[num_fields].field_id  = fid;
+            plan[num_fields].has_len   = has_len;
+            plan[num_fields].fixed_len = flen;
+            ++num_fields;
+            p += 2;
+        }
+        if (p != dend - 1) return set_error(GpuError::BadInput, "bad terminator pos");
+        if (!has_nHashType) return set_error(GpuError::BadInput, "missing nHashType");
+
+        // Bound the on-device varlen element index space up front, folded
+        // into the same early-validation phase as the count/out_bytes check
+        // above. The kernel indexes packed_varlens[varlen_offsets[fi] + tid]
+        // using 32-bit uint arithmetic. Every element offset assigned later
+        // is running_var_field_index * count, and the highest index any
+        // thread ever touches is (num_var_fields - 1) * count + (count - 1),
+        // which is always < num_var_fields * count. Bounding that product to
+        // uint32_t range here -- before any h_varlen_offsets[fi] is ever
+        // assigned -- guarantees the uint32_t multiply in the stride loop
+        // below cannot silently wrap.
+        uint32_t num_var_fields_bound = 0;
+        for (size_t fi = 0; fi < num_fields; ++fi)
+            if (plan[fi].fixed_len == 0) ++num_var_fields_bound;
+        const uint64_t num_var_fields_bound64 = static_cast<uint64_t>(num_var_fields_bound);
+        if (num_var_fields_bound64 != 0 && count64 > kU64Max / num_var_fields_bound64)
+            return set_error(GpuError::BadInput, "varlens element count overflows");
+        if (num_var_fields_bound64 * count64 > 0xFFFFFFFFull)
+            return set_error(GpuError::BadInput, "varlens element index exceeds uint32_t range");
+
+        // Per-row bounds: var_len <= stride, total preimage <= 4 MiB. Defense
+        // in depth -- the libbitcoin direct-API caller already enforces this,
+        // but this backend is also reachable directly from the C ABI, which
+        // does not repeat the per-row check. Cap-before-add: the running
+        // total is checked against MAX_PREIMAGE before each field's length is
+        // folded in, rather than accumulating every field first and checking
+        // once after -- accumulate-then-check can only ever detect the
+        // violation after the unbounded add already happened.
+        for (size_t row = 0; row < count; ++row) {
+            size_t preimage_len = 0;
+            for (size_t fi = 0; fi < num_fields; ++fi) {
+                const auto& pf = plan[fi];
+                uint32_t field_len = 0;
+                if (pf.fixed_len > 0) {
+                    field_len = pf.fixed_len;
+                } else {
+                    const uint32_t var_len = field_var_lens[pf.field_id][row];
+                    if (var_len > field_lengths[pf.field_id])
+                        return set_error(GpuError::BadInput, "var_len exceeds stride");
+                    field_len = var_len;
+                }
+                if (field_len > MAX_PREIMAGE || preimage_len > MAX_PREIMAGE - field_len)
+                    return set_error(GpuError::BadInput, "preimage exceeds 4 MiB");
+                preimage_len += field_len;
+            }
+        }
+
+        auto err = ensure_library();
+        if (err != GpuError::Ok) return err;
+        auto pipe = runtime_->make_pipeline("lbtc_sighash_descriptor");
+        if (!pipe.valid())
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_sighash_descriptor kernel missing from loaded library");
+
+        // Gather referenced field columns into ONE packed host buffer plus a
+        // small per-field metadata table (col_offsets/strides/fixed_lens/
+        // varlen_offsets). Columns are copied verbatim -- never row-assembled
+        // preimages -- so the kernel still streams each field independently.
+        std::vector<uint64_t> h_col_offsets(num_fields);
+        std::vector<uint32_t> h_strides(num_fields);
+        std::vector<uint32_t> h_fixed_lens(num_fields);
+        std::vector<uint32_t> h_varlen_offsets(num_fields, 0);
+
+        // Overflow safety: `count` and per-field strides are attacker-controlled
+        // when this backend is reached directly via the C ABI (not just the
+        // pre-validated C++ direct-API caller), so every count*stride multiply
+        // and the running byte totals below must be checked before they feed
+        // an allocation size or a memcpy length. (count itself and the varlen
+        // element index space were already validated above, alongside the
+        // out_bytes/memset fail-closed block.)
+        uint64_t total_col_bytes = 0;
+        uint32_t num_var_fields = 0;
+        for (size_t fi = 0; fi < num_fields; ++fi) {
+            const auto& pf = plan[fi];
+            const uint32_t stride = field_lengths[pf.field_id];
+            h_strides[fi]     = stride;
+            h_fixed_lens[fi]  = pf.fixed_len;
+            h_col_offsets[fi] = total_col_bytes;
+            if (stride != 0 && count64 > kU64Max / stride)
+                return set_error(GpuError::BadInput, "count * stride overflows");
+            const uint64_t col_bytes = count64 * stride;
+            if (total_col_bytes > kU64Max - col_bytes)
+                return set_error(GpuError::BadInput, "total column bytes overflow");
+            total_col_bytes += col_bytes;
+            if (pf.fixed_len == 0) {
+                h_varlen_offsets[fi] = num_var_fields * static_cast<uint32_t>(count);
+                ++num_var_fields;
+            }
+        }
+        // packed_varlens_elems == num_var_fields_bound64 * count64, already
+        // proven <= 0xFFFFFFFF above (fix 3), so this cannot overflow when
+        // multiplied by sizeof(uint32_t) here. `num_var_fields` (the running
+        // per-field counter above) and `num_var_fields_bound` are always
+        // equal -- both count fields with fixed_len == 0 over the same plan.
+        const uint64_t packed_varlens_elems = num_var_fields_bound64 * count64;
+        uint64_t packed_varlens_bytes64 = packed_varlens_elems * sizeof(uint32_t);
+        if (packed_varlens_bytes64 == 0) packed_varlens_bytes64 = sizeof(uint32_t);
+
+        // Explicit proof that both byte totals fit size_t before the
+        // narrowing casts below -- every prior check above bounds these as
+        // uint64_t, which is wider than size_t on ILP32-style targets even
+        // though every currently shipping Metal target is LP64 (size_t == 64
+        // bits); assert the fit at the cast site rather than relying on that
+        // platform fact implicitly.
+        constexpr uint64_t kSizeMax = static_cast<uint64_t>((std::numeric_limits<size_t>::max)());
+        if (packed_varlens_bytes64 > kSizeMax)
+            return set_error(GpuError::BadInput, "packed varlens size exceeds size_t");
+        if (total_col_bytes > kSizeMax)
+            return set_error(GpuError::BadInput, "packed column size exceeds size_t");
+        const size_t packed_varlens_bytes = static_cast<size_t>(packed_varlens_bytes64);
+        const size_t packed_cols_bytes    = static_cast<size_t>(total_col_bytes);
+
+        // Persistent, grow-only pool buffers (mirrors msm_pool_) instead of a
+        // fresh alloc_buffer_shared() per call. The metadata buffers are
+        // allocated once at MAX_FIELDS capacity; packed_cols/packed_varlens/out
+        // grow to fit the largest call seen so far. sighash_pool_ is a plain
+        // (non-thread_local) member shared across every caller of this
+        // MetalBackend instance, so sighash_pool_mtx_ serializes the whole
+        // span below -- allocation through the final readback -- to prevent
+        // concurrent calls from racing on the same pool buffers/contents.
+        std::lock_guard<std::mutex> sighash_pool_lock(sighash_pool_mtx_);
+        sighash_pool_.ensure(packed_cols_bytes, packed_varlens_bytes, out_bytes, runtime_.get());
+        if (!sighash_pool_.ready(packed_cols_bytes, packed_varlens_bytes, out_bytes))
+            return set_error(GpuError::Memory,
+                             "Metal: lbtc_sighash_descriptor pool allocation failed");
+
+        std::memcpy(sighash_pool_.buf_col_offsets.contents(), h_col_offsets.data(), num_fields * sizeof(uint64_t));
+        std::memcpy(sighash_pool_.buf_strides.contents(), h_strides.data(), num_fields * sizeof(uint32_t));
+        std::memcpy(sighash_pool_.buf_fixed_lens.contents(), h_fixed_lens.data(), num_fields * sizeof(uint32_t));
+        std::memcpy(sighash_pool_.buf_varlen_offsets.contents(), h_varlen_offsets.data(), num_fields * sizeof(uint32_t));
+        uint32_t num_fields32 = static_cast<uint32_t>(num_fields);
+        std::memcpy(sighash_pool_.buf_num_fields.contents(), &num_fields32, sizeof(num_fields32));
+
+        for (size_t fi = 0; fi < num_fields; ++fi) {
+            std::memcpy(static_cast<uint8_t*>(sighash_pool_.buf_packed_cols.contents()) + h_col_offsets[fi],
+                        field_data[plan[fi].field_id],
+                        static_cast<size_t>(count) * h_strides[fi]);
+        }
+        {
+            uint32_t vfi = 0;
+            for (size_t fi = 0; fi < num_fields; ++fi) {
+                if (h_fixed_lens[fi] != 0) continue;
+                std::memcpy(static_cast<uint32_t*>(sighash_pool_.buf_packed_varlens.contents()) +
+                                static_cast<size_t>(vfi) * count,
+                            field_var_lens[plan[fi].field_id],
+                            count * sizeof(uint32_t));
+                ++vfi;
+            }
+        }
+        uint32_t count32 = static_cast<uint32_t>(count);
+        std::memcpy(sighash_pool_.buf_count.contents(), &count32, sizeof(count32));
+
+        // out32 was already memset to 0 at the top of this function (fail-
+        // closed by construction), so on a checked-dispatch failure it is
+        // sufficient to return without a copyback -- out32 stays all-zero.
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&sighash_pool_.buf_col_offsets, &sighash_pool_.buf_strides,
+                                 &sighash_pool_.buf_fixed_lens, &sighash_pool_.buf_varlen_offsets,
+                                 &sighash_pool_.buf_num_fields, &sighash_pool_.buf_packed_cols,
+                                 &sighash_pool_.buf_packed_varlens, &sighash_pool_.buf_count,
+                                 &sighash_pool_.buf_out}))
+            return set_error(GpuError::Launch,
+                             "Metal: lbtc_sighash_descriptor dispatch failed (GPU command-buffer error)");
+
+        std::memcpy(out32, sighash_pool_.buf_out.contents(), out_bytes);
 
         clear_error();
         return GpuError::Ok;
@@ -1268,8 +1937,16 @@ public:
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("scalar_mul_batch_compressed");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_pubs33, &buf_scalars, &buf_results, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_pubs33, &buf_scalars, &buf_results, &buf_count})) {
+            // Fail-closed on the caller-visible output; the SECRET-bearing
+            // buf_scalars/scratch erasure below still runs via the RAII
+            // guards (buf_scalars_guard, h_scalars_guard) regardless of this
+            // early return, since they were constructed before this point.
+            std::memset(out_secrets32, 0, count * 32);
+            return set_error(GpuError::Launch,
+                             "Metal: ecdh_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* aff = static_cast<const MetalAffinePoint*>(buf_results.contents());
         for (size_t i = 0; i < count; ++i) {
@@ -1323,8 +2000,12 @@ public:
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("hash160_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_pks, &buf_hash, &buf_stride, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_pks, &buf_hash, &buf_stride, &buf_count})) {
+            std::memset(out_hash160, 0, count * 20);
+            return set_error(GpuError::Launch,
+                             "Metal: hash160_pubkey_batch dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(out_hash160,
                     buf_hash.contents(),
@@ -1389,9 +2070,13 @@ public:
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("frost_verify_partial_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
                                 {&buf_z, &buf_D, &buf_E, &buf_Y, &buf_rho,
-                                 &buf_lam, &buf_nR, &buf_nK, &buf_res, &buf_count});
+                                 &buf_lam, &buf_nR, &buf_nK, &buf_res, &buf_count})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: frost_verify_partial_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < count; ++i)
@@ -1437,9 +2122,14 @@ public:
         std::memcpy(buf_count.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("ecrecover_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
                                 {&buf_msgs, &buf_sigs, &buf_recids, &buf_pubs,
-                                 &buf_valid, &buf_count});
+                                 &buf_valid, &buf_count})) {
+            std::memset(out_pubkeys33, 0, count * 33);
+            std::memset(out_valid, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: ecrecover_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* pubs = static_cast<const uint8_t*>(buf_pubs.contents());
         const auto* valid = static_cast<const uint32_t*>(buf_valid.contents());
@@ -1498,15 +2188,23 @@ public:
 
         /* Pass 1: GPU scalar_mul_batch_compressed → buf_partials (n AffinePoints) */
         auto pipe_sm = runtime_->make_pipeline("scalar_mul_batch_compressed");
-        runtime_->dispatch_sync(pipe_sm, (uint32_t)n, 64u,
+        if (!runtime_->dispatch_sync_checked(pipe_sm, (uint32_t)n, 64u,
                                 {&msm_pool_.buf_bases, &msm_pool_.buf_scalars,
-                                 &msm_pool_.buf_partials, &buf_count});
+                                 &msm_pool_.buf_partials, &buf_count})) {
+            std::memset(out_result33, 0, 33);
+            return set_error(GpuError::Launch,
+                             "Metal: msm scalar_mul pass dispatch failed (GPU command-buffer error)");
+        }
 
         /* Pass 2 (optional): GPU msm_block_sum_kernel → buf_blocks (n_blocks JacobianPoints) */
         auto pipe_bs = runtime_->make_pipeline("msm_block_sum_kernel");
         if (pipe_bs.valid()) {
-            runtime_->dispatch_sync(pipe_bs, (uint32_t)n_blocks, 1u,
-                                    {&msm_pool_.buf_partials, &buf_count, &msm_pool_.buf_blocks});
+            if (!runtime_->dispatch_sync_checked(pipe_bs, (uint32_t)n_blocks, 1u,
+                                    {&msm_pool_.buf_partials, &buf_count, &msm_pool_.buf_blocks})) {
+                std::memset(out_result33, 0, 33);
+                return set_error(GpuError::Launch,
+                                 "Metal: msm block-sum pass dispatch failed (GPU command-buffer error)");
+            }
 
             /* CPU: Jacobian→Affine + accumulate (only n_blocks iterations) */
             const auto* jac_blocks =
@@ -1666,8 +2364,12 @@ public:
         std::memcpy(buf_n.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("zk_knowledge_verify_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_rx, &buf_s, &buf_pks, &buf_msgs, &buf_res, &buf_n});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_rx, &buf_s, &buf_pks, &buf_msgs, &buf_res, &buf_n})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: zk_knowledge_verify_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < count; ++i)
@@ -1724,8 +2426,12 @@ public:
         std::memcpy(buf_n.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("zk_dleq_verify_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_e, &buf_s, &buf_P, &buf_Q, &buf_res, &buf_n});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_e, &buf_s, &buf_P, &buf_Q, &buf_res, &buf_n})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: zk_dleq_verify_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < count; ++i)
@@ -1804,8 +2510,12 @@ public:
         std::memcpy(buf_n.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("range_proof_poly_batch");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
-                                {&buf_proofs, &buf_commits, &buf_hgen, &buf_res, &buf_n});
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
+                                {&buf_proofs, &buf_commits, &buf_hgen, &buf_res, &buf_n})) {
+            std::memset(out_results, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: bulletproof_verify_batch dispatch failed (GPU command-buffer error)");
+        }
 
         const auto* res = static_cast<const uint32_t*>(buf_res.contents());
         for (size_t i = 0; i < count; ++i)
@@ -1851,9 +2561,15 @@ public:
         std::memcpy(buf_n.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("kernel_bip324_aead_encrypt");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
                                 {&buf_keys, &buf_nonces, &buf_pt, &buf_sizes,
-                                 &buf_wire, &buf_max, &buf_n});
+                                 &buf_wire, &buf_max, &buf_n})) {
+            // buf_keys_guard (RAII, constructed above) still erases the
+            // SECRET key buffer on this early return.
+            std::memset(wire_out, 0, wire_stride * count);
+            return set_error(GpuError::Launch,
+                             "Metal: bip324_aead_encrypt_batch dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(wire_out, buf_wire.contents(), wire_stride * count);
         clear_error();
@@ -1898,9 +2614,16 @@ public:
         std::memcpy(buf_n.contents(), &n32, sizeof(n32));
 
         auto pipe = runtime_->make_pipeline("kernel_bip324_aead_decrypt");
-        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
+        if (!runtime_->dispatch_sync_checked(pipe, (uint32_t)count, 64u,
                                 {&buf_keys, &buf_nonces, &buf_wire_in, &buf_sizes,
-                                 &buf_pt_out, &buf_ok, &buf_max, &buf_n});
+                                 &buf_pt_out, &buf_ok, &buf_max, &buf_n})) {
+            // buf_keys_guard (RAII, constructed above) still erases the
+            // SECRET key buffer on this early return.
+            std::memset(plaintext_out, 0, (size_t)max_payload * count);
+            std::memset(out_valid, 0, count);
+            return set_error(GpuError::Launch,
+                             "Metal: bip324_aead_decrypt_batch dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(plaintext_out, buf_pt_out.contents(), (size_t)max_payload * count);
         const auto* ok_vals = static_cast<const uint32_t*>(buf_ok.contents());
@@ -1915,9 +2638,10 @@ public:
         const uint8_t* msg_hashes32, const uint8_t* pubkeys33,
         const uint8_t* sigs64, size_t count, uint8_t* witness_flat_out) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (!count) { clear_error(); return GpuError::Ok; }
         if (!msg_hashes32 || !pubkeys33 || !sigs64 || !witness_flat_out)
             return set_error(GpuError::NullArg, "NULL pointer passed to snark_witness_batch");
-        if (!count) return GpuError::Ok;
 #if !SECP256K1_GPU_HAS_ZK
         return set_error(GpuError::Unsupported, "GPU ZK module disabled at build time");
 #endif
@@ -1939,8 +2663,12 @@ public:
         if (!pipe.valid())
             return set_error(GpuError::Launch,
                              "Metal: ecdsa_snark_witness_batch kernel missing from loaded library");
-        runtime_->dispatch_sync(pipe, n32, 64u,
-                                {&buf_msgs, &buf_pubs, &buf_sigs, &buf_out, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, n32, 64u,
+                                {&buf_msgs, &buf_pubs, &buf_sigs, &buf_out, &buf_count})) {
+            std::memset(witness_flat_out, 0, count * 760);
+            return set_error(GpuError::Launch,
+                             "Metal: snark_witness_batch dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(witness_flat_out, buf_out.contents(), count * 760);
         clear_error();
@@ -1953,9 +2681,10 @@ public:
         const uint8_t* msgs32, const uint8_t* pubkeys_x32,
         const uint8_t* sigs64, size_t count, uint8_t* out_flat) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (!count) { clear_error(); return GpuError::Ok; }
         if (!msgs32 || !pubkeys_x32 || !sigs64 || !out_flat)
             return set_error(GpuError::NullArg, "NULL pointer passed to schnorr_snark_witness_batch");
-        if (!count) return GpuError::Ok;
 #if !SECP256K1_GPU_HAS_ZK
         return set_error(GpuError::Unsupported, "GPU ZK module disabled at build time");
 #endif
@@ -1976,25 +2705,50 @@ public:
         if (!pipe.valid())
             return set_error(GpuError::Launch,
                              "Metal: schnorr_snark_witness_batch kernel missing from loaded library");
-        runtime_->dispatch_sync(pipe, n32, 64u,
-                                {&buf_msgs, &buf_pubs, &buf_sigs, &buf_out, &buf_count});
+        if (!runtime_->dispatch_sync_checked(pipe, n32, 64u,
+                                {&buf_msgs, &buf_pubs, &buf_sigs, &buf_out, &buf_count})) {
+            std::memset(out_flat, 0, count * 472);
+            return set_error(GpuError::Launch,
+                             "Metal: schnorr_snark_witness_batch dispatch failed (GPU command-buffer error)");
+        }
 
         std::memcpy(out_flat, buf_out.contents(), count * 472);
         clear_error();
         return GpuError::Ok;
     }
 
-    GpuError bip352_scan_batch(
-        const uint8_t* scan_privkey32, const uint8_t* spend_pubkey33,
+    GpuError bip352_scan_batch_multispend(
+        const uint8_t* scan_privkey32, const uint8_t* spend_pubkeys33, size_t n_spend,
         const uint8_t* tweak_pubkeys33, size_t n_tweaks, uint64_t* prefix64_out) override
     {
         if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
-        if (!n_tweaks) { clear_error(); return GpuError::Ok; }
-        if (!scan_privkey32 || !spend_pubkey33 || !tweak_pubkeys33 || !prefix64_out)
-            return set_error(GpuError::NullArg, "NULL pointer passed to bip352_scan_batch");
+        if (!n_tweaks || !n_spend) { clear_error(); return GpuError::Ok; }
+        if (!scan_privkey32 || !spend_pubkeys33 || !tweak_pubkeys33 || !prefix64_out)
+            return set_error(GpuError::NullArg, "NULL pointer passed to bip352_scan_batch_multispend");
 #if !SECP256K1_GPU_HAS_BIP352
         return set_error(GpuError::Unsupported, "GPU BIP-352 module disabled at build time");
 #endif
+        // Repair (issue #335 acceptance repair, round 3): backend-level bounds
+        // validation, INDEPENDENT of the C ABI layer's kMaxGpuBatchN/
+        // kMaxBip352Spend caps (ufsecp_gpu_impl.cpp). GpuBackend is a public
+        // C++ interface reachable directly by callers who skip
+        // ufsecp_gpu_impl.cpp entirely, so this method must not assume
+        // n_tweaks/n_spend already arrived pre-bounded. n_tweaks32/n_spend32
+        // below feed Metal dispatch grid sizes and this backend's pooled
+        // uint32_t count buffers -- an unchecked narrowing `(uint32_t)` cast
+        // would silently truncate to a SMALLER grid/row-count than the real
+        // n_tweaks*n_spend, causing the kernel to under-scan while the host
+        // side still reads back the full (uninitialised-beyond-truncation)
+        // prefix64_out range. Reject before any allocation/dispatch rather
+        // than truncate-and-proceed.
+        constexpr size_t kU32Max = 0xFFFFFFFFull;
+        if (n_tweaks > kU32Max || n_spend > kU32Max)
+            return set_error(GpuError::BadInput, "n_tweaks or n_spend exceeds uint32_t range");
+        if (n_spend != 0 && n_tweaks > kU32Max / n_spend)
+            return set_error(GpuError::BadInput, "n_tweaks * n_spend overflows");
+        const size_t n_rows = n_tweaks * n_spend;
+        if (n_rows > kU32Max)
+            return set_error(GpuError::BadInput, "n_tweaks * n_spend exceeds uint32_t range");
 
         {
             secp256k1::fast::Scalar scan_check;
@@ -2007,35 +2761,93 @@ public:
             secp256k1::detail::secure_erase(&scan_check, sizeof(scan_check));
         }
 
+        // NOTE (bug fix alongside issue #335): the pre-existing single-spend
+        // bip352_scan_batch never called ensure_library() before
+        // make_pipeline(), unlike every other batch op in this class -- it
+        // only worked if some other op had already triggered lazy library
+        // load on this context. Call it explicitly here.
+        auto lib_err = ensure_library();
+        if (lib_err != GpuError::Ok) return lib_err;
+
         /* Parse scan private key: BE 32 bytes → MetalScalar256 */
         MetalScalar256 scan_scalar = be32_to_metal_scalar(scan_privkey32);
         MetalScalarEraseGuard scan_scalar_guard{&scan_scalar, 1};
 
-        /* Build Metal buffers — pass 33-byte pubkeys directly (GPU decompresses) */
-        auto buf_tweaks = runtime_->alloc_buffer_shared(n_tweaks * 33);
-        auto buf_scan   = runtime_->alloc_buffer_shared(sizeof(MetalScalar256));
-        auto buf_spend  = runtime_->alloc_buffer_shared(33);
-        auto buf_prefix = runtime_->alloc_buffer_shared(n_tweaks * sizeof(uint64_t));
-        auto buf_count  = runtime_->alloc_buffer_shared(sizeof(uint32_t));
+        /* Context-owned grow-only buffer pool (issue #335 "minor": eliminate
+         * per-call buffer churn for repeated large scans). Serializes the
+         * whole span below (grow, host->device copies, both dispatches,
+         * readback, secret erase) against any other thread concurrently
+         * calling this method on the SAME MetalBackend instance -- see
+         * bip352_pool_mtx_'s declaration comment. Released automatically
+         * (RAII) on every return path below, including the two error
+         * returns inside this span. */
+        std::lock_guard<std::mutex> bip352_pool_lock(bip352_pool_mtx_);
+        bip352_pool_.ensure(n_tweaks, n_spend, runtime_.get());
+        if (!bip352_pool_.ready(n_tweaks, n_spend)) {
+            // Round 8: n_rows is already validated above, so the caller's
+            // output size is known here -- zero it on this failure path too,
+            // matching every other non-OK return in this function (fail_dispatch)
+            // and the CUDA/OpenCL siblings' fail-closed contract.
+            std::memset(prefix64_out, 0, n_rows * sizeof(uint64_t));
+            return set_error(GpuError::Memory, "Metal: BIP-352 buffer pool allocation failed");
+        }
 
-        std::memcpy(buf_tweaks.contents(), tweak_pubkeys33, n_tweaks * 33);
-        std::memcpy(buf_scan.contents(),  &scan_scalar, sizeof(scan_scalar));
-        MetalBufferEraseGuard buf_scan_guard{&buf_scan};
-        std::memcpy(buf_spend.contents(), spend_pubkey33, 33);
-        uint32_t n32 = (uint32_t)n_tweaks;
-        std::memcpy(buf_count.contents(), &n32, sizeof(n32));
+        std::memcpy(bip352_pool_.buf_tweaks.contents(), tweak_pubkeys33, n_tweaks * 33);
+        std::memcpy(bip352_pool_.buf_scan.contents(), &scan_scalar, sizeof(scan_scalar));
+        MetalBufferEraseGuard buf_scan_guard{&bip352_pool_.buf_scan};
+        std::memcpy(bip352_pool_.buf_spend33.contents(), spend_pubkeys33, n_spend * 33);
 
-        auto pipe = runtime_->make_pipeline("bip352_scan_pipeline_compressed");
-        if (!pipe.valid())
-            return set_error(GpuError::Launch,
-                             "Metal: bip352_scan_pipeline_compressed kernel missing from loaded library");
-        runtime_->dispatch_sync(pipe, n32, 64u,
-                                {&buf_tweaks, &buf_scan, &buf_spend, &buf_prefix, &buf_count});
+        uint32_t n_tweaks32 = (uint32_t)n_tweaks;
+        uint32_t n_spend32  = (uint32_t)n_spend;
+        std::memcpy(bip352_pool_.buf_count_tweaks.contents(), &n_tweaks32, sizeof(n_tweaks32));
+        std::memcpy(bip352_pool_.buf_count_spend.contents(), &n_spend32, sizeof(n_spend32));
 
-        std::memcpy(prefix64_out, buf_prefix.contents(), n_tweaks * sizeof(uint64_t));
+        // Repair (issue #335 acceptance repair, round 2): the previous round
+        // left dispatch failure propagation as a documented KNOWN GAP because
+        // src/metal/include/metal_runtime.h was not in this task's
+        // allowed_writes. It now is. MetalRuntime::dispatch_sync_checked()
+        // (metal_runtime.h/.mm) returns false when the Metal command buffer
+        // completes with an error (device lost, runtime shader fault,
+        // driver timeout) instead of silently swallowing it -- both
+        // dispatches below now check the return value and fail closed
+        // (zero prefix64_out, erase the scan-key buffer, return a real
+        // GpuError) rather than falling through to the readback "as if"
+        // dispatch succeeded. Fail-closed helper mirrors the OpenCL/CUDA
+        // backends' `fail()`/FailClosedOutputGuard pattern for this same
+        // function (gpu_backend_opencl.cpp, gpu_backend_cuda.cu).
+        auto fail_dispatch = [&](const char* msg) -> GpuError {
+            std::memset(prefix64_out, 0, n_rows * sizeof(uint64_t));
+            secp256k1::detail::secure_erase(bip352_pool_.buf_scan.contents(), sizeof(MetalScalar256));
+            secp256k1::detail::secure_erase(&scan_scalar, sizeof(scan_scalar));
+            return set_error(GpuError::Launch, msg);
+        };
+
+        /* Decompress the n_spend spend-key candidates ONCE, independent of
+         * n_tweaks (issue #335 Blocker 1). */
+        auto decompress_pipe = runtime_->make_pipeline("bip352_decompress_points_kernel");
+        if (!decompress_pipe.valid())
+            return fail_dispatch("Metal: bip352_decompress_points_kernel missing from loaded library");
+        if (!runtime_->dispatch_sync_checked(decompress_pipe, n_spend32, 64u,
+                                {&bip352_pool_.buf_spend33, &bip352_pool_.buf_spend_points,
+                                 &bip352_pool_.buf_spend_valid, &bip352_pool_.buf_count_spend}))
+            return fail_dispatch("Metal: bip352_decompress_points_kernel dispatch failed (GPU command-buffer error)");
+
+        /* Main scan: 1 thread per tweak; ECDH/tagged-hash/hash×G computed
+         * once per thread, then n_spend mixed adds. */
+        auto scan_pipe = runtime_->make_pipeline("bip352_scan_pipeline_compressed_multispend");
+        if (!scan_pipe.valid())
+            return fail_dispatch("Metal: bip352_scan_pipeline_compressed_multispend kernel missing from loaded library");
+        if (!runtime_->dispatch_sync_checked(scan_pipe, n_tweaks32, 64u,
+                                {&bip352_pool_.buf_tweaks, &bip352_pool_.buf_scan,
+                                 &bip352_pool_.buf_spend_points, &bip352_pool_.buf_spend_valid,
+                                 &bip352_pool_.buf_count_spend, &bip352_pool_.buf_prefix,
+                                 &bip352_pool_.buf_count_tweaks}))
+            return fail_dispatch("Metal: bip352_scan_pipeline_compressed_multispend dispatch failed (GPU command-buffer error)");
+
+        std::memcpy(prefix64_out, bip352_pool_.buf_prefix.contents(), n_rows * sizeof(uint64_t));
 
         // Rule 10: zero scan private key from Metal shared buffer and stack before release
-        secp256k1::detail::secure_erase(buf_scan.contents(), sizeof(MetalScalar256));
+        secp256k1::detail::secure_erase(bip352_pool_.buf_scan.contents(), sizeof(MetalScalar256));
         secp256k1::detail::secure_erase(&scan_scalar, sizeof(scan_scalar));
 
         clear_error();
@@ -2046,7 +2858,30 @@ private:
     std::unique_ptr<secp256k1::metal::MetalRuntime> runtime_;
     bool lib_init_attempted_ = false;
     bool lib_ready_          = false;
+    std::mutex lib_init_mtx_;
     MetalMsmPool msm_pool_;
+    MetalSighashPool sighash_pool_;
+    MetalBip352Pool bip352_pool_;
+    // sighash_pool_ is a plain (non-thread_local) member, so its buffers and
+    // their contents are shared/racy across concurrent callers of the same
+    // MetalBackend instance -- unlike OpenCL's thread_local pool. This mutex
+    // serializes sighash_descriptor_hash's pool-touching span; see that
+    // function's doc comment.
+    std::mutex sighash_pool_mtx_;
+    // Repair (issue #335 acceptance repair): bip352_pool_ is likewise a
+    // plain member shared/racy across concurrent callers of the same
+    // MetalBackend instance. Prior to this fix, bip352_scan_batch_multispend
+    // had NO pool-specific mutex at all (not even multiple narrower critical
+    // sections) -- two threads calling it concurrently on one MetalBackend
+    // could race on pool grow, the host->device memcpys, both dispatches
+    // sharing the pool's buffers, the readback memcpy, and the scan-key
+    // erase. Serializes the WHOLE span from bip352_pool_.ensure(...) through
+    // the final secure_erase(...) as ONE lock_guard scope (mirroring
+    // sighash_pool_mtx_'s pattern) -- splitting it into several smaller
+    // critical sections would reopen an inter-critical-section race (e.g.
+    // thread A mid-grow while thread B memcpys into a buffer thread A is
+    // resizing), so this must stay a single lock for the whole span.
+    std::mutex bip352_pool_mtx_;
     GpuError last_err_ = GpuError::Ok;
     char     last_msg_[256] = {};
 
@@ -2069,11 +2904,77 @@ private:
     }
 
     /* -- Lazy library loading ---------------------------------------------- */
+    /* GitHub issue #335 (Blocker 2): a loadable-library consumer (e.g. a
+     * DuckDB extension) is dlopen()-ed into a host process with an
+     * arbitrary working directory, so the legacy CWD-relative metallib_paths
+     * / shader_dirs search below can never be relied on. An explicit,
+     * validated, absolute override -- set via
+     * secp256k1::gpu::set_metal_shader_path_override() or the
+     * UFSECP_METAL_SHADER_PATH env var -- takes precedence and, if present,
+     * REPLACES the CWD-relative search rather than extending it: a caller
+     * that went to the trouble of setting an override wants a deterministic,
+     * fail-closed result, not a silent fallback to guessing at CWD. */
     GpuError ensure_library() {
+        std::lock_guard<std::mutex> lock(lib_init_mtx_);
         if (lib_ready_) return GpuError::Ok;
         if (lib_init_attempted_)
             return set_error(GpuError::Launch, "Metal library load previously failed");
         lib_init_attempted_ = true;
+
+        std::string override_dir = secp256k1::gpu::metal_shader_path_override();
+        if (override_dir.empty()) {
+            if (const char* env = std::getenv("UFSECP_METAL_SHADER_PATH")) {
+                if (*env) {
+                    const std::string p(env);
+                    const std::filesystem::path fp(p);
+                    // Repair (issue #335 acceptance repair): reuse the SAME
+                    // component-based traversal check as
+                    // set_metal_shader_path_override() (gpu_backend.hpp)
+                    // instead of a locally-duplicated raw substring test.
+                    // The substring test previously here rejected any path
+                    // merely CONTAINING two consecutive dots anywhere (e.g.
+                    // "/opt/shaders/v2..final/lib", no actual ".." segment)
+                    // -- a false positive on harmless names. Component-based
+                    // matching only rejects a literal ".." path segment.
+                    if (!fp.is_absolute() ||
+                        secp256k1::gpu::detail::path_has_dotdot_component(fp)) {
+                        return set_error(GpuError::Launch,
+                            "Metal: UFSECP_METAL_SHADER_PATH must be an absolute path "
+                            "without \"..\" path components");
+                    }
+                    override_dir = p;
+                }
+            }
+        }
+
+        if (!override_dir.empty()) {
+            const std::string metallib_path = override_dir + "/secp256k1_kernels.metallib";
+            if (runtime_->load_library_from_path(metallib_path)) {
+                lib_ready_ = true;
+                clear_error();
+                return GpuError::Ok;
+            }
+            const std::vector<std::string> override_shader_dirs = {
+                override_dir + "/shaders",
+                override_dir,
+            };
+            std::string source = metal_load_combined_source(override_shader_dirs);
+            if (source.empty()) {
+                return set_error(GpuError::Launch,
+                    "Metal: shader path override set but no metallib or shader "
+                    "sources found there (fail-closed, no CWD fallback)");
+            }
+            if (!runtime_->load_library_from_source(source)) {
+                return set_error(GpuError::Launch,
+                                 "Metal: runtime shader compilation failed (override path)");
+            }
+            lib_ready_ = true;
+            clear_error();
+            return GpuError::Ok;
+        }
+
+        /* No override set: legacy CWD-relative search (unchanged), for
+         * existing dev/test/CI workflows that run from a known build dir. */
 
         /* Try compiled metallib paths first */
         const char* metallib_paths[] = {
@@ -2084,35 +2985,128 @@ private:
             "../metal/secp256k1_kernels.metallib",
             "../../metal/secp256k1_kernels.metallib",
             "../../../metal/secp256k1_kernels.metallib",
+            // The in-tree build puts it in <build>/src/metal, which none of the
+            // candidates above spells -- they all assume a <build>/metal. A
+            // binary run from <build>/audit or <build>/src/cpu therefore missed
+            // it entirely. Additive: these are tried only after every path that
+            // resolved before, so nothing that used to load changes.
+            "../src/metal/secp256k1_kernels.metallib",
+            "../../src/metal/secp256k1_kernels.metallib",
             nullptr
         };
 
-        for (int i = 0; metallib_paths[i]; i++) {
-            if (runtime_->load_library_from_path(metallib_paths[i])) {
+        // The build tree's own metallib, by absolute path, tried FIRST.
+        //
+        // Every candidate below is relative to the process working directory,
+        // and ctest runs each audit binary from its own CMAKE_CURRENT_BINARY_DIR
+        // -- <build>/audit for the ~500 standalone targets and the unified
+        // runner -- while the metallib is produced in <build>/src/metal. No
+        // relative spelling reaches across, so on CI / macos (Release) every
+        // Metal-backed audit test reported a GPU failure for a file it never
+        // found: gpu_abi_gate (GROW-1..4), gpu_collect_verify_parity,
+        // unified_audit (BCV-6, SW-BIP352-*) and regression_bip352_ct_varbase.
+        // The Metal tests that run from <build>/src/metal itself
+        // (secp256k1_metal_test, _bench, _bench_full) all passed in the same
+        // job, which is what pins this to path resolution rather than to the
+        // device.
+        //
+        // UFSECP_METAL_METALLIB_DIR is baked in by CMake -- the same fix shape
+        // as UFSECP_SOURCE_ROOT for the audit source resolvers -- and is
+        // defined only for in-tree test builds, so an installed library carries
+        // no build path. If it is absent or stale the search below runs exactly
+        // as before.
+        std::vector<std::string> candidates;
+#ifdef UFSECP_METAL_METALLIB_DIR
+        candidates.emplace_back(
+            std::string(UFSECP_METAL_METALLIB_DIR) + "/secp256k1_kernels.metallib");
+#endif
+        for (int i = 0; metallib_paths[i]; i++)
+            candidates.emplace_back(metallib_paths[i]);
+
+        for (const auto& cand : candidates) {
+            // Probe before loading. load_library_from_path() writes a
+            // "[Metal] ERROR: Failed to load metallib: library not found" line
+            // for every miss, so an eventually-successful search still printed
+            // one error per earlier candidate -- in the macOS CI log that is
+            // hundreds of lines that look like failures and are not.
+            std::error_code fs_ec;
+            if (!std::filesystem::exists(cand, fs_ec) || fs_ec) continue;
+            if (runtime_->load_library_from_path(cand)) {
                 lib_ready_ = true;
                 clear_error();
                 return GpuError::Ok;
             }
+            // Name the file. MetalRuntime prints only "Failed to load metallib:
+            // library not found", which does not say WHICH candidate existed and
+            // was rejected -- and with the exists() probe above, exactly one
+            // error line means exactly one candidate was on disk. Knowing which
+            // one is the difference between "the build-tree path is not compiled
+            // in" and "the device rejects the metallib we built".
+            std::fprintf(stderr, "[Metal] ERROR: candidate rejected: %s\n", cand.c_str());
         }
+        std::fprintf(stderr,
+                     "[Metal] ERROR: no metallib loaded from %zu candidate(s); "
+                     "build-tree path %s\n",
+                     candidates.size(),
+#ifdef UFSECP_METAL_METALLIB_DIR
+                     "compiled in: " UFSECP_METAL_METALLIB_DIR
+#else
+                     "NOT compiled in (UFSECP_METAL_METALLIB_DIR undefined)"
+#endif
+        );
 
         /* Fallback: compile shader source at runtime */
-        const std::vector<std::string> shader_dirs = {
-            "shaders",
-            "../shaders",
-            "../../shaders",
-            "../metal/shaders",
-            "../../metal/shaders",
-            "../../../metal/shaders",
-        };
+        std::vector<std::string> shader_dirs;
+#ifdef UFSECP_METAL_SHADER_SRC_DIR
+        // The source tree's own shaders/, by absolute path. Always present and
+        // always complete in a from-source build, unlike the build-tree copies.
+        shader_dirs.emplace_back(UFSECP_METAL_SHADER_SRC_DIR);
+#endif
+#ifdef UFSECP_METAL_METALLIB_DIR
+        // Same reasoning as the metallib candidate above: the build tree's
+        // shader copies live in <build>/src/metal/shaders, which no CWD-relative
+        // spelling below reaches from <build>/audit.
+        shader_dirs.emplace_back(std::string(UFSECP_METAL_METALLIB_DIR) + "/shaders");
+#endif
+        for (const char* d : {
+                 "shaders",
+                 "../shaders",
+                 "../../shaders",
+                 "../metal/shaders",
+                 "../../metal/shaders",
+                 "../../../metal/shaders",
+             }) {
+            shader_dirs.emplace_back(d);
+        }
 
         std::string source = metal_load_combined_source(shader_dirs);
-        if (source.empty())
+        if (source.empty()) {
+            // Say WHICH path ran out, on stderr, once. Both of the failure
+            // messages below only reach last_msg_, and no test prints that --
+            // so two rounds of macOS CI logs showed "Failed to load metallib"
+            // (one line per existing candidate) and nothing at all about
+            // whether the source fallback was even reachable. That is the
+            // difference between "the device rejects our metallib" and "the
+            // shader sources are not where we looked", and it decides the fix.
+            std::fprintf(stderr,
+                         "[Metal] ERROR: no metallib loaded and no shader sources found "
+                         "(%zu source dir(s) tried, first: %s)\n",
+                         shader_dirs.size(),
+                         shader_dirs.empty() ? "(none)" : shader_dirs.front().c_str());
             return set_error(GpuError::Launch,
                              "Metal: could not find metallib or shader sources");
+        }
 
-        if (!runtime_->load_library_from_source(source))
+        if (!runtime_->load_library_from_source(source)) {
+            std::fprintf(stderr,
+                         "[Metal] ERROR: shader sources found (%zu bytes) but runtime "
+                         "compilation failed\n", source.size());
             return set_error(GpuError::Launch,
                              "Metal: runtime shader compilation failed");
+        }
+        std::fprintf(stderr,
+                     "[Metal] note: loaded from shader sources at runtime (%zu bytes) -- "
+                     "the prebuilt metallib was not usable here\n", source.size());
 
         lib_ready_ = true;
         clear_error();

@@ -192,6 +192,111 @@ GPU-accelerated; by default it is pure CPU. The C ABI
 `ufsecp_gpu_ecdsa_verify_lbtc_columns` / `ufsecp_gpu_schnorr_verify_lbtc_columns`
 exist only for C ABI completeness and are not the libbitcoin-direct surface.
 
+### OpenCL lbtc_columns latency cliff fix (Added 2026-07-13, opencl-signature-chunk-cliff-fix-claude-v1)
+
+A prior measurement task (`workingdocs/libbitcoin_gpu_workloads/signature_batch_overlap_measurement_claude_v1.json`,
+`benchmarks/libbitcoin_signature_overlap/aggregated_results.json`) found real,
+reproducible OpenCL-only latency cliffs on `ecdsa_verify_lbtc_columns` /
+`schnorr_verify_lbtc_columns` for specific non-round batch sizes: up to ~39x
+slower than an adjacent round-number batch, at two distinct batch sizes
+(`central=65,536 excess=1.2` → 78,643 rows; `central=1,048,576 excess=1.2` →
+1,258,291 rows) that were actually *worse than CPU* (`cpu_faster`
+classification) for **both** algorithms — i.e. **four** algorithm-specific
+`cpu_faster` cells (ECDSA×2 + Schnorr×2) at those two batch sizes, verified
+directly against `aggregated_results.json`'s own
+`classification_counts.cpu_faster: 4` field. That artifact's `total_cells` is
+**64** (verify_only + concurrent modes across both backends and algorithms),
+not 54; all four `cpu_faster` cells are OpenCL-only (CUDA has zero `cpu_faster`
+cells in the same sweep). That artifact's own author explicitly flagged the
+mechanism as **observed but not root-caused**
+("pattern_observed_not_root_caused"), hypothesizing the engine's internal
+memory-bounded chunking (`lbtc_columns_chunk`) as the likely cause.
+
+**Root cause (verified, not assumed).** The chunking hypothesis was checked
+first and ruled out: `lbtc_columns_chunk`'s hard cap is 4,194,304 rows, and
+`clGetDeviceInfo(CL_DEVICE_MAX_MEM_ALLOC_SIZE)` on the RTX 5060 Ti used for
+this task returned ~3.96 GiB (`by_mem` ≈ 64.9M rows) — so the memory-derived
+cap never tightens below the hard cap, and every measured cliff row count
+(≤1,258,291) is below the cap, meaning `chunk == count` and the per-call loop
+runs exactly once. The chunk/remainder loop was therefore never the mechanism.
+Bounded instrumentation (a standalone harness driving the real
+`ufsecp_gpu_ecdsa_verify_lbtc_columns` C ABI entrypoint,
+`benchmarks/opencl_signature_chunk_fix/harness/bench_opencl_columns_cliff.cpp`)
+reproduced the exact cliffs and revealed the real pattern: **every cliff row
+count has no small integer factors — the two catastrophic cells are PRIME**
+(78,643 and 1,258,291, confirmed via `sympy.factorint`), the milder-but-real
+degradations are counts with only large prime factors (1,153,434 = 2·3·192239;
+314,573 = 7·44939), and **every fast cell is a power of two** (65,536=2¹⁶,
+262,144=2¹⁸, 1,048,576=2²⁰). Every `clEnqueueNDRangeKernel` call for these two
+kernels passed `local_work_size = nullptr`, letting the OpenCL driver
+auto-select a work-group size for the launch's global size (the row count).
+For a global size with no small factors, the NVIDIA OpenCL driver used on this
+host falls back to a degenerate local size, collapsing occupancy — the
+textbook signature of this exact symptom (severity scales with the size of
+the row count's largest prime factor, worst when the count itself is prime).
+
+**Fix (OpenCL-only, `src/gpu/src/gpu_backend_opencl.cpp`).** Both
+`ecdsa_verify_lbtc_columns` and `schnorr_verify_lbtc_columns` now compute an
+explicit local work-group size per kernel/device
+(`lbtc_columns_local_size`, via `CL_KERNEL_WORK_GROUP_SIZE` +
+`CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE`) and pad the global NDRange up
+to the next multiple of it (`lbtc_columns_padded_global`) instead of passing
+`nullptr`. Padding is safe only because both kernels already bounds-check
+`if (gid >= count) return;` in `secp256k1_extended.cl` **before any buffer
+access** — the extra "ghost" work-items past `count` never read or write any
+buffer, so the padding never depends on (or exceeds) the allocated column
+buffer capacity being safe. No allocation strategy changed: `lbtc_columns_chunk`
+and the grow-only `OclColumnsPool` (peak memory, chunk cap, buffer reuse) are
+byte-for-byte unchanged — this is a dispatch-parameter fix only, entirely
+internal to `OpenCLBackend`. No new public method, C ABI function, or
+caller-visible parameter was added; CUDA and Metal source files were not
+touched (CUDA already launches with an explicit `threads_per_block`; Metal's
+`MTLComputePipelineState` threadgroup sizing is a separate, unaffected code
+path).
+
+Before/after evidence is a **separate, dedicated 16-cell dataset** (8 ECDSA +
+8 Schnorr batch sizes; ≥5 independent processes × 7 timed passes per cell,
+same host/binary/methodology as the originating 64-cell measurement task, but
+not itself part of that 64-cell sweep): see
+`benchmarks/opencl_signature_chunk_fix/raw_runs/` and
+`workingdocs/libbitcoin_gpu_workloads/opencl_signature_chunk_fix_claude_v1.json`.
+Differential regression coverage (chunk/remainder boundary counts AND prime
+row counts through the real unforced launch path) was added to
+`test_gpu_lbtc_columns_diff.cpp` (`test_chunk_boundary_and_prime_counts`, part
+of the existing wired `lbtc_gpu_columns_diff` audit module — no new module).
+
+**Acceptance repair (opencl-signature-chunk-acceptance-repair-claude-v2).**
+v1's fix above was performance-proven but not accepted outright; this narrow
+follow-up closed the specific gaps a review found, without touching the fix's
+production dispatch logic: (1) every OpenCL control call in the two functions'
+per-chunk loop that was previously unchecked — every `clSetKernelArg` and
+`clFinish` — now has its return code checked, OR-accumulated for the five
+`clSetKernelArg` calls per chunk, and on any failure the function fails
+closed: a local `fail_closed(...)` helper re-zeroes the **entire**
+`out_results` buffer (not just the untouched tail) before returning a non-OK
+`GpuError`, so a failure on a later chunk can never leave earlier chunks'
+real GPU verdicts sitting in the output alongside a failure return. `arg 4`
+(the per-chunk row count) was the specific risk: a silently-failed bind there
+would leave the kernel launched with a stale count from a previous chunk
+while reading the CURRENT chunk's correctly re-uploaded buffers, with no
+downstream check able to catch it. `lbtc_columns_local_size`'s three
+device/kernel queries now also explicitly capture and check their return
+codes (previously discarded entirely); a query failure still degrades to the
+pre-existing conservative fallback (correctness is unaffected either way,
+since the padded launch is bounds-checked and the enqueue return code is
+fail-closed), but the check is now explicit and auditable rather than
+implicit. (2) `test_gpu_lbtc_columns_diff.cpp` gained
+`test_chunk_boundary_invalid_positions` (first/middle/last/multiple-invalid,
+malformed-key, malformed-signature rows at the same six forced-chunk boundary
+counts, byte-for-byte against an independent CPU oracle, both algorithms) and
+`test_control_call_decline_no_partial_leak` (a practical failure-injection
+probe via the existing `GpuColumnsVerifyHook` test double, proving a backend
+decline can never leak partial/valid-looking output and the fallback always
+reproduces the exact per-row CPU verdict). All 222 checks in the
+`gpu_lbtc_columns_diff` module passed on real OpenCL hardware (RTX 5060 Ti,
+driver 580.173.02) with zero skips. CUDA, Metal, the `GpuBackend` virtual
+surface, and the public C ABI were not touched.
+
 ### libbitcoin public-data batch ops: validate / commitment / hashing (Added 2026-07-04)
 
 Six header-only `ufsecp::lbtc::*` batch primitives — `xonly_validate_batch`,
@@ -263,6 +368,240 @@ caller-controlled. Test coverage: `audit/test_regression_hash256_var_batch.cpp`
 byte-identical parity), `audit/test_exploit_hash256_var_bounds.cpp` (hostile
 inputs).
 
+### `txid_hash_batch` / `wtxid_hash_batch` / `merkle_pair_hash_batch`: libbitcoin txid, wtxid, and Merkle-pair hashing (Added 2026-07-08)
+
+Three bridge-free `ufsecp::lbtc::*_batch` wrappers
+(`compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp`) extend the
+`hash256_var` primitive above with libbitcoin-facing semantics.
+`txid_hash_batch` and `wtxid_hash_batch` are semantic aliases over
+`hash256_var_batch` — zero new backend work, same GPU hook/kernel/bound
+(`kMaxHash256VarStride`, 4 MiB) as `hash256_var`. `merkle_pair_hash_batch` is
+a distinct primitive: a fixed 64-byte `left32 || right32` double-SHA256 over
+two 32-byte column spans (Structure-of-Arrays), backed by its own
+`GpuBackend::merkle_pair_hash` virtual, C ABI `ufsecp_gpu_merkle_pair_hash`
+(`include/ufsecp/ufsecp_gpu.h` / `src/cpu/src/ufsecp_gpu_impl.cpp`), and its
+own hook/installer in `lbtc_gpu_ops.hpp`. All three are PUBLIC-DATA /
+variable-time — no secret material, no CT requirement.
+
+| Backend | `txid_hash_batch` / `wtxid_hash_batch` | `merkle_pair_hash_batch` | Assurance | Notes |
+|---|---|---|---|---|
+| CPU | reference (deterministic fallback via `hash256_var_batch`) | reference (deterministic fallback: `SHA256::hash256(left32\|\|right32)` per row) | **HIGH** — covered by `test_regression_merkle_pair_hash.cpp` (differential vs oracle, `n==0`, `left==right` odd-leaf) and `compat/libbitcoin_direct/tests/test_direct_verify.cpp` (byte-identical vs `hash256_var_batch` / HASH256 oracle, count==0, null-each-arg, overflow rejection, hook-decline, hook-success sentinel, left/right non-commutativity) | public-data variable-time; byte-identical fallback for every backend; output never touched on a rejected call |
+| CUDA | native (`hash256_var` kernel, no new work) | native on-device kernel — `lbtc_merkle_pair_kernel` in `gpu_backend_cuda.cu` | **HIGH** — operational error declines → CPU | public-data variable-time |
+| OpenCL | native (`hash256_var` kernel, no new work) | native on-device kernel — `lbtc_merkle_pair` in `src/opencl/kernels/secp256k1_extended.cl` + override in `gpu_backend_opencl.cpp` | **HIGH** — operational error declines → CPU | public-data variable-time |
+| Metal | native (`hash256_var` kernel, no new work) | native on-device kernel — `lbtc_merkle_pair` in `src/metal/shaders/secp256k1_kernels.metal` + override in `gpu_backend_metal.mm` | **MEDIUM — code-complete, runtime parity PENDING Apple-hardware validation** — NOT built/run here: Metal compiles only on Apple, so this Linux host cannot execute it — same status already documented above for the sibling `hash256_var`/public-data batch ops | operational error declines → CPU. No measured Metal numbers; owner validates on Apple GPU before this row is promoted to HIGH |
+
+Fail-closed: none of the three pre-zero their output, and all reject bad
+input without touching it. `txid_hash_batch` / `wtxid_hash_batch` inherit
+`hash256_var_batch`'s validation (`count==0` no-op; null column, `stride==0`,
+per-row length out of range, or layout overflow → `false`, output untouched).
+`merkle_pair_hash_batch` (C++): `count==0` no-op; null `left32`/`right32`/
+`out32` or `count*32` layout overflow → `false`, output untouched.
+`ufsecp_gpu_merkle_pair_hash` (C ABI): `ctx==nullptr` → `UFSECP_ERR_NULL_ARG`;
+`n==0` → `UFSECP_OK` no-op; `n` over `kMaxGpuBatchN` (64M) →
+`UFSECP_ERR_BAD_INPUT`; null `left32`/`right32`/`out32` with `n>0` →
+`UFSECP_ERR_NULL_ARG`; non-OK leaves `out32` cleared. Test coverage:
+`audit/test_regression_merkle_pair_hash.cpp` (differential/structural KAT),
+`audit/test_exploit_merkle_pair_bounds.cpp` (hostile-caller bounds),
+`compat/libbitcoin_direct/bench/bench_public_ops.cpp` (`txid_hash`,
+`wtxid_hash`, `merkle_pair_hash` rows — sanity-checked non-zero timing on this
+machine; not yet a controlled ≥5-run benchmark per this repo's performance
+protocol, so no ns/op numbers are quoted here).
+
+### `merkle_level_reduce_batch` / `merkle_root_from_leaves`: direct C++ libbitcoin merkle workloads (Added 2026-07-08)
+
+Two bridge-free `ufsecp::lbtc::*` functions (`compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp`)
+that compose Bitcoin merkle-tree construction entirely over the already-shipped
+`merkle_pair_hash_batch`.  **ZERO new GpuBackend virtuals, CUDA/OpenCL/Metal
+kernels, C ABI functions, or production hooks.**  These are pure direct C++
+libbitcoin workloads — not new backend primitives.
+
+`merkle_level_reduce_batch` is a semantic alias (one-line delegate to
+`merkle_pair_hash_batch`).  `merkle_root_from_leaves` uses caller-provided
+scratch (≥ `leaf_count × 64` bytes, no heap allocation) to iteratively reduce
+tree levels via `merkle_pair_hash_batch`, following Bitcoin merkle semantics
+(odd-level last-hash duplication, HASH256 with `left32 ‖ right32` byte order).
+
+| Backend | `merkle_level_reduce_batch` / `merkle_root_from_leaves` | Assurance | Notes |
+|---|---|---|---|
+| CPU | reference (deterministic — composes `merkle_pair_hash_batch` CPU fallback exclusively) | **HIGH** — covered by `compat/libbitcoin_direct/tests/test_direct_operations.cpp` (0/1/2/3/7 leaves, KAT vs independent HASH256 oracle, duplicate-last semantics, multi-level root, null args, scratch undersize, overflow guard, hook-decline inherited, hook-sentinel inherited) | public-data variable-time; zero allocation; caller-provided scratch; all size multiplications overflow-checked |
+| CUDA | inherited from `merkle_pair_hash_batch` (no new kernel) | **HIGH** — operational error declines → CPU | no new CUDA code; the existing `lbtc_merkle_pair_kernel` in `gpu_backend_cuda.cu` is invoked indirectly through `merkle_pair_hash_batch` |
+| OpenCL | inherited from `merkle_pair_hash_batch` (no new kernel) | **HIGH** — operational error declines → CPU | no new OpenCL code; the existing `lbtc_merkle_pair` in `src/opencl/kernels/secp256k1_extended.cl` is invoked indirectly through `merkle_pair_hash_batch` |
+| Metal | inherited from `merkle_pair_hash_batch` (no new kernel) | **MEDIUM — code-complete, runtime parity PENDING Apple-hardware validation** (same status as `merkle_pair_hash_batch`) | no new Metal code; inherits the existing `lbtc_merkle_pair` kernel status |
+
+Fail-closed: `merkle_root_from_leaves` zeroes non-null `out_root32` on every
+failure path (count==0, null inputs, overflow, undersize scratch, internal hash
+failure); `out_root32 == nullptr` returns `false` before any write.
+`leaf_count==1` copies the single leaf as root (Bitcoin semantics).
+`merkle_level_reduce_batch` inherits `merkle_pair_hash_batch`'s fail-closed
+contract identically.  Test coverage:
+`compat/libbitcoin_direct/tests/test_direct_operations.cpp` (structural KAT +
+boundary + hook-inheritance tests described above).
+
+### `sighash_descriptor_hash`: GPU descriptor-shaped Bitcoin sighash preimage hashing (Added 2026-07-10)
+
+A new `GpuBackend::sighash_descriptor_hash` virtual (`src/gpu/include/gpu_backend.hpp`)
+computes `HASH256` of a Bitcoin sighash preimage assembled per a compact
+descriptor bytecode (see `compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp`,
+`sighash_descriptor_hash_batch`), without ever materializing a full per-row
+preimage buffer on host or device — each referenced field is streamed
+directly into a running SHA-256 context. Landed CUDA-first (task
+`lbtc-sighash-gpu-core-cuda-deepseek`); this entry adds native OpenCL and
+Metal parity (task `lbtc-sighash-gpu-opencl-metal-evidence-claude`).
+
+OpenCL 1.2 (and this codebase's Metal usage) cannot bind an array of
+`__global`/`device` buffer pointers as a single kernel argument the way CUDA's
+device pointer array does, so both new backends use a different, but
+functionally equivalent, design: referenced field columns are gathered into
+ONE packed device buffer (columns copied verbatim, never a row-assembled
+preimage) plus four small per-field metadata arrays
+(`col_offsets`/`strides`/`fixed_lens`/`varlen_offsets`); the kernel streams
+each field from that packed buffer through one running SHA-256 context
+(`sha256_update_global` on OpenCL, `sha256_update_device` on Metal — the
+same O(1)-local-memory primitives already used by `hash256_var`).
+
+**Repair round (2026-07-10, same day):** Codex review of the round above found
+two real defects — (1) OpenCL combined `CL_MEM_COPY_HOST_PTR` with a null host
+pointer whenever a descriptor had zero variable-length fields (e.g. an
+all-fixed legacy sighash — the `test_kat_legacy_all_fixed` shape), which is
+invalid per the OpenCL spec; (2) both backends allocated fresh
+`clCreateBuffer`/`alloc_buffer_shared` device buffers on every call instead of
+reusing them. Both were fixed: OpenCL now uses a thread-local `OclSighashPool`
+(mirroring the pre-existing `OclColumnsPool` used by
+`ecdsa_verify_lbtc_columns`) and Metal now uses a member `MetalSighashPool`
+(mirroring the pre-existing `MetalMsmPool` used by `msm()`) — both grow-only,
+reused across calls, with the four metadata buffers sized once at the
+compile-time `MAX_FIELDS` (64) bound and the three bulk buffers (packed
+columns, packed var-lens, output) growing independently by byte capacity.
+OpenCL additionally stopped host-packing referenced columns into an
+intermediate `std::vector` first, instead writing each column directly from
+the caller's own `field_data`/`field_var_lens` pointers into its computed
+offset in the persistent device buffer via `clEnqueueWriteBuffer`; every
+OpenCL call's return code (`clEnqueueWriteBuffer`/`clSetKernelArg`/
+`clEnqueueNDRangeKernel`/`clFinish`/`clEnqueueReadBuffer`) is now checked, and
+explicit `uint64_t` overflow guards precede every allocation-feeding
+multiplication (`count*stride`, the running packed-column-bytes accumulator,
+`count*32` output size) since this backend is directly reachable from the C
+ABI, not just the pre-validated C++ direct-API caller. Both backends also now
+independently reject Taproot-only field IDs `0x0C`-`0x0F` (annex,
+tapleaf_hash, key_version, codesep_pos) — this op computes legacy/BIP143-style
+`HASH256` only, never BIP-341 TapSighash. Metal's fix is code-reviewed only
+(no Apple hardware on this host); OpenCL's fix is verified on real hardware
+(see the OpenCL row below).
+
+The standalone audit regression/exploit binaries
+(`test_regression_sighash_descriptor_gpu_standalone`,
+`test_exploit_sighash_descriptor_malformed_standalone`) previously
+self-skipped 100% of their on-device checks even on a GPU-enabled build with a
+real device present, because they raw-compile `src/gpu/src/gpu_registry.cpp`
+directly rather than linking the fully-configured `secp256k1_gpu_host`
+library, and nothing defined `SECP256K1_HAVE_OPENCL`/`_CUDA`/`_METAL` or added
+the backend source files for that raw compile — so `create_backend()` always
+returned null and every "on-device" check silently reported "no GPU
+available." This affected every GPU-dependent differential audit module built
+this way, not just sighash (e.g. the pre-existing `merkle_pair_hash`/
+`hash256_var` regression modules had the same gap). Fixed in
+`audit/CMakeLists.txt` with a new `audit_wire_real_gpu_backends()` helper that
+mirrors `src/gpu/CMakeLists.txt`'s own backend-source/define/link
+accumulation for every affected standalone target plus `unified_audit_runner`
+itself, gated the same way (`if(SECP256K1_BUILD_X AND TARGET secp256k1_x)`) so
+CPU-only builds remain an unaffected no-op. Verified on real hardware (RTX
+5060 Ti, isolated OpenCL-only build dir, `SECP256K1_BUILD_CUDA=OFF`): both
+sighash standalone binaries now print `Backend: OpenCL` and exercise the real
+on-device KAT/hostile-input coverage instead of self-skipping
+(`test_regression_sighash_descriptor_gpu_standalone`: pass=18 fail=0;
+`test_exploit_sighash_descriptor_malformed_standalone`: pass=37 fail=0), and
+`unified_audit_runner` now shows real OpenCL backend activity for every
+affected GPU differential module, not only sighash. The combined
+CUDA+OpenCL `build-audit` profile could not be used for this proof: as of
+2026-07-10, `src/gpu/src/gpu_backend_cuda.cu` (owned by the companion
+`lbtc-sighash-gpu-core-cuda-deepseek` card, out of this task's `allowed_writes`)
+does not compile (`nvcc` "transfer of control bypasses initialization of ..."
+errors around `gpu_backend_cuda.cu:2174-2244`) — this is independent of the
+audit-linkage fix above and blocks any target that needs
+`secp256k1_gpu_host` with `SECP256K1_BUILD_CUDA=ON` until resolved on that
+card.
+
+Boundary KATs were added covering variable-length values of exactly 0, 1, 63,
+64, and 65 bytes (every interesting SHA-256 block-boundary case around a
+64-byte compression block), a 129-byte multi-block field, and adjacent short
+fixed fields, to both `audit/test_regression_sighash_descriptor_gpu.cpp` and
+`compat/libbitcoin_direct/tests/test_direct_operations.cpp` (the latter file
+is owned by the companion CUDA card, not this task). Note: as of this writing
+the `test_direct_operations.cpp` `var-len=0` KAT itself has a test-construction
+bug outside this task's scope — `std::vector<uint8_t> raw_lit(0, 0)` for the
+0-length case produces an empty vector whose `.data()` returns `nullptr`,
+which correctly (not incorrectly) trips `sighash_descriptor_hash_batch`'s
+"null field_data for a referenced field" guard; the two resulting test
+failures are a fixture bug in that file's construction, not a backend defect
+— confirmed by the equivalent `var_len=0` case passing cleanly in this task's
+own `test_regression_sighash_descriptor_gpu.cpp` KAT, which backs the pointer
+with a real (non-empty) buffer.
+
+**Second repair round (2026-07-10, same day):** a follow-on review found that
+neither new backend's descriptor-parse loop checked a FIXED-width field's
+declared row stride (`field_lengths[fid]`) against that field's protocol-fixed
+serialized length (`fixed_len` — e.g. txid/hashPrevouts=32, sequence=4,
+amount=8), unlike the CPU direct parser
+(`compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp:1500-1501`) and the
+CUDA backend, which both already enforced this. Both kernels already clamp the
+per-row read length to `min(fixed_len_or_varlen, stride)`, so this was never a
+memory-safety out-of-bounds read — it was a silent-wrong-digest / spec-fidelity
+bug: an undersized declared stride for a fixed field produced a HASH256
+computed over truncated field bytes with no error, instead of the
+deterministic `BadInput` rejection every other backend already gave. Fixed
+identically on both backends (`gpu_backend_opencl.cpp` / `gpu_backend_metal.mm`,
+same position in the parse loop, same `"stride < fixed_len"` error text as
+CUDA): `if (!is_var && field_lengths[fid] < flen) return
+set_error(GpuError::BadInput, "stride < fixed_len");`. All four
+implementations (CPU direct, CUDA, OpenCL, Metal) now reject this case
+identically. Two independent fixes landed alongside it, both host-side, no
+kernel (`.cl`/`.metal`) change: (1) OpenCL's `sighash_dispatch_mtx_` previously
+only wrapped the pool-alloc/upload/launch/readback span, not the lazy
+`ensure_extended_kernels()` call preceding it, so two threads racing a cold
+(never-yet-dispatched) backend instance could race the unsynchronized lazy
+kernel-build path — the lock is now acquired before `ensure_extended_kernels()`
+too, scoped to this op only; (2) two early-return paths in Metal's
+`sighash_descriptor_hash` (`is_ready()` failure, and a NULL
+`descriptor`/`field_data`/`field_lengths` with a valid non-NULL `out32`)
+previously returned before the fail-closed `memset(out32, 0, out_bytes)` —
+reordered so `count==0`/`out32==NULL` are checked first, `out_bytes` is
+computed and `out32` is zeroed, and only then does `is_ready()` and the
+remaining NULL checks run, plus explicit `uint64_t` vs `SIZE_MAX` bound checks
+were added before the two `size_t` narrowing casts of
+`packed_varlens_bytes64`/`total_col_bytes`. New test coverage:
+`audit/test_exploit_sighash_descriptor_malformed.cpp`
+(`test_fixed_field_stride_less_than_fixed_len`) and
+`audit/test_regression_sighash_descriptor_gpu.cpp`
+(`test_ocl_cold_concurrent_dispatch`, a 6-thread dispatch race against a fresh
+ctx with no pre-spawn warm-up, unlike the pre-existing
+`test_ocl_concurrent_dispatch`), both added to their existing `ALL_MODULES`
+entries (`exploit_sighash_descriptor_malformed` / `sighash_descriptor_gpu`) —
+no new modules registered. OpenCL/CUDA real-hardware validation for this
+specific round: not yet run on this host — pending re-measurement, see
+`workingdocs/libbitcoin_gpu_workloads/sighash_gpu_opencl_metal_evidence_claude.json`
+round 4. Metal's fix is code-reviewed only, as with every other Metal op in
+this table (no Apple/Metal toolchain on this Linux host).
+
+| Backend | `sighash_descriptor_hash` path | Assurance | Notes |
+|---|---|---|---|
+| CPU | reference (deterministic fallback) | **HIGH** — `sighash_descriptor_hash_batch`'s CPU path performs the full descriptor parse, per-row `var_len`-vs-stride and 4 MiB preimage-size validation, then streams each field into `secp256k1::SHA256`; covered by `test_regression_sighash_descriptor_gpu.cpp` (KAT vs direct-concatenation oracle) and the pre-existing `compat/libbitcoin_direct/tests/test_direct_operations.cpp` sighash section | public-data variable-time; `out32` never touched on a rejected call |
+| CUDA | native on-device kernel | **UNKNOWN — does not currently compile** — `sighash_descriptor_hash` virtual is CUDA-native (`lbtc_sighash_descriptor_hash_kernel` in `gpu_backend_cuda.cu`). As of 2026-07-10 this file fails to build (`nvcc` "transfer of control bypasses initialization of ..." errors, `gpu_backend_cuda.cu:2174-2244`), verified with `cmake --build build-audit --target secp256k1_gpu_host`. The prior noted gap (CUDA host not independently re-checking per-row `var_len > stride` / the 4 MiB cap before dispatch) was explicitly in scope for the companion card's repair round; whether it was fixed cannot be assessed until the file compiles again. `gpu_backend_cuda.cu` is out of this task's `allowed_writes` — owned by `lbtc-sighash-gpu-core-cuda-deepseek`. Do not promote this row until it both compiles and is hardware-verified | public-data variable-time |
+| OpenCL | native on-device kernel | **HIGH** — `sighash_descriptor_hash` virtual is OpenCL-native (`lbtc_sighash_descriptor` kernel in `src/opencl/kernels/secp256k1_extended.cl` + override in `gpu_backend_opencl.cpp`); independently re-validates descriptor grammar, per-row `var_len > stride`, the 4 MiB preimage cap, AND (second repair round) that every FIXED-width field's stride is ≥ its protocol-fixed length (defense in depth, since this backend is also reachable directly via the C ABI); the lazy `ensure_extended_kernels()` build path is now covered by `sighash_dispatch_mtx_` (second repair round — closes a cold-start concurrency race, see above); operational error declines → CPU. Reviewer-verified on real hardware (RTX 5060 Ti, `build-review-lbtc-gpu` OpenCL profile, first repair round): `bench_lbtc_workloads`'s `sighash_batch` workload reached `backend=opencl`/`device=NVIDIA GeForce RTX 5060 Ti`/`evidence_class=gpu_acceleration` at both small (count=64) and medium batch classes, byte-identical to the independent oracle both times (small: 0.74 M rows/s / 1356.1 ns/row vs 3.31 M rows/s CPU-forced — GPU slower, per-call overhead not yet amortized at this size, consistent with the other 4 workloads at small; medium: 13.65 M rows/s / 73.3 ns/row vs 3.48 M rows/s CPU-forced — single-run functional evidence only, not a controlled ≥5-run speedup claim per this repo's perf protocol). The two standalone audit KATs also now run real on-device coverage instead of self-skipping (see the audit-linkage fix above): pass=18 fail=0 / pass=37 fail=0 (first-repair-round counts; re-run against the second repair round's new `stride < fixed_len` and concurrency test cases is pending — see the evidence JSON referenced above) | public-data variable-time; packed-buffer design (see above) — no array-of-pointers kernel argument; grow-only reusable `OclSighashPool` (first repair round) |
+| Metal | native on-device kernel | **MEDIUM — code-complete, runtime parity PENDING Apple-hardware validation** — `sighash_descriptor_hash` virtual is Metal-native (`lbtc_sighash_descriptor` kernel in `src/metal/shaders/secp256k1_kernels.metal` + override in `gpu_backend_metal.mm`), mirroring the OpenCL packed-buffer design, its var_len/4-MiB defense-in-depth checks, and (first repair round) the same grow-only reusable `MetalSighashPool` design and Taproot field-id rejection; second repair round adds the same `stride < fixed_len` fixed-field check as OpenCL/CUDA/CPU-direct, plus reorders two early-return paths (`is_ready()` failure; NULL `descriptor`/`field_data`/`field_lengths` with non-NULL `out32`) to fire AFTER `out32` is zeroed, so both paths are now fail-closed instead of leaving `out32` untouched, and adds explicit `uint64_t`-vs-`SIZE_MAX` bound checks before two `size_t` narrowing casts; NOT built/run here: Metal compiles only on Apple, so this Linux host cannot execute it — same status already documented above for the sibling `hash256_var`/`merkle_pair_hash`/public-data batch ops | operational error declines → CPU. No measured Metal numbers; owner validates on Apple GPU before this row is promoted to HIGH |
+
+Fail-closed: both new backends return `GpuError::BadInput` for every
+malformed-descriptor case (grammar violations, `var_len > stride`, preimage
+`> 4 MiB`) before touching `out32`; the C ABI wrapper's `clear_output_bytes`
+(called before backend dispatch) means `out32` is zeroed on any reject that
+fires after that point, matching the sibling ops' convention. Test coverage:
+`audit/test_regression_sighash_descriptor_gpu.cpp` (KAT vs a from-scratch
+per-row field-concatenation oracle, not the implementation's own parser),
+`audit/test_exploit_sighash_descriptor_malformed.cpp` (hostile descriptor
+grammar, `var_len > stride`, preimage `> 4 MiB`, NULL-pointer isolation,
+positive control). Benchmark: `compat/libbitcoin_direct/bench/bench_workloads.cpp`
+`sighash_batch` row (legacy BIP-143 sighash ALL descriptor; CPU-forced +
+paired GPU row when a real backend is linked/ready).
+
 ### ECDSA compact signature staging (Updated 2026-06-18)
 
 `ufsecp_gpu_ecdsa_verify_batch` accepts public compact `r||s` signatures. CUDA
@@ -303,7 +642,7 @@ The table below distinguishes between the **public GPU ABI** (functions exposed 
 compiled into the device code but not directly callable through the stable C ABI).
 A kernel being present internally does not imply a public API exists for it.
 
-### Public GPU ABI operations (18 functions, backend-neutral)
+### Public GPU ABI operations (21 functions, backend-neutral)
 
 | Function | CPU (fast) | CPU (CT) | CUDA | OpenCL | Metal |
 |---|---|---|---|---|---|
@@ -314,6 +653,8 @@ A kernel being present internally does not imply a public API exists for it.
 | `ufsecp_gpu_ecdh_batch` ¹ | Y | Y | Y | Y | Y |
 | `ufsecp_gpu_hash160_pubkey_batch` | Y | - | Y | Y | Y |
 | `ufsecp_gpu_hash256_var` | Y | - | Y | Y | Y |
+| `ufsecp_gpu_merkle_pair_hash` | Y | - | Y | Y | Y |
+| `ufsecp_gpu_sighash_descriptor_hash` | Y | - | Y | Y | Y |
 | `ufsecp_gpu_ecrecover_batch` | Y | - | Y | Y | Y |
 | `ufsecp_gpu_msm` | Y | - | Y | Y | Y |
 | `ufsecp_gpu_frost_verify_partial_batch` | Y | - | Y | Y | Y |
@@ -324,10 +665,10 @@ A kernel being present internally does not imply a public API exists for it.
 | `ufsecp_gpu_bip324_aead_decrypt_batch` | Y | - | Y | Y | Y |
 | `ufsecp_gpu_zk_ecdsa_snark_witness_batch` | Y | - | Y | Y | Y |
 | `ufsecp_gpu_zk_schnorr_snark_witness_batch` | Y | - | Y | Y | Y |
-| `ufsecp_gpu_bip352_scan_batch` | Y | - | Y | Y | Y |
+| `ufsecp_gpu_bip352_scan_batch_multispend` ² | Y | - | Y | Y | Y |
 
 ¹ Several GPU public API functions accept private or secret key material:
-`ufsecp_gpu_ecdh_batch`, `ufsecp_gpu_bip352_scan_batch`,
+`ufsecp_gpu_ecdh_batch`, `ufsecp_gpu_bip352_scan_batch(_multispend)`,
 `ufsecp_gpu_bip324_aead_encrypt_batch`, and `ufsecp_gpu_bip324_aead_decrypt_batch`.
 These are intentional for high-throughput workloads (BIP-352 scanning, BIP-324
 transport encryption) where the secret-bearing step cannot be split from the GPU
@@ -343,6 +684,215 @@ strict-reject zero or order-or-larger scan keys, clear prefix/plan outputs on
 failure, and erase host/shared/device scan-key material before releasing buffers.
 Metal BIP-324 key buffers now use the same erase-before-release discipline as
 CUDA/OpenCL.
+
+² **GitHub issue #335 (multi-spend-key scan + Metal loadable-library fixes).**
+`bip352_scan_batch_multispend` generalizes the single-spend op to `n_spend`
+candidate spend keys (e.g. base + change-label spend keys): the ECDH scalar
+mul, tagged hash, and hash×G run once per tweak on all three backends;
+CUDA/OpenCL/Metal each decompress the `n_spend` spend candidates once
+(independent of tweak count) then do one mixed point add per `(tweak,spend)`
+cell. `ufsecp_gpu_bip352_scan_batch` is now a thin, non-virtual `n_spend=1`
+wrapper around `bip352_scan_batch_multispend` (not a separate `GpuBackend`
+virtual any more, hence no separate table row above — its native-dispatch
+coverage is exactly the `bip352_scan_batch_multispend` row's, since that is
+the only code path it can reach); output/error semantics unchanged for
+existing callers. Marginal-cost benchmark:
+`benchmarks/github_issue_335/`. Corrections to prior doc claims: (a) the
+`ufsecp_gpu.h` claim that Metal returns `UFSECP_ERR_GPU_UNSUPPORTED` for this
+op was stale — Metal has implemented `bip352_scan_batch` natively since
+before this issue; (b) `ufsecp_bip352_prepare_scan_plan`'s 264-byte GLV/wNAF
+plan is a CPU-only diagnostic utility with no `bip352_scan_batch*` consumer —
+its doc no longer claims a plan hand-off that does not exist. Metal shader
+discovery (`gpu_backend_metal.mm::ensure_library`) now supports an explicit
+absolute-path override (`ufsecp_gpu_set_metal_shader_path` /
+`UFSECP_METAL_SHADER_PATH` env var) ahead of the legacy CWD-relative search,
+for loadable-library consumers (e.g. a DuckDB extension) whose process CWD
+cannot be relied on; an override that fails validation is a hard failure, not
+a silent fallback to CWD guessing. `secp256k1_extended.h` gained a
+`SECP256K1_METAL_SCAN_ONLY` compile-time guard around the
+`ct_ecdsa_sign_metal`/`ct_schnorr_sign_metal`/`ct_ecdsa_sign_recoverable_metal`
+forward declarations and wrapper bodies, restoring self-containment for a
+scan-only embedded build that never links `secp256k1_ct_sign.h`; the default
+full metallib is unaffected (the guard is off by default). Metal
+`bip352_scan_batch_multispend` now uses a context-owned grow-only buffer pool
+(`MetalBip352Pool`) instead of allocating fresh shared buffers every call.
+
+**2026-07-15 acceptance repair** (task `issue335-bip352-multispend-acceptance-repair-claude-v2`):
+`GpuBackend::bip352_scan_batch_multispend` is now **pure virtual** (`= 0`,
+not a `virtual ... { return GpuError::Unsupported; }` stub) — all three
+backends already had native overrides (confirmed via
+`ci/check_gpu_backend_parity.py`, classification `native` for CUDA/OpenCL/
+Metal), so a future backend forgetting to override it is now a compile
+error rather than a silent runtime `Unsupported`. The C ABI wrapper
+(`ufsecp_gpu_bip352_scan_batch` and `_multispend`) now rejects pointer-range
+overlap between `prefix64_out` and any input buffer before clearing/dispatch
+(overflow-safe, zero-count no-op semantics preserved). OpenCL's override now
+checks every `clSetKernelArg`/`clFinish`/`clEnqueueReadBuffer` return code
+and zeroes output on failure (previously `clFinish`/`clEnqueueReadBuffer`
+were unchecked with an unconditional `Ok` return, a fail-open gap). CUDA's
+override now validates `n_tweaks`/`n_spend`/their product locally
+(defense-in-depth for direct `GpuBackend` callers bypassing the ABI) and
+zeroes `prefix64_out` on every failure path via a new `FailClosedOutputGuard`.
+Metal's `bip352_scan_batch_multispend` is now protected by a dedicated
+`bip352_pool_mtx_` covering the whole pool-touching span (previously
+unprotected against concurrent calls on one `MetalBackend` instance), and
+`MetalBackend::shutdown()` now frees all three buffer pools (fixing
+stale-device-buffer reuse across a shutdown+init cycle). Metal path-traversal
+validation is now component-based (`detail::path_has_dotdot_component`)
+instead of a raw substring check.
+
+**2026-07-15 round 2** (`metal_runtime.h`/`.mm` now in scope): the round-1
+known gap above is fixed. Added `MetalRuntime::dispatch_sync_checked()`
+(`src/metal/include/metal_runtime.h`, `src/metal/src/metal_runtime.mm`)
+returning `false` when the Metal command buffer completes with a non-nil
+`error` or a non-`Completed` terminal status; `bip352_scan_batch_multispend`
+now checks both its dispatch call sites and fails closed (zeroes
+`prefix64_out`, erases the pooled scan-key buffer, returns
+`GpuError::Launch`) instead of silently proceeding to read back
+possibly-stale buffer contents as success. `dispatch_sync()` (void, the
+other ~29 Metal dispatch call sites in this codebase for unrelated ops) is
+intentionally left unchanged — migrating those is a larger follow-up
+requiring real macOS build/test coverage, not done in this repair to avoid
+an unverifiable blast-radius change. New same-context concurrency/lifecycle
+regressions `SW-BIP352-METAL-1..3` (`audit/test_gpu_bip352_scan.cpp`) and a
+one-command macOS build/runtime replay bundle
+(`benchmarks/github_issue_335/macos_replay.sh`). No macOS hardware is
+available on this development machine, so all Metal claims above (round 1
+and round 2) remain code-review/logic-level only, not runtime-verified —
+verdict is explicitly `METAL_RUNTIME_CONFIRMATION_PENDING` until a real
+macOS run via the replay bundle produces actual output. See
+`workingdocs/github_issues/issue_335_bip352_multispend_acceptance_repair_claude_v2.json`
+for the exact machine-measured status of every backend.
+
+**2026-07-16 round 3** (OpenCL track + wiring pass): OpenCL's
+`bip352_scan_batch_multispend` fault-injection hooks (4 `extern "C"`
+functions, `bip352_fault_injection` namespace) are now gated behind
+`#if defined(SECP256K1_BUILD_FAULT_INJECTION_TESTS)` — off in every normal
+build, so they are not exported production attack surface. `SITE_QUEUE_INFO`
+and both `SITE_WG_INFO_*` queries no longer tolerate failure with a silent
+local-size fallback (every one of the 18 documented OpenCL control-call
+sites is fail-closed). Five OpenCL kernel loaders (`ensure_frost_kernel`,
+`ensure_hash160_kernel`, `ensure_zk_kernels`, `ensure_bip324_kernels`,
+`ensure_bip352_kernel`) now share the same `resolve_opencl_kernel()` helper
+`ensure_extended_kernels()` already used (env var override -> executable-
+relative -> walk-up-from-exe-dir -> legacy CWD-relative), which itself
+gained a walk-up-from-CWD fallback and a `src/opencl/kernels/` legacy-tier
+candidate. The wiring pass (`audit/CMakeLists.txt`) scoped
+`SECP256K1_BUILD_FAULT_INJECTION_TESTS=1` to the `unified_audit_runner`
+target only (verified via a real incremental build + link: no ODR conflict,
+since that target already raw-compiles `gpu_backend_opencl.cpp` exactly once
+via `audit_gpu_backends_provider` rather than linking the unflagged
+production `secp256k1_gpu_host` library) and confirmed with a REAL run on
+this machine's RTX 5060 Ti: all 18 control-call sites individually armed via
+a genuine end-to-end `ufsecp_gpu_bip352_scan_batch_multispend` dispatch,
+`Result: 37 passed, 0 failed, 0 inconclusive/advisory-skip`
+(`audit/test_exploit_opencl_bip352_control_call_failclosed.cpp`). The
+OpenCL kernel-resolver regression (`audit/test_regression_opencl_kernel_resolver_unrelated_cwd.cpp`)
+also ran for real: `Result: 3 passed, 0 failed` — RCU-2 additionally
+surfaced (not silently absorbed) a pre-existing, unrelated
+`secp256k1_frost.cl` address-space-qualifier `clBuildProgram` error, out of
+this task's `secp256k1_bip352.cl`-only scope. `ci/check_gpu_backend_parity.py`
+now hard-rejects any future regression of `bip352_scan_batch_multispend`
+away from pure-virtual, or any attempt to waive it into non-native status on
+any backend via a "Permanent Architecture Exceptions" table edit
+(`MUST_BE_PURE_VIRTUAL`, `NO_EXCEPTION_ALLOWED`) — see
+`docs/AUDIT_CHANGELOG.md` 2026-07-16 (round 3) for the full wiring-pass
+changelog.
+
+**2026-07-18/19 round 8** (Metal dispatch-migration doc sync + one narrow
+fail-closed gap): the round-2 entry above and `metal_runtime.h`'s doc
+comment on `dispatch_sync_checked()` both still read as if only the two
+`bip352_scan_batch_multispend` call sites were migrated and "the other
+~29/30 Metal dispatch call sites... intentionally left unchanged" — that
+text was stale. `gpu_backend_metal.mm` now calls `dispatch_sync_checked()`
+at all 37 of its `GpuBackend` virtual-method dispatch sites (every batch
+op: `generator_mul_batch`, `ecdsa_verify_batch`, `schnorr_verify_batch`,
+`ecdh_batch`, `hash160_pubkey_batch`, `frost_verify_partial_batch`,
+`ecrecover_batch`, `msm`, `zk_knowledge`/`dleq_verify_batch`,
+`bulletproof_verify_batch`, `bip324_aead_encrypt`/`decrypt_batch`,
+`snark_witness_batch`, `bip352_scan_batch_multispend`, etc.) and has zero
+remaining bare `dispatch_sync()` calls; the bare overload is retained only
+for non-shipped, Apple-only dev tools (`src/metal/app/bench_metal.mm`,
+`src/metal/app/metal_test.mm`) gated `if(NOT APPLE) return()` in
+`src/metal/CMakeLists.txt`, not part of the production C-ABI surface. Also
+fixed: `bip352_scan_batch_multispend`'s buffer-pool-allocation-failure
+return (`bip352_pool_.ready()` false) did not zero `prefix64_out` even
+though `n_rows` is already validated at that point — it now does, matching
+every other failure path in that function. Still `METAL_RUNTIME_CONFIRMATION_PENDING`:
+no Apple hardware is available on this development machine, so all of the
+above (rounds 1/2/3/8) remains code-review/logic-level only, not
+runtime-verified.
+
+**2026-07-19 round 9** (production/installed-consumer OpenCL kernel
+discovery + full loader RCU coverage): `resolve_opencl_kernel()`
+(`src/gpu/src/gpu_backend_opencl.cpp`) gained a genuine production/installed-
+package discovery strategy — a compile-time `SECP256K1_GPU_OPENCL_INSTALL_DIR`
+macro baked by `src/gpu/CMakeLists.txt` from `CMAKE_INSTALL_PREFIX`, matching
+exactly where `src/opencl/CMakeLists.txt`'s own kernel `install()` rule
+places `.cl` files — so round 8's `UFSECP_SOURCE_ROOT` developer fallback is
+no longer the sole "installed" story. Two real bugs were found and fixed
+in the same pass: (1) the `UFSECP_OPENCL_KERNEL_DIR` explicit override used
+to silently fall through to weaker exe/CWD-relative strategies when set but
+the kernel wasn't found there — now a hard fail-closed error with no
+fallthrough, and strategy ordering was corrected so the explicit override
+is checked strictly first (round 8 had accidentally let the dev source-root
+fallback shadow it); (2)
+`audit/test_regression_opencl_kernel_resolver_unrelated_cwd.cpp`'s own
+RCU-3 sub-test located its local kernel copy via a CWD-relative search run
+*before* its own internal `chdir()` — a CWD-dependency bug in the test
+harness itself, caught by round 8's newly-repaired dual-CWD gate on its
+first-ever clean run. RCU coverage extended from 2 to 7 cases: RCU-4/5/6
+add BIP-352 (the actual subject of issue #335)/ZK/BIP-324 (previously
+untested), RCU-7 proves the override fail-closed fix with a real
+fail-before/pass-after reproducer. All three new GPU calls are wrapped in a
+150s bounded watchdog (this host's NVIDIA OpenCL driver has a documented,
+non-deterministic JIT-compile stall) — each case gets its own independent
+GPU context and every buffer has static storage duration, since an earlier
+version of this watchdog (thread detach + stack-captured buffers + a
+shared, later-destroyed context) genuinely crashed the process with SIGSEGV
+during this round's own development; fixed before landing.
+
+**Independent, non-audit-target production proof** (explicitly required —
+"do not use the unified-audit target as a proxy"): built the real
+`secp256k1_gpu_host` static library + `libufsecp.so` via a plain,
+non-audit CMake configuration (`SECP256K1_BUILD_OPENCL=ON`,
+`SECP256K1_BUILD_CABI=ON`), manually staged an installed layout at a
+scratch prefix (library + headers + `.cl` kernels at
+`<prefix>/share/secp256k1/opencl/`, matching the real `install()`
+destinations), and compiled a minimal standalone C++ consumer against it.
+Live results, this session: (1) unrelated CWD (`/tmp/...`), no override →
+`UFSECP_OK` via the install-baked path; (2) repo-root CWD, no override →
+also `UFSECP_OK` via the same install-baked path (CWD-independent); (3)
+explicit override to a valid alternate directory → `UFSECP_OK`; (4)
+explicit override to an existing-but-empty directory → hard failure
+(`rc=102`, "Searched: /tmp/.../secp256k1_hash160.cl" only — proving no
+fallthrough to the install-baked path occurred).
+
+**Fixed, round 11** (both items below were disclosed-but-not-fixed as of
+round 10; the files were out of round 10's `allowed_writes`, and round 11
+explicitly authorized them):
+(a) `SECP256K1_INSTALL_CABI=ON` combined with a GPU backend now configures,
+builds, and installs cleanly for OpenCL, CUDA, and OpenCL+CUDA combined:
+`secp256k1_opencl` now joins the real `ufsecpTargets` export set (was
+joining a dead, never-finalized `secp256k1_opencl-targets` set);
+`secp256k1_gpu_host` and `secp256k1_cuda_lib` now have real
+`install(TARGETS ... EXPORT ufsecpTargets ...)` rules (previously had none
+at all) with their public include directories wrapped in
+`$<BUILD_INTERFACE:...>`/`$<INSTALL_INTERFACE:...>` (or demoted to
+`PRIVATE` where nothing relied on the public propagation); `src/metal/CMakeLists.txt`
+received the same structural treatment for parity (Metal itself remains
+`METAL_RUNTIME_CONFIRMATION_PENDING` — unverifiable on this Linux host).
+`ufsecp_static` + GPU now also joins a closed export set — the
+`-DUFSECP_BUILD_STATIC=OFF` workaround is no longer required. Verified via
+`ci/check_release_package_contents.py --gpu-export-closure`: genuine
+`PASS` for `cpu_only`, `opencl`, `cuda`, `opencl_cuda`; honest `SKIP` for
+`metal` (non-Apple host). (b) `include/ufsecp/ufsecp_version.h.in` now
+defines the `UFSECP_DEPRECATED` macro (previously entirely absent from the
+generated header) and the Windows `UFSECP_API` dllexport/static-lib branch
+order now matches the reference header (`UFSECP_STATIC_LIB` wins over
+`UFSECP_BUILDING`). Verified via `ci/check_installed_header_parity.py`:
+genuine `PASS`, zero semantic drift, real C and C++ consumers compile
+clean against the installed headers.
 
 ### CPU-only operations (no GPU public API)
 
@@ -380,8 +930,92 @@ through `ufsecp_gpu.h`.
 |---|---|---|
 | `ecdsa_sign_batch` / `schnorr_sign_batch` | CUDA / OpenCL / Metal | No GPU public API. Production signing uses CPU CT layer. |
 | BIP-32 derivation batch | CUDA / OpenCL / Metal | No public GPU API. Internal kernel exists for app use only. |
+| `bip352_scan_batch_multispend_timed` | OpenCL / Metal | Diagnostic-only CUDA-event timing-breakdown method (issue #335 acceptance repair, `docs/AUDIT_CHANGELOG.md` 2026-07-15), NOT part of the ABI-stable C surface (no `ufsecp_gpu_*` symbol) and NOT subject to the GPU compute-parity rule -- it measures wall-clock GPU work phases, it does not compute a cryptographic result. The base `GpuBackend` default (`gpu_backend.hpp`) safely delegates to the correctness-critical, fully-parity-covered `bip352_scan_batch_multispend()` and leaves the timing breakdown at all-zero ("not measured"), so OpenCL/Metal callers still get correct results, just without a real per-phase timing breakdown. CUDA overrides it with genuine `cudaEvent_t` instrumentation. Adding real profiling on OpenCL (`CL_QUEUE_PROFILING_ENABLE`/`clGetEventProfilingInfo`) or Metal (no clean per-command-buffer sub-timestamp API) is a legitimate future enhancement, not a correctness gap. |
 
 ---
+
+---
+
+## Resolved Secondary-Invariant Constant Bugs
+
+### GLV β (beta) endomorphism constant — Metal + OpenCL (fixed 2026-07-08)
+
+**Bug:** Both Metal (`secp256k1_ct_point.h`) and OpenCL (`secp256k1_ct_point.cl`)
+independently defined local duplicate copies of the secp256k1 GLV β constant
+inside `ct_scalar_mul_point()` that diverged from the canonical value used by
+their respective `apply_endomorphism_impl` implementations.
+
+- **Metal:** Local `BETA_METAL[8]` (32-bit limbs) had a dropped hex nibble in
+  word[0] during manual 64→32-bit transcription. Now references canonical
+  `BETA_LIMBS[8]` from `secp256k1_point.h:412`.
+- **OpenCL:** Local inline 64-bit literals matched canonical at limb[0] but
+  diverged at limbs[1..3]. Now references canonical `GLV_BETA0..3` from
+  `secp256k1_extended.cl:51-54`.
+- **CUDA:** Not affected — single `BETA[4]` in `secp256k1.cuh` reused by both
+  VT and CT paths.
+- **Severity:** P0 correctness bug, fail-loud (broken proofs fail verification).
+  Affected: CT ZK prove paths (knowledge-of-DL, DLEQ, bulletproof range proof)
+  on Metal and OpenCL. Unaffected: ECDSA/Schnorr signing, ECDH, CUDA all paths.
+- **Test:** `audit/test_regression_gpu_beta_constants.cpp` (math_invariants,
+  advisory=false) — verifies canonical β value, pre-fix divergence, and scans
+  actual shader source files for regression.
+- **Metal runtime caveat:** Fixed code is code-complete but NOT runtime-verified
+  on this Linux host (Metal requires Apple hardware). Owner validation on real
+  Apple hardware is needed before promotion to HIGH assurance.
+
+### OpenCL generator w4 table storage optimization — production (2026-07-12)
+
+**Not a bug fix — a measured storage-only performance optimization** from the
+same `secondary_invariant_constants` investigation workstream that found the
+GLV β bug above. `scalar_mul_generator_windowed_impl` (window w=4 precomputed
+generator table {0*G..15*G}, `src/opencl/kernels/secp256k1_extended.cl`,
+called from `__kernel generator_mul_windowed` and from the BIP-352 pipeline
+kernels in `secp256k1_bip352.cl`) used to declare `AffinePoint table[16]` as
+an unqualified function-scope array — in OpenCL C 1.2 this is
+**PRIVATE address-space, per-work-item memory, NOT `__local`
+(work-group-shared) memory** — and rebuild all 16 entries via 128 individual
+per-limb literal assignments on **every kernel-thread invocation**. The table is now declared
+**once** at OpenCL program scope in `__constant` address space
+(`GENERATOR_TABLE_W4[16]`) and read by index instead — a storage-only change:
+scalar-nibble extraction, doubling-and-add control flow, and point arithmetic
+are byte-for-byte unchanged.
+
+- **Measured private memory** (`clGetKernelWorkGroupInfo`,
+  `CL_KERNEL_PRIVATE_MEM_SIZE`, RTX 5060 Ti, NVIDIA OpenCL driver 580.173.02,
+  `-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable`): **1056 bytes → 32
+  bytes** for the real production `generator_mul_windowed` kernel (measured
+  directly on the shipped kernel, not a benchmark copy).
+- **Measured in-context throughput** (5 independent runs × 7 profiled passes
+  per cell, `clGetEventProfilingInfo`, same hardware/driver, re-verified
+  2026-07-12): batch=1024 **−0.43%** (noise-level, not a regression),
+  batch=65536 **−9.71%** wall time, batch=1,048,576 **−10.35%** wall time —
+  all non-overlapping across all 5 runs with <3% run-to-run variance. The
+  isolated-microbenchmark-only ~99% delta from the initial candidate
+  evidence is NOT the production claim (it measures only the table
+  build/access step in total isolation, not amortized against the ~64
+  point-doubling/addition calls that dominate real `generator_mul_windowed`
+  runtime).
+- **Correctness:** zero mismatches for the real production kernel against an
+  independent from-scratch Python EC oracle across zero, one, n-1, n, n+1,
+  2^256-1, and 4090 deterministic random scalars; zero mismatches against the
+  pre-optimization shape. BIP-352 scan pipeline (`bip352_scan_batch`) is
+  unaffected — `secp256k1_bip352.cl` inherits the single `GENERATOR_TABLE_W4`
+  declaration via `#include "secp256k1_extended.cl"`, no duplicate table.
+- **CUDA and Metal are unchanged** — this task touched OpenCL kernel source
+  only. No public API, GpuBackend/C-ABI, scalar format, or byte-order change.
+- **Test:** `audit/test_regression_opencl_generator_w4.cpp` (math_invariants,
+  advisory=false) — canonical table value check + source-coupled scan
+  confirming the local rebuild is absent and `GENERATOR_TABLE_W4` is declared
+  exactly once. Static gate: `ci/check_opencl_generator_w4.py` (wired into
+  `ci/run_fast_gates.sh`).
+- **Evidence:** [`docs/benchmark_artifacts/opencl_generator_w4_production_claude_v4.json`](benchmark_artifacts/opencl_generator_w4_production_claude_v4.json)
+  — a self-contained measurement record tracked in this repository (all
+  aggregate cells, resource values, and correctness counts are embedded
+  directly in the JSON). The capture harness that produced it
+  (`benchmarks/secondary_invariant_constants/opencl_generator_w4_ab/`
+  `ab_bench`) is **external-workspace provenance only** — it lives in the
+  outer multi-repo workspace, not in this standalone library repository, and
+  is not shipped or reproducible from here.
 
 ## Parity Status
 
@@ -496,6 +1130,38 @@ the same way `frost_verify_partial_batch` loads `secp256k1_frost.cl`.
 
 Run: `python3 ci/check_gpu_backend_parity.py` (add `--json` for machine
 output or `--list` to see every operation's per-backend classification).
+
+---
+
+### OpenCL kernel discovery — relocatable installed-package resolution (Added 2026-07-19, round 10)
+
+`resolve_opencl_kernel()` (`src/gpu/src/gpu_backend_opencl.cpp`) now resolves
+`.cl` kernel sources for a real, *relocated* `cmake --install` package, not
+just an un-moved one. Prior strategy baked `CMAKE_INSTALL_PREFIX` into the
+binary at compile time (`SECP256K1_GPU_OPENCL_INSTALL_DIR`) — broke silently
+the moment the installed package was moved. New primary strategy uses
+`dladdr()` (POSIX) / `GetModuleHandleExA` (Windows) to find the loaded
+module's actual on-disk path at *runtime* and computes the kernel directory
+relative to it (`<module_dir>/../share/secp256k1/opencl/`), matching
+`src/opencl/CMakeLists.txt`'s real install destination. Proven with a real
+`cmake --install` to a scratch prefix, `mv` to a second prefix (first prefix
+deleted), and a standalone consumer run from an unrelated CWD — succeeds only
+because the resolver reads the package's real runtime location. Explicit
+`UFSECP_OPENCL_KERNEL_DIR` override precedence and its fail-closed (no
+fallthrough) behavior on a set-but-invalid path are unchanged. Regression:
+`test_relocatable_install_after_move` (RCU-8,
+`audit/test_regression_opencl_kernel_resolver_unrelated_cwd.cpp`).
+
+**Closed, round 11:** `SECP256K1_INSTALL_CABI=ON` + any GPU backend now
+configures/builds/installs (CMake export-set closure fixed in
+`src/gpu|opencl|cuda|metal/CMakeLists.txt`) and the generated
+`ufsecp_version.h` (from `include/ufsecp/ufsecp_version.h.in`) now carries
+the `UFSECP_DEPRECATED` macro `ufsecp.h` requires. Both detection gates —
+`ci/check_release_package_contents.py --gpu-export-closure` and
+`ci/check_installed_header_parity.py` — now report genuine `PASS`. The
+`-DUFSECP_BUILD_STATIC=OFF` workaround is no longer needed: `ufsecp_static`
++ GPU installs and exports cleanly too. See `docs/AUDIT_CHANGELOG.md`
+round 11 entry.
 
 ---
 

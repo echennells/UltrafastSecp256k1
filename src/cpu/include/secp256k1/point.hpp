@@ -86,6 +86,17 @@ struct KPlan {
 };
 
 class Point {
+    // Leaves x_, y_, z_ UNINITIALIZED. Only for a destination that is written in
+    // full immediately afterwards -- the mixed-add paths in Point::add(), where
+    // jac52_add_mixed_to writes x, y, z and infinity on every one of its exits.
+    //
+    // The default constructor writes zero, one, zero and two flags: fifteen
+    // 64-bit stores that the very next call overwrites. On a 226 ns operation
+    // that is not free, and Point::add is the public entry point every caller
+    // outside the engine uses.
+    struct Uninitialised {};
+    explicit Point(Uninitialised) noexcept {}
+
 public:
     Point();
 
@@ -375,6 +386,31 @@ private:
     bool is_generator_;
     bool z_one_ = false;  // true when Z == 1 (point is affine-normalized)
 };
+
+#if defined(SECP256K1_FAST_52BIT)
+// ---------------------------------------------------------------------------
+// Magnitude bounds a Jacobian coordinate must satisfy (GitHub issue #396)
+// ---------------------------------------------------------------------------
+// These are the numbers point.cpp's negate() literals already assume:
+// jac52_add_mixed_inplace does p.x.negate(8) and p.y.negate(4). Until now they
+// existed only as integer literals at the call sites and as prose in four
+// comments -- nothing connected the two, which is #396 in one line.
+//
+// Honest with margin, measured 2026-09-06 (see field_52_magnitude.hpp for the
+// method): negate(8) stays correct through actual magnitude 9 and starts
+// producing wrong products at 10, and the live formulas sit at X <= 3, Y <= 3,
+// Z <= 1. The EFD alternatives named in the issue (dbl-2009-l, dbl-2007-bl,
+// mdbl-2007-bl) have steady state X 22 / Y 10 and are past the threshold.
+//
+// audit/test_regression_fe52_magnitude_model.cpp asserts the live formulas
+// against these constants, so a formula swap that violates them fails CI
+// instead of corrupting silently. They are declarations of the contract, not
+// runtime tracking -- FieldElement52 still carries no magnitude of its own, and
+// that half of #396 remains open.
+inline constexpr unsigned GEJ_X_MAGNITUDE_MAX = 8;
+inline constexpr unsigned GEJ_Y_MAGNITUDE_MAX = 4;
+inline constexpr unsigned GEJ_Z_MAGNITUDE_MAX = 1;
+#endif  // SECP256K1_FAST_52BIT
 
 // Self-test: Verify arithmetic correctness with known test vectors
 // Returns true if all tests pass, false otherwise

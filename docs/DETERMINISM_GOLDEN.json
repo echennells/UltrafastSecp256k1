@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-06-13T08:00:24.550391+00:00",
-  "library": "/home/shrek/Secp256k1/Secp256K1fast/libs/UltrafastSecp256k1/build-audit/include/ufsecp/libufsecp.so",
+  "generated_at": "2026-09-07T00:56:04.383527+00:00",
+  "library": "out/ci-audit/include/ufsecp/libufsecp.so.4.5.0",
   "repeat": 5,
   "overall_pass": true,
   "issues": [],

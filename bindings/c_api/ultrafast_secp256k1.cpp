@@ -139,19 +139,19 @@ static inline void point_to_compressed(const Point& p, uint8_t out[33]) {
 
 /* -- Version --------------------------------------------------------------- */
 
-const char* secp256k1_version(void) {
+const char* ultrafast_secp256k1_version(void) {
     return "1.0.0";
 }
 
 /* -- Library Lifecycle ----------------------------------------------------- */
 
-int secp256k1_init(void) {
+int ultrafast_secp256k1_init(void) {
     return secp256k1::fast::ensure_library_integrity(false) ? 0 : 1;
 }
 
 /* -- Key Operations -------------------------------------------------------- */
 
-int secp256k1_ec_pubkey_create(const uint8_t privkey[32], uint8_t pubkey_out[33]) {
+int ultrafast_secp256k1_ec_pubkey_create(const uint8_t privkey[32], uint8_t pubkey_out[33]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
         std::memset(pubkey_out, 0, 33);
@@ -166,7 +166,7 @@ int secp256k1_ec_pubkey_create(const uint8_t privkey[32], uint8_t pubkey_out[33]
     return 0;
 }
 
-int secp256k1_ec_pubkey_create_uncompressed(const uint8_t privkey[32], uint8_t pubkey_out[65]) {
+int ultrafast_secp256k1_ec_pubkey_create_uncompressed(const uint8_t privkey[32], uint8_t pubkey_out[65]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
         std::memset(pubkey_out, 0, 65);
@@ -182,7 +182,7 @@ int secp256k1_ec_pubkey_create_uncompressed(const uint8_t privkey[32], uint8_t p
     return 0;
 }
 
-int secp256k1_ec_pubkey_parse(const uint8_t* input, size_t input_len, uint8_t pubkey_out[33]) {
+int ultrafast_secp256k1_ec_pubkey_parse(const uint8_t* input, size_t input_len, uint8_t pubkey_out[33]) {
     if (input_len == 33 && (input[0] == 0x02 || input[0] == 0x03)) {
         auto p = point_from_compressed(input);
         if (p.is_infinity()) return 1;
@@ -209,12 +209,12 @@ int secp256k1_ec_pubkey_parse(const uint8_t* input, size_t input_len, uint8_t pu
     return 1;
 }
 
-int secp256k1_ec_seckey_verify(const uint8_t privkey[32]) {
+int ultrafast_secp256k1_ec_seckey_verify(const uint8_t privkey[32]) {
     Scalar sk;
     return Scalar::parse_bytes_strict_nonzero(privkey, sk) ? 1 : 0;
 }
 
-int secp256k1_ec_privkey_negate(uint8_t privkey[32]) {
+int ultrafast_secp256k1_ec_privkey_negate(uint8_t privkey[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) return 0;
     auto neg = sk.negate();
@@ -222,7 +222,7 @@ int secp256k1_ec_privkey_negate(uint8_t privkey[32]) {
     return 1;  // success
 }
 
-int secp256k1_ec_privkey_tweak_add(uint8_t privkey[32], const uint8_t tweak[32]) {
+int ultrafast_secp256k1_ec_privkey_tweak_add(uint8_t privkey[32], const uint8_t tweak[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) return 1;
     auto tw = scalar_from_bytes(tweak);
@@ -232,7 +232,7 @@ int secp256k1_ec_privkey_tweak_add(uint8_t privkey[32], const uint8_t tweak[32])
     return 0;
 }
 
-int secp256k1_ec_privkey_tweak_mul(uint8_t privkey[32], const uint8_t tweak[32]) {
+int ultrafast_secp256k1_ec_privkey_tweak_mul(uint8_t privkey[32], const uint8_t tweak[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) return 1;
     auto tw = scalar_from_bytes(tweak);
@@ -244,7 +244,7 @@ int secp256k1_ec_privkey_tweak_mul(uint8_t privkey[32], const uint8_t tweak[32])
 
 /* -- ECDSA ----------------------------------------------------------------- */
 
-int secp256k1_ecdsa_sign(const uint8_t msg_hash[32], const uint8_t privkey[32],
+int ultrafast_secp256k1_ecdsa_sign(const uint8_t msg_hash[32], const uint8_t privkey[32],
                          uint8_t sig_out[64]) {
     std::array<uint8_t, 32> msg;
     std::memcpy(msg.data(), msg_hash, 32);
@@ -265,7 +265,7 @@ int secp256k1_ecdsa_sign(const uint8_t msg_hash[32], const uint8_t privkey[32],
     return 0;
 }
 
-int secp256k1_ecdsa_verify(const uint8_t msg_hash[32], const uint8_t sig[64],
+int ultrafast_secp256k1_ecdsa_verify(const uint8_t msg_hash[32], const uint8_t sig[64],
                            const uint8_t pubkey[33]) {
     std::array<uint8_t, 32> msg;
     std::memcpy(msg.data(), msg_hash, 32);
@@ -279,7 +279,7 @@ int secp256k1_ecdsa_verify(const uint8_t msg_hash[32], const uint8_t sig[64],
     return secp256k1::ecdsa_verify(msg, pk, ecdsasig) ? 1 : 0;
 }
 
-int secp256k1_ecdsa_signature_serialize_der(const uint8_t sig[64],
+int ultrafast_secp256k1_ecdsa_signature_serialize_der(const uint8_t sig[64],
                                             uint8_t* der_out, size_t* der_len) {
     std::array<uint8_t, 64> compact;
     std::memcpy(compact.data(), sig, 64);
@@ -295,7 +295,7 @@ int secp256k1_ecdsa_signature_serialize_der(const uint8_t sig[64],
 
 /* -- ECDSA Recovery -------------------------------------------------------- */
 
-int secp256k1_ecdsa_sign_recoverable(const uint8_t msg_hash[32],
+int ultrafast_secp256k1_ecdsa_sign_recoverable(const uint8_t msg_hash[32],
                                      const uint8_t privkey[32],
                                      uint8_t sig_out[64], int* recid_out) {
     std::array<uint8_t, 32> msg;
@@ -318,7 +318,7 @@ int secp256k1_ecdsa_sign_recoverable(const uint8_t msg_hash[32],
     return 0;
 }
 
-int secp256k1_ecdsa_recover(const uint8_t msg_hash[32], const uint8_t sig[64],
+int ultrafast_secp256k1_ecdsa_recover(const uint8_t msg_hash[32], const uint8_t sig[64],
                             int recid, uint8_t pubkey_out[33]) {
     std::array<uint8_t, 32> msg;
     std::memcpy(msg.data(), msg_hash, 32);
@@ -336,7 +336,7 @@ int secp256k1_ecdsa_recover(const uint8_t msg_hash[32], const uint8_t sig[64],
 
 /* -- Schnorr (BIP-340) ---------------------------------------------------- */
 
-int secp256k1_schnorr_sign(const uint8_t msg[32], const uint8_t privkey[32],
+int ultrafast_secp256k1_schnorr_sign(const uint8_t msg[32], const uint8_t privkey[32],
                            const uint8_t aux_rand[32], uint8_t sig_out[64]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
@@ -364,7 +364,7 @@ int secp256k1_schnorr_sign(const uint8_t msg[32], const uint8_t privkey[32],
     return 0;
 }
 
-int secp256k1_schnorr_verify(const uint8_t msg[32], const uint8_t sig[64],
+int ultrafast_secp256k1_schnorr_verify(const uint8_t msg[32], const uint8_t sig[64],
                              const uint8_t pubkey_x[32]) {
     std::array<uint8_t, 32> pk_arr, msg_arr;
     std::memcpy(pk_arr.data(), pubkey_x, 32);
@@ -377,7 +377,7 @@ int secp256k1_schnorr_verify(const uint8_t msg[32], const uint8_t sig[64],
     return secp256k1::schnorr_verify(pk_arr, msg_arr, schnorr_sig) ? 1 : 0;
 }
 
-int secp256k1_schnorr_pubkey(const uint8_t privkey[32], uint8_t pubkey_x_out[32]) {
+int ultrafast_secp256k1_schnorr_pubkey(const uint8_t privkey[32], uint8_t pubkey_x_out[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
         std::memset(pubkey_x_out, 0, 32);
@@ -391,7 +391,7 @@ int secp256k1_schnorr_pubkey(const uint8_t privkey[32], uint8_t pubkey_x_out[32]
 
 /* -- ECDH ------------------------------------------------------------------ */
 
-int secp256k1_ecdh(const uint8_t privkey[32], const uint8_t pubkey[33],
+int ultrafast_secp256k1_ecdh(const uint8_t privkey[32], const uint8_t pubkey[33],
                    uint8_t secret_out[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
@@ -408,7 +408,7 @@ int secp256k1_ecdh(const uint8_t privkey[32], const uint8_t pubkey[33],
     return 0;
 }
 
-int secp256k1_ecdh_xonly(const uint8_t privkey[32], const uint8_t pubkey[33],
+int ultrafast_secp256k1_ecdh_xonly(const uint8_t privkey[32], const uint8_t pubkey[33],
                          uint8_t secret_out[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
@@ -425,7 +425,7 @@ int secp256k1_ecdh_xonly(const uint8_t privkey[32], const uint8_t pubkey[33],
     return 0;
 }
 
-int secp256k1_ecdh_raw(const uint8_t privkey[32], const uint8_t pubkey[33],
+int ultrafast_secp256k1_ecdh_raw(const uint8_t privkey[32], const uint8_t pubkey[33],
                        uint8_t secret_out[32]) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) {
@@ -444,19 +444,19 @@ int secp256k1_ecdh_raw(const uint8_t privkey[32], const uint8_t pubkey[33],
 
 /* -- Hashing --------------------------------------------------------------- */
 
-void secp256k1_sha256(const uint8_t* data, size_t data_len, uint8_t digest_out[32]) {
+void ultrafast_secp256k1_sha256(const uint8_t* data, size_t data_len, uint8_t digest_out[32]) {
     secp256k1::SHA256 hasher;
     hasher.update(data, data_len);
     auto digest = hasher.finalize();
     std::memcpy(digest_out, digest.data(), 32);
 }
 
-void secp256k1_hash160(const uint8_t* data, size_t data_len, uint8_t digest_out[20]) {
+void ultrafast_secp256k1_hash160(const uint8_t* data, size_t data_len, uint8_t digest_out[20]) {
     auto h = secp256k1::hash160(data, data_len);
     std::memcpy(digest_out, h.data(), 20);
 }
 
-void secp256k1_tagged_hash(const char* tag, const uint8_t* data, size_t data_len,
+void ultrafast_secp256k1_tagged_hash(const char* tag, const uint8_t* data, size_t data_len,
                            uint8_t digest_out[32]) {
     auto h = secp256k1::tagged_hash(tag, data, data_len);
     std::memcpy(digest_out, h.data(), 32);
@@ -469,7 +469,7 @@ static secp256k1::Network to_network(int n) {
                                           : secp256k1::Network::Mainnet;
 }
 
-int secp256k1_address_p2pkh(const uint8_t pubkey[33], int network,
+int ultrafast_secp256k1_address_p2pkh(const uint8_t pubkey[33], int network,
                             char* addr_out, size_t* addr_len) {
     auto pk = point_from_compressed(pubkey);
     auto addr = secp256k1::address_p2pkh(pk, to_network(network));
@@ -480,7 +480,7 @@ int secp256k1_address_p2pkh(const uint8_t pubkey[33], int network,
     return 0;
 }
 
-int secp256k1_address_p2wpkh(const uint8_t pubkey[33], int network,
+int ultrafast_secp256k1_address_p2wpkh(const uint8_t pubkey[33], int network,
                              char* addr_out, size_t* addr_len) {
     auto pk = point_from_compressed(pubkey);
     auto addr = secp256k1::address_p2wpkh(pk, to_network(network));
@@ -491,7 +491,7 @@ int secp256k1_address_p2wpkh(const uint8_t pubkey[33], int network,
     return 0;
 }
 
-int secp256k1_address_p2tr(const uint8_t internal_key_x[32], int network,
+int ultrafast_secp256k1_address_p2tr(const uint8_t internal_key_x[32], int network,
                            char* addr_out, size_t* addr_len) {
     std::array<uint8_t, 32> key_x;
     std::memcpy(key_x.data(), internal_key_x, 32);
@@ -505,7 +505,7 @@ int secp256k1_address_p2tr(const uint8_t internal_key_x[32], int network,
 
 /* -- WIF ------------------------------------------------------------------- */
 
-int secp256k1_wif_encode(const uint8_t privkey[32], int compressed, int network,
+int ultrafast_secp256k1_wif_encode(const uint8_t privkey[32], int compressed, int network,
                          char* wif_out, size_t* wif_len) {
     Scalar sk;
     if (!Scalar::parse_bytes_strict_nonzero(privkey, sk)) return 1;
@@ -517,7 +517,7 @@ int secp256k1_wif_encode(const uint8_t privkey[32], int compressed, int network,
     return 0;
 }
 
-int secp256k1_wif_decode(const char* wif, uint8_t privkey_out[32],
+int ultrafast_secp256k1_wif_decode(const char* wif, uint8_t privkey_out[32],
                          int* compressed_out, int* network_out) {
     auto result = secp256k1::wif_decode(std::string(wif));
     if (!result.valid) return 1;
@@ -561,7 +561,7 @@ static secp256k1::ExtendedKey extkey_from_c(const secp256k1_bip32_key* k) {
     return ek;
 }
 
-int secp256k1_bip32_master_key(const uint8_t* seed, size_t seed_len,
+int ultrafast_secp256k1_bip32_master_key(const uint8_t* seed, size_t seed_len,
                                 secp256k1_bip32_key* key_out) {
     auto [ek, ok] = secp256k1::bip32_master_key(seed, seed_len);
     if (!ok) return 1;
@@ -569,7 +569,7 @@ int secp256k1_bip32_master_key(const uint8_t* seed, size_t seed_len,
     return 0;
 }
 
-int secp256k1_bip32_derive_child(const secp256k1_bip32_key* parent, uint32_t index,
+int ultrafast_secp256k1_bip32_derive_child(const secp256k1_bip32_key* parent, uint32_t index,
                                   secp256k1_bip32_key* child_out) {
     auto ek = extkey_from_c(parent);
     auto [child, ok] = ek.derive_child(index);
@@ -578,7 +578,7 @@ int secp256k1_bip32_derive_child(const secp256k1_bip32_key* parent, uint32_t ind
     return 0;
 }
 
-int secp256k1_bip32_derive_path(const secp256k1_bip32_key* master, const char* path,
+int ultrafast_secp256k1_bip32_derive_path(const secp256k1_bip32_key* master, const char* path,
                                  secp256k1_bip32_key* key_out) {
     auto ek = extkey_from_c(master);
     auto [derived, ok] = secp256k1::bip32_derive_path(ek, std::string(path));
@@ -587,7 +587,7 @@ int secp256k1_bip32_derive_path(const secp256k1_bip32_key* master, const char* p
     return 0;
 }
 
-int secp256k1_bip32_get_privkey(const secp256k1_bip32_key* key, uint8_t privkey_out[32]) {
+int ultrafast_secp256k1_bip32_get_privkey(const secp256k1_bip32_key* key, uint8_t privkey_out[32]) {
     if (!key->is_private) return 1;
     auto ek = extkey_from_c(key);
     auto sk = ek.private_key();
@@ -595,7 +595,7 @@ int secp256k1_bip32_get_privkey(const secp256k1_bip32_key* key, uint8_t privkey_
     return 0;
 }
 
-int secp256k1_bip32_get_pubkey(const secp256k1_bip32_key* key, uint8_t pubkey_out[33]) {
+int ultrafast_secp256k1_bip32_get_pubkey(const secp256k1_bip32_key* key, uint8_t pubkey_out[33]) {
     auto ek = extkey_from_c(key);
     auto pk = ek.public_key();
     point_to_compressed(pk, pubkey_out);
@@ -604,7 +604,7 @@ int secp256k1_bip32_get_pubkey(const secp256k1_bip32_key* key, uint8_t pubkey_ou
 
 /* -- Taproot --------------------------------------------------------------- */
 
-int secp256k1_taproot_output_key(const uint8_t internal_key_x[32],
+int ultrafast_secp256k1_taproot_output_key(const uint8_t internal_key_x[32],
                                  const uint8_t* merkle_root,
                                  uint8_t output_key_x_out[32], int* parity_out) {
     std::array<uint8_t, 32> ik;
@@ -617,7 +617,7 @@ int secp256k1_taproot_output_key(const uint8_t internal_key_x[32],
     return 0;
 }
 
-int secp256k1_taproot_tweak_privkey(const uint8_t privkey[32],
+int ultrafast_secp256k1_taproot_tweak_privkey(const uint8_t privkey[32],
                                     const uint8_t* merkle_root,
                                     uint8_t tweaked_privkey_out[32]) {
     Scalar sk;
@@ -635,7 +635,7 @@ int secp256k1_taproot_tweak_privkey(const uint8_t privkey[32],
     return 0;
 }
 
-int secp256k1_taproot_verify_commitment(const uint8_t output_key_x[32],
+int ultrafast_secp256k1_taproot_verify_commitment(const uint8_t output_key_x[32],
                                         int output_key_parity,
                                         const uint8_t internal_key_x[32],
                                         const uint8_t* merkle_root,

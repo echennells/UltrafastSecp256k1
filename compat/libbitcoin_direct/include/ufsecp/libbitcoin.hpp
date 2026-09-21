@@ -184,6 +184,28 @@ inline constexpr const char* fastsecp256k1_libbitcoin_target() noexcept {
         digests32, xonly32, sigs64, count, out_results, max_threads);
 }
 
+// ─── GPU availability query (discovery only, not a verify-path switch) ──────
+// Feature-test macro: consumers key compilation on this so the same source
+// builds against older ufsecp headers that lack gpu_available().
+#define UFSECP_LBTC_HAS_GPU_AVAILABLE 1
+// True iff GPU offload is actually possible for ecdsa_verify_columns /
+// schnorr_verify_columns on this process (a GPU-host provider is linked AND a
+// working device was found). A caller that would otherwise spend a pass
+// marshalling digests/points/sigs into the contiguous column layout only to
+// hand it to the verify call above -- even on a box with no GPU -- can check
+// this first and skip that marshalling path entirely when it is false.
+//
+// This does NOT gate or change ecdsa_verify_columns / schnorr_verify_columns
+// themselves: they keep the existing "no caller-visible CPU/GPU split"
+// contract and fall back to the CPU column path transparently either way,
+// regardless of what this function returns. It is advisory, and its answer
+// can go stale between this call and the next batch (a device disappearing
+// mid-process); the verify path's own fallback is what keeps that safe, not
+// this check.
+[[nodiscard]] inline bool gpu_available() noexcept {
+    return secp256k1::gpu_columns_available();
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ECDSA Signing  (CT-backed — all secret-bearing paths use ct::* primitives)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -257,6 +279,29 @@ inline constexpr const char* fastsecp256k1_libbitcoin_target() noexcept {
     std::array<std::uint8_t, 32> h;
     std::memcpy(h.data(), hash32, 32);
     const auto rsig = secp256k1::ct::ecdsa_sign_recoverable(h, sk);
+    if (!rsig.sig.is_valid()) return false;
+    const auto compact = secp256k1::recoverable_to_compact(rsig, true);
+    std::memcpy(sig65, compact.data(), 65);
+    return true;
+}
+// ─── ECDSA sign recoverable hedged (CT, with recovery ID) ──────────────────
+// Like ecdsa_sign_recoverable but mixes aux32 into the nonce derivation for
+// defense-in-depth against fault injection and HMAC weakness. aux32 must be
+// 32 fresh CSPRNG bytes. Uses ct::ecdsa_sign_hedged_recoverable() — CT with
+// respect to private key and nonce. Recovery ID extraction branches only on
+// public data (R.y parity, r overflow).
+// Returns true on success; on failure sig65 is zeroed (fail-closed).
+[[nodiscard]] inline bool ecdsa_sign_hedged_recoverable(const std::uint8_t hash32[32],
+                                                         const std::uint8_t sk32[32],
+                                                         const std::uint8_t aux32[32],
+                                                         std::uint8_t sig65[65]) noexcept {
+    std::memset(sig65, 0, 65);
+    secp256k1::fast::Scalar sk;
+    if (!secp256k1::fast::Scalar::parse_bytes_strict_nonzero(sk32, sk)) return false;
+    std::array<std::uint8_t, 32> h, aux;
+    std::memcpy(h.data(), hash32, 32);
+    std::memcpy(aux.data(), aux32, 32);
+    const auto rsig = secp256k1::ct::ecdsa_sign_hedged_recoverable(h, sk, aux);
     if (!rsig.sig.is_valid()) return false;
     const auto compact = secp256k1::recoverable_to_compact(rsig, true);
     std::memcpy(sig65, compact.data(), 65);
@@ -441,6 +486,80 @@ inline void pubkey_serialize(const std::uint8_t pub33[33],
                               std::uint8_t out33[33]) noexcept {
     std::memcpy(out33, pub33, 33);
 }
+// ─── Public key create uncompressed (65-byte, CT) ──────────────────────────
+// Derives an uncompressed public key from a secret key.
+// Uses ct::generator_mul_blinded() — constant-time with respect to sk.
+// Returns false if sk is invalid (0 or >= n). On failure out65 is zeroed.
+[[nodiscard]] inline bool pubkey_create_uncompressed(const std::uint8_t sk32[32],
+                                                      std::uint8_t out65[65]) noexcept {
+    std::memset(out65, 0, 65);
+    secp256k1::fast::Scalar sk;
+    if (!secp256k1::fast::Scalar::parse_bytes_strict_nonzero(sk32, sk)) return false;
+    const auto P = secp256k1::ct::generator_mul_blinded(sk);
+    if (P.is_infinity()) return false;
+    const auto uncompressed = P.to_uncompressed();
+    std::memcpy(out65, uncompressed.data(), 65);
+    return true;
+}
+
+// ─── Public key parse uncompressed (65-byte) ───────────────────────────────
+// Validates that pub65 encodes a valid uncompressed curve point.
+// Checks header (0x04), canonical field elements (< p), and on-curve
+// relation (y^2 == x^3 + 7). Variable-time (public data).
+[[nodiscard]] inline bool pubkey_parse_uncompressed(const std::uint8_t pub65[65]) noexcept {
+    using secp256k1::fast::FieldElement;
+    using secp256k1::fast::FieldElement52;
+    if (pub65[0] != 0x04) return false;
+    FieldElement x, y;
+    if (!FieldElement::parse_bytes_strict(pub65 + 1, x)) return false;
+    if (!FieldElement::parse_bytes_strict(pub65 + 33, y)) return false;
+    static const std::uint64_t k7[4] = {7u, 0u, 0u, 0u};
+    const FieldElement52 x52 = FieldElement52::from_fe(x);
+    const FieldElement52 y52 = FieldElement52::from_fe(y);
+    const FieldElement52 rhs = x52.square() * x52 + FieldElement52::from_4x64_limbs(k7);
+    if (!(y52.square() == rhs)) return false;
+    return true;
+}
+
+// ─── Public key compress (65-byte uncompressed → 33-byte compressed) ──────
+// Validates the uncompressed key, then serializes to 33-byte compressed form.
+// Variable-time (public data). Returns false if input is invalid or point is
+// infinity. On failure out33 is zeroed.
+[[nodiscard]] inline bool pubkey_compress(const std::uint8_t pub65[65],
+                                           std::uint8_t out33[33]) noexcept {
+    std::memset(out33, 0, 33);
+    using secp256k1::fast::FieldElement;
+    using secp256k1::fast::FieldElement52;
+    if (pub65[0] != 0x04) return false;
+    FieldElement x, y;
+    if (!FieldElement::parse_bytes_strict(pub65 + 1, x)) return false;
+    if (!FieldElement::parse_bytes_strict(pub65 + 33, y)) return false;
+    static const std::uint64_t k7[4] = {7u, 0u, 0u, 0u};
+    const FieldElement52 x52 = FieldElement52::from_fe(x);
+    const FieldElement52 y52 = FieldElement52::from_fe(y);
+    const FieldElement52 rhs = x52.square() * x52 + FieldElement52::from_4x64_limbs(k7);
+    if (!(y52.square() == rhs)) return false;
+    const auto P = secp256k1::fast::Point::from_affine(x, y);
+    if (P.is_infinity()) return false;
+    const auto compressed = P.to_compressed();
+    std::memcpy(out33, compressed.data(), 33);
+    return true;
+}
+
+// ─── Public key decompress (33-byte compressed → 65-byte uncompressed) ────
+// Decompresses a compressed public key to 65-byte uncompressed form.
+// Variable-time (public data). Returns false if input is invalid.
+// On failure out65 is zeroed.
+[[nodiscard]] inline bool pubkey_decompress(const std::uint8_t pub33[33],
+                                             std::uint8_t out65[65]) noexcept {
+    std::memset(out65, 0, 65);
+    secp256k1::fast::Point P;
+    if (!detail::decompress(pub33, P)) return false;
+    const auto uncompressed = P.to_uncompressed();
+    std::memcpy(out65, uncompressed.data(), 65);
+    return true;
+}
+
 
 // ─── Public key combine (sum of points) ────────────────────────────────────
 // Computes P = P1 + P2 + ... + Pn (point addition, not scalar sum).
@@ -459,7 +578,7 @@ inline void pubkey_serialize(const std::uint8_t pub33[33],
     for (std::size_t i = 1; i < count; ++i) {
         secp256k1::fast::Point P;
         if (!detail::decompress(pub33s[i], P)) return false;
-        sum = sum.add(P);
+        sum.add_inplace(P);
         if (sum.is_infinity()) return false;
     }
     const auto compressed = sum.to_compressed();
@@ -479,7 +598,7 @@ inline void pubkey_serialize(const std::uint8_t pub33[33],
     for (std::size_t i = 1; i < count; ++i) {
         secp256k1::fast::Point P;
         if (!detail::decompress(pub33s_concat + i * stride, P)) return false;
-        sum = sum.add(P);
+        sum.add_inplace(P);
         if (sum.is_infinity()) return false;
     }
     const auto compressed = sum.to_compressed();
@@ -993,6 +1112,498 @@ inline void tagged_hash_precomputed(const std::uint8_t tag_hash32[32],
     }
     return true;
 }
+
+// ============================================================================
+// txid_hash_batch — semantic alias over hash256_var_batch.
+// ============================================================================
+// txid = SHA256(SHA256(serialized_tx_without_witness)). Identical to
+// hash256_var_batch — this alias exists solely for libbitcoin readability.
+// Zero new backend work. Public data, variable-time.
+[[nodiscard]] inline bool txid_hash_batch(
+    const std::uint8_t* serialized_txs,
+    const std::uint32_t* tx_lens,
+    std::size_t stride, std::size_t count,
+    std::uint8_t* out_txids32,
+    std::size_t max_threads = 0) noexcept
+{
+    return hash256_var_batch(serialized_txs, tx_lens, stride, count, out_txids32, max_threads);
+}
+
+// ============================================================================
+// wtxid_hash_batch — semantic alias over hash256_var_batch.
+// ============================================================================
+// wtxid = SHA256(SHA256(serialized_tx_with_witness)). Identical to
+// hash256_var_batch — this alias exists solely for libbitcoin readability.
+// Zero new backend work. Public data, variable-time.
+[[nodiscard]] inline bool wtxid_hash_batch(
+    const std::uint8_t* serialized_wtxs,
+    const std::uint32_t* wtx_lens,
+    std::size_t stride, std::size_t count,
+    std::uint8_t* out_wtxids32,
+    std::size_t max_threads = 0) noexcept
+{
+    return hash256_var_batch(serialized_wtxs, wtx_lens, stride, count, out_wtxids32, max_threads);
+}
+
+// ============================================================================
+// merkle_pair_hash_batch — HASH256 over two 32-byte column spans (SoA)
+// ============================================================================
+// Merkle pair hashing in Bitcoin: parent = SHA256(SHA256(left32 || right32)).
+//
+// Input layout (Structure-of-Arrays):
+//   left32:  count * 32 bytes (first 32-byte hash of each pair)
+//   right32: count * 32 bytes (second 32-byte hash of each pair)
+//   out32:   count * 32 bytes (output parent hash per pair)
+//
+// Byte layout (i in [0, count)):
+//   combined_i[0..31]  = left32[i*32 .. i*32+31]
+//   combined_i[32..63] = right32[i*32 .. i*32+31]
+//   out32[i*32..]      = SHA256(SHA256(combined_i))
+//
+// Failure semantics (HASH op — never touch out32 on bad input):
+//   count==0                    → true,  out32 untouched
+//   null left32/right32/out32   → false, out32 untouched
+//   layout overflow (count*32)  → false, out32 untouched
+//   GPU decline                 → CPU fallback recomputes every row, returns true
+//
+// PUBLIC DATA. Variable-time on GPU and CPU. No secret material.
+// Uses existing lbtc_sha256 kernel primitive for per-row double-SHA256.
+[[nodiscard]] inline bool merkle_pair_hash_batch(
+    const std::uint8_t* left32,
+    const std::uint8_t* right32,
+    std::size_t count,
+    std::uint8_t* out32,
+    std::size_t max_threads = 0) noexcept
+{
+    (void)max_threads;
+    if (count == 0) return true;
+    if (left32 == nullptr || right32 == nullptr || out32 == nullptr ||
+        detail::column_layout_overflows(count, 32)) {
+        return false;
+    }
+    if (auto hook = gpu_hook::g_lbtc_merkle_pair_hook.load(std::memory_order_acquire)) {
+        if (hook(left32, right32, count, out32) == 0) return true;
+    }
+    // CPU fallback: concatenate left||right and double-SHA256 per row
+    for (std::size_t i = 0; i < count; ++i) {
+        std::uint8_t combined[64];
+        std::memcpy(combined,       left32  + i * 32, 32);
+        std::memcpy(combined + 32,  right32 + i * 32, 32);
+        const auto d = secp256k1::SHA256::hash256(combined, 64);
+        std::memcpy(out32 + i * 32, d.data(), 32);
+    }
+    return true;
+}
+
+
+
+// ============================================================================
+// merkle_level_reduce_batch — semantic alias over merkle_pair_hash_batch
+// ============================================================================
+// Given pair_count pairs of (left32, right32) in Structure-of-Arrays layout,
+// compute pair_count parent hashes via HASH256(left32 || right32).
+//
+// This is a thin wrapper over merkle_pair_hash_batch — ZERO new backend
+// virtuals, GPU kernels, hooks, or C ABI.  The name reflects Bitcoin merkle-tree
+// vocabulary: "level reduce" = compute the parent level from the child level.
+//
+// Input layout (identical to merkle_pair_hash_batch):
+//   left32:  pair_count * 32 bytes (first 32-byte hash of each pair)
+//   right32: pair_count * 32 bytes (second 32-byte hash of each pair)
+//   out32:   pair_count * 32 bytes (output parent hash per pair)
+//
+// Byte order preserved as left32 || right32 for every pair.
+// Failure semantics: identical to merkle_pair_hash_batch (see above).
+// PUBLIC DATA. Variable-time. No secret material.
+[[nodiscard]] inline bool merkle_level_reduce_batch(
+    const std::uint8_t* left32,
+    const std::uint8_t* right32,
+    std::size_t pair_count,
+    std::uint8_t* out32,
+    std::size_t max_threads = 0) noexcept
+{
+    return merkle_pair_hash_batch(left32, right32, pair_count, out32, max_threads);
+}
+
+// ============================================================================
+// merkle_root_from_leaves — Bitcoin merkle root from leaves (caller-provided scratch)
+// ============================================================================
+// Computes the Bitcoin merkle tree root from an array of leaf hashes using
+// Bitcoin merkle semantics:
+//   - At each tree level, hashes are paired left-to-right.
+//   - When a level has an odd number of hashes, the last hash is duplicated
+//     to form the final pair (Bitcoin consensus rule).
+//   - parent = SHA256(SHA256(left32 || right32)) — HASH256.
+//   - Byte order strictly preserved: left32 bytes then right32 bytes.
+//
+// The function composes merkle_level_reduce_batch -> merkle_pair_hash_batch
+// internally.  ZERO new GpuBackend virtuals, CUDA/OpenCL/Metal kernels, C ABI
+// functions, or production hooks.  This is a pure direct C++ libbitcoin
+// workload built entirely over the already-shipped merkle_pair_hash_batch.
+//
+// Scratch contract (caller-provided, no heap allocation):
+//
+//   scratch       — caller-owned byte buffer, at least leaf_count * 64 bytes.
+//                   The function never allocates; it uses scratch exclusively.
+//   scratch_size  — size of scratch in bytes.  Must be >= leaf_count * 64.
+//                   Undersize -> false, out_root32 zeroed.
+//
+//   Internal scratch layout (one tree level at a time, worst case = widest
+//   level, pair = ceil(N/2)):
+//
+//     [0              .. pair*32 - 1]  left32  column (SoA)
+//     [pair*32        .. pair*64 - 1]  right32 column (SoA)
+//     [pair*64        .. pair*96 - 1]  output parent hashes (next level input)
+//
+//   After each level, the output area becomes the source for the next level.
+//   The SoA area is reused.  Total scratch needed <= leaf_count * 64 (proven).
+//
+//   ALIASING RESTRICTION:  leaves32 MUST NOT overlap scratch or out_root32.
+//   out_root32 MUST NOT overlap scratch or leaves32.  Overlapping buffers
+//   produce undefined behaviour.  The function does not runtime-check aliasing.
+//
+// Failure semantics (fail-closed):
+//
+//   leaf_count == 0                                          -> false, out_root32 zeroed
+//   leaves32 == nullptr || out_root32 == nullptr ||
+//   out_root32 == nullptr                                    -> false
+//   scratch == nullptr (with leaf_count > 0)                 -> false, out_root32 zeroed
+//   leaf_count * 32  overflow size_t                         -> false, out_root32 zeroed
+//   leaf_count * 64  overflow size_t                         -> false, out_root32 zeroed
+//   scratch_size < leaf_count * 64                           -> false, out_root32 zeroed
+//   internal merkle_pair_hash_batch failure (theoretical)    -> false, out_root32 zeroed
+//
+//   leaf_count == 1  ->  the single leaf IS the merkle root; copied to
+//                       out_root32, returns true.  Scratch is validated
+//                       (non-null, size check) but not read/written.
+//
+// PUBLIC DATA.  Variable-time on GPU and CPU.  No secret material.
+[[nodiscard]] inline bool merkle_root_from_leaves(
+    const std::uint8_t* leaves32,
+    std::size_t leaf_count,
+    std::uint8_t* scratch,
+    std::size_t scratch_size,
+    std::uint8_t out_root32[32],
+    std::size_t max_threads = 0) noexcept
+{
+    if (out_root32 == nullptr)
+        return false;
+
+    // Fail-closed: zero output on any invalid input or internal failure.
+    std::memset(out_root32, 0, 32);
+
+    if (leaf_count == 0 || leaves32 == nullptr || scratch == nullptr)
+        return false;
+
+    // Single leaf: it IS the merkle root (Bitcoin semantics).
+    if (leaf_count == 1) {
+        if (scratch_size < 64) return false;   // scratch must still be valid size
+        std::memcpy(out_root32, leaves32, 32);
+        return true;
+    }
+
+    // Overflow guards: all size multiplications must fit in size_t.
+    if (detail::column_layout_overflows(leaf_count, 32) ||
+        detail::column_layout_overflows(leaf_count, 64))
+        return false;
+
+    // Scratch size check: need at least leaf_count * 64 bytes.
+    if (scratch_size < leaf_count * 64)
+        return false;
+
+    const std::uint8_t* src = leaves32;
+    std::size_t          N   = leaf_count;
+
+    while (N > 1) {
+        const std::size_t pair_count = (N + 1) / 2;   // ceil(N/2)
+
+        // Build Structure-of-Arrays columns in scratch:
+        //   left32  column at scratch + 0
+        //   right32 column at scratch + pair_count * 32
+        //   output  at      scratch + pair_count * 64
+        std::uint8_t* __restrict left_col  = scratch;
+        std::uint8_t* __restrict right_col = scratch + pair_count * 32;
+        std::uint8_t* __restrict out_col   = scratch + pair_count * 64;
+
+        for (std::size_t i = 0; i < pair_count; ++i) {
+            const std::size_t left_idx  = 2 * i;
+            const std::size_t right_idx = (2 * i + 1 < N) ? (2 * i + 1) : (N - 1);
+            std::memcpy(left_col  + i * 32, src + left_idx  * 32, 32);
+            std::memcpy(right_col + i * 32, src + right_idx * 32, 32);
+        }
+
+        // Compute parent hashes via the already-shipped merkle_pair_hash_batch.
+        if (!merkle_pair_hash_batch(left_col, right_col, pair_count, out_col, max_threads)) {
+            // Internal failure — out_root32 was already zeroed at function entry.
+            return false;
+        }
+
+        // Next level input = output of this level.
+        src = out_col;
+        N   = pair_count;
+    }
+
+    // Copy the single remaining hash (the merkle root).
+    std::memcpy(out_root32, src, 32);
+    return true;
+}
+
+// ============================================================================
+// sighash_descriptor_hash_batch — HASH256 of descriptor-shaped sighash preimage
+// ============================================================================
+// Computes SHA256(SHA256(preimage)) for N transaction inputs where the preimage
+// is assembled from column-major field data according to a compact descriptor
+// bytecode. This is legacy/BIP-143 sighash HASH256 only — it is NOT BIP-341
+// TapSighash. Taproot-only field IDs 0x0C..0x0F are reserved and rejected until
+// a separately reviewed tagged-hash mode exists.
+//
+// The descriptor is a sequence of 2-byte little-endian field_refs terminated by
+// a single 0xFF byte. GPU acceleration (Phase 3b) transparently attempts a GPU
+// hook (GpuBackend::sighash_descriptor_hash) with native CUDA/OpenCL/Metal
+// kernels; on decline the deterministic CPU fallback runs.
+//
+// Descriptor byte layout (v2, LE):
+//   Each field_ref = 2 bytes LE:
+//     byte0 = low byte of field_id  (bits [0..7])
+//     byte1 = (flags_nibble << 4) | (field_id >> 8)
+//     flags_nibble:
+//       bit0 = HAS_LENGTH  — field has per-item variable length
+//       bit1 = ZERO_PAD    — column storage is zero-padded to stride
+//       bit2-3 = RESERVED  — must be 0
+//   Terminator: single 0xFF byte at descriptor[descriptor_len-1].
+//   Max 64 field refs → max descriptor_len = 2*64+1 = 129.
+//
+// Field data layout (Structure-of-Arrays):
+//   field_data[f]      — column-major byte span for field_id f
+//   field_lengths[f]   — fixed byte length (or stride for variable fields)
+//   field_var_lens[f]  — per-item length array (non-null iff HAS_LENGTH)
+//
+// supported field IDs:
+//   0x00 nVersion(4)   0x01 hashPrevouts(32)  0x02 hashSequence(32)
+//   0x03 outpoint(36)  0x04 scriptCode(var)    0x05 value(8)
+//   0x06 nSequence(4)  0x07 hashOutputs(32)    0x08 nLocktime(4)
+//   0x09 nHashType(4)  0x0A prevout_individual(36) 0x0B nInputIndex(4)
+//   0xF0 raw_literal(var)
+//   0x0C..0x0F reserved (Taproot-only, rejected — not BIP-341 TapSighash)
+//   All other field_ids → rejected (reserved/unsupported).
+//
+// Failure semantics (fail-closed, HASH op — out32 untouched on bad input):
+//   count==0 → true (no-op), out32 untouched
+//   null descriptor/field_data/field_lengths/out32 → false, out32 untouched
+//   null field_var_lens when descriptor references variable fields → false,
+//     out32 untouched
+//   malformed descriptor (len, terminator, mid-0xFF, reserved flags,
+//     duplicate, reserved low-byte, unsupported field_id, HAS_LENGTH
+//     mismatch, missing nHashType) → false, out32 untouched
+//   null field_data[f] for referenced field → false, out32 untouched
+//   field_lengths[f]*count overflow → false, out32 untouched
+//   var_len > stride on any row → false, out32 untouched
+//   preimage > 4 MiB on any row → false, out32 untouched
+//
+// PUBLIC DATA only — variable-time, no secret material.
+[[nodiscard]] inline bool sighash_descriptor_hash_batch(
+    const std::uint8_t* descriptor,
+    std::size_t descriptor_len,
+    const std::uint8_t* const* field_data,
+    const std::uint32_t* field_lengths,
+    const std::uint32_t* const* field_var_lens,
+    std::size_t count,
+    std::uint8_t* out32,
+    std::size_t max_threads = 0) noexcept
+{
+    (void)max_threads;
+
+    // count==0 is a no-op (consistent with all lbtc::* batch ops).
+    if (count == 0) return true;
+
+    // Null pointer checks — fail before touching out32.
+    if (descriptor == nullptr || field_data == nullptr ||
+        field_lengths == nullptr || out32 == nullptr)
+        return false;
+
+    // ─── Descriptor pre-dispatch validation (parse once) ────────────────
+    // descriptor_len: 1..129, must be odd.
+    if (descriptor_len < 1 || descriptor_len > 129) return false;
+    if ((descriptor_len & 1u) == 0) return false;
+
+    // Terminator at expected final position.
+    if (descriptor[descriptor_len - 1] != 0xFF) return false;
+
+    // No mid-stream 0xFF bytes at even indices (before the terminator).
+    for (std::size_t i = 0; i < descriptor_len - 1; i += 2) {
+        if (descriptor[i] == 0xFF) return false;
+    }
+
+    // Parse descriptor field_refs into a compact plan.
+    constexpr std::size_t MAX_FIELD_REFS = 64;
+    struct FieldPlan {
+        std::uint16_t field_id;
+        bool          has_length;   // HAS_LENGTH flag
+        bool          zero_pad;     // ZERO_PAD flag (accepted, no-op for preimage)
+        std::uint32_t fixed_len;    // 0 = variable-length field
+    };
+    FieldPlan plan[MAX_FIELD_REFS];
+    std::size_t  num_fields = 0;
+    bool         has_nHashType = false;
+
+    const std::uint8_t* p   = descriptor;
+    const std::uint8_t* end = descriptor + descriptor_len;
+
+    while (p < end && *p != 0xFF) {
+        if (num_fields >= MAX_FIELD_REFS) return false;
+        if (p + 1 >= end) return false;   // truncated field_ref
+
+        // Decode LE field_ref.
+        const std::uint16_t field_id =
+            static_cast<std::uint16_t>(p[0]) |
+            (static_cast<std::uint16_t>(p[1] & 0x0Fu) << 8);
+        const std::uint8_t flags_nibble = p[1] >> 4;
+
+        // Reserved flag bits 14-15 must be zero (bits 2-3 of flags nibble).
+        if ((flags_nibble & 0x0Cu) != 0) return false;
+
+        const bool has_len  = (flags_nibble & 0x01u) != 0;   // HAS_LENGTH
+        const bool zero_pad = (flags_nibble & 0x02u) != 0;   // ZERO_PAD
+
+        // Reserved field_id: low byte == 0xFF is permanently prohibited.
+        if ((field_id & 0xFFu) == 0xFFu) return false;
+
+        // Duplicate field_id check (O(n²) over ≤64 entries — fine).
+        for (std::size_t j = 0; j < num_fields; ++j) {
+            if (plan[j].field_id == field_id) return false;
+        }
+
+        // Classify field — only supported field_ids pass.
+        std::uint32_t fixed_len = 0;
+        bool          supported = false;
+
+        // clang-format off
+        switch (field_id) {
+        case 0x00: fixed_len =  4; supported = true; break;   // nVersion
+        case 0x01: fixed_len = 32; supported = true; break;   // hashPrevouts
+        case 0x02: fixed_len = 32; supported = true; break;   // hashSequence
+        case 0x03: fixed_len = 36; supported = true; break;   // outpoint
+        case 0x04: /* variable */ supported = true; break;   // scriptCode
+        case 0x05: fixed_len =  8; supported = true; break;   // value
+        case 0x06: fixed_len =  4; supported = true; break;   // nSequence
+        case 0x07: fixed_len = 32; supported = true; break;   // hashOutputs
+        case 0x08: fixed_len =  4; supported = true; break;   // nLocktime
+        case 0x09: fixed_len =  4; supported = true; has_nHashType = true; break; // nHashType
+        case 0x0A: fixed_len = 36; supported = true; break;   // prevout_individual
+        case 0x0B: fixed_len =  4; supported = true; break;   // nInputIndex
+        case 0x0C: return false;   // annex (Taproot-only, reserved)
+        case 0x0D: return false;   // tapleaf_hash (Taproot-only, reserved)
+        case 0x0E: return false;   // key_version (Taproot-only, reserved)
+        case 0x0F: return false;   // codesep_pos (Taproot-only, reserved)
+        case 0xF0: /* variable */ supported = true; break;   // raw_literal
+        default:   return false;   // unsupported / reserved
+        }
+        // clang-format on
+
+        if (!supported) return false;
+
+        const bool is_variable = (fixed_len == 0);
+
+        // HAS_LENGTH flag must be set iff the field is variable-length.
+        if (is_variable && !has_len)  return false;
+        if (!is_variable && has_len)  return false;
+
+        // field_data entry must be non-null for every referenced field_id.
+        if (field_data[field_id] == nullptr) return false;
+
+        // field_lengths * count must not overflow size_t.
+        if (field_lengths[field_id] > 0 &&
+            detail::column_layout_overflows(count, field_lengths[field_id]))
+            return false;
+
+        // Stride must be non-zero for any referenced field.
+        if (field_lengths[field_id] == 0) return false;
+
+        // Fixed-field stride must be ≥ its fixed serialized length.
+        if (!is_variable && field_lengths[field_id] < fixed_len) return false;
+
+        plan[num_fields].field_id   = field_id;
+        plan[num_fields].has_length = has_len;
+        plan[num_fields].zero_pad   = zero_pad;
+        plan[num_fields].fixed_len  = fixed_len;
+        ++num_fields;
+
+        p += 2;
+    }
+
+    // Post-loop: p must point exactly at the terminator byte.
+    if (p != end - 1) return false;
+
+    // nHashType (0x09) is mandatory for any sighash.
+    if (!has_nHashType) return false;
+
+    // Per-row: validate field_var_lens is non-null for variable fields.
+    for (std::size_t fi = 0; fi < num_fields; ++fi) {
+        const auto& pf = plan[fi];
+        if (pf.fixed_len == 0 &&
+            (field_var_lens == nullptr || field_var_lens[pf.field_id] == nullptr))
+            return false;
+    }
+
+    // ─── Per-row preimage size validation ───────────────────────────────
+    constexpr std::size_t MAX_PREIMAGE = 4u * 1024u * 1024u;  // 4 MiB
+
+    for (std::size_t row = 0; row < count; ++row) {
+        std::size_t preimage_len = 0;
+        for (std::size_t fi = 0; fi < num_fields; ++fi) {
+            const auto& pf = plan[fi];
+            if (pf.fixed_len > 0) {
+                preimage_len += pf.fixed_len;
+            } else {
+                const std::uint32_t var_len = field_var_lens[pf.field_id][row];
+                if (var_len > field_lengths[pf.field_id]) return false;
+                preimage_len += var_len;
+            }
+        }
+        if (preimage_len > MAX_PREIMAGE) return false;
+    }
+
+    // ─── GPU hook attempt (production path) ─────────────────────────────
+    // After all host-side validation passes, attempt the GPU hook once.
+    // Hook return: 0 = handled (out32 fully written) → return true.
+    //              -1 = decline (no GPU / operational error) → CPU fallback.
+    // null hook = CPU-only build → straight to CPU fallback.
+    if (auto hook = gpu_hook::g_lbtc_sighash_hook.load(std::memory_order_acquire)) {
+        if (hook(descriptor, descriptor_len, field_data, field_lengths,
+                 field_var_lens, count, out32) == 0) {
+            return true;
+        }
+        // Hook declined → fall through to deterministic CPU fallback.
+    }
+
+    // ─── Per-row streaming HASH256 (CPU fallback) ───────────────────────
+    for (std::size_t row = 0; row < count; ++row) {
+        // Inner SHA-256: stream each field into the context.
+        secp256k1::SHA256 inner;
+        for (std::size_t fi = 0; fi < num_fields; ++fi) {
+            const auto& pf = plan[fi];
+            if (pf.fixed_len > 0) {
+                inner.update(field_data[pf.field_id] + row * field_lengths[pf.field_id],
+                             pf.fixed_len);
+            } else {
+                const std::uint32_t var_len = field_var_lens[pf.field_id][row];
+                inner.update(field_data[pf.field_id] + row * field_lengths[pf.field_id],
+                             var_len);
+            }
+        }
+        const auto inner_hash = inner.finalize();
+
+        // Outer SHA-256: hash the 32-byte inner digest.
+        secp256k1::SHA256 outer;
+        outer.update(inner_hash.data(), 32);
+        const auto outer_hash = outer.finalize();
+
+        std::memcpy(out32 + row * 32, outer_hash.data(), 32);
+    }
+
+    return true;
+}
+
 
 } // namespace ufsecp::lbtc
 

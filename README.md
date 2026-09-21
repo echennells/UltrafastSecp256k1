@@ -16,16 +16,20 @@ It is not a trust request. It is a verification package.
   </a>
 </p>
 
-[![Gate](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml)
-[![CI](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/ci.yml)
-[![Security Audit](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/security-audit.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/security-audit.yml)
-[![CAAS](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/caas.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/caas.yml)
+> A static README renders identically regardless of which branch a viewer is on GitHub, so it cannot auto-detect "which branch am I viewing" — that is why both branches' CI status are listed explicitly below instead of a single implicit badge row. `dev` is the active development branch where all work happens; `main` receives merges only when a release is tagged (see [Branch Policy](AGENTS.md)).
+
+<!-- CI-STATUS-TABLE-START -->
+| Branch | Gate | CI | Security Audit | CAAS | CodeQL |
+|---|---|---|---|---|---|
+| **main** (release) | [![Gate (main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml/badge.svg?branch=main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml?query=branch%3Amain) | [![CI (main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/ci.yml?query=branch%3Amain) | [![Security Audit (main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/security-audit.yml/badge.svg?branch=main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/security-audit.yml?query=branch%3Amain) | [![CAAS (main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/caas.yml/badge.svg?branch=main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/caas.yml?query=branch%3Amain) | [![CodeQL (main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/codeql.yml?query=branch%3Amain) |
+| **dev** (development) | [![Gate (dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml?query=branch%3Adev) | [![CI (dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/ci.yml?query=branch%3Adev) | [![Security Audit (dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/security-audit.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/security-audit.yml?query=branch%3Adev) | [![CAAS (dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/caas.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/caas.yml?query=branch%3Adev) | [![CodeQL (dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/codeql.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/codeql.yml?query=branch%3Adev) |
+<!-- CI-STATUS-TABLE-END -->
+
+Project-wide (branch-independent — not pinned to `main` or `dev`):
+
 [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=shrec_UltrafastSecp256k1&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=shrec_UltrafastSecp256k1)
-[![CodeQL](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/codeql.yml/badge.svg?branch=dev)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/codeql.yml)
 [![OSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/shrec/UltrafastSecp256k1/badge)](https://securityscorecards.dev/viewer/?uri=github.com/shrec/UltrafastSecp256k1)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19685027-blue.svg)](https://doi.org/10.5281/zenodo.19685027)
-
-> All CI badges track the `dev` branch — the active development branch where all work happens. Releases are tagged on `main` only when explicitly authorized by the repository owner.
 
 ---
 
@@ -55,7 +59,7 @@ It is not a trust request. It is a verification package.
 
 > **No external third-party security audit has been performed.** All audit evidence is self-generated and independently reproducible via CAAS. See [SECURITY.md](SECURITY.md) §Audit Status.
 
-> **Audit methodology:** CAAS (Continuous Automated Assurance System) — a multi-layer automated audit framework: LLVM ct-verif, Valgrind taint analysis, dudect statistical timing, 436-module unified runner with 270 exploit PoC tests.
+> **Audit methodology:** CAAS (Continuous Automated Assurance System) — a multi-layer automated audit framework: LLVM ct-verif, Valgrind taint analysis, dudect statistical timing, 478-module unified runner with 276 exploit PoC tests.
 
 **Reproduce from patch (primary — stable):**
 ```bash
@@ -91,7 +95,7 @@ python3 ci/caas_runner.py --profile bitcoin-core-backend --json -o btc.json
 → [`docs/BITCOIN_CORE_BACKEND_EVIDENCE.md`](docs/BITCOIN_CORE_BACKEND_EVIDENCE.md) — evidence package  
 → [`docs/DER_PARITY_MATRIX.md`](docs/DER_PARITY_MATRIX.md) — DER/parser parity
 
-**CT signing (CT-vs-CT, production-equivalent, GCC 14.2.0, 2026-05-30):** **~1.33× ECDSA · ~1.26× Schnorr** vs libsecp256k1 (turbo lock CONFIRMED: intel_pstate/no_turbo=1, governor=performance, taskset -c 0 nice -20). Canonical data: [`docs/bench_unified_2026-05-30_gcc14_x86-64.json`](docs/bench_unified_2026-05-30_gcc14_x86-64.json). Full compiler breakdown: [docs/BITCOIN_CORE_BACKEND_EVIDENCE.md §CT Signing](docs/BITCOIN_CORE_BACKEND_EVIDENCE.md).
+**CT signing (CT-vs-CT, production-equivalent, GCC 14.2.0, 2026-09-07):** **~1.52× ECDSA · ~1.48× Schnorr** vs libsecp256k1 (turbo lock CONFIRMED: intel_pstate/no_turbo=1, governor=performance, taskset -c 0 nice -20). Canonical data: [`docs/bench_unified_2026-09-07_gcc14_x86-64.json`](docs/bench_unified_2026-09-07_gcc14_x86-64.json). Full compiler breakdown: [docs/BITCOIN_CORE_BACKEND_EVIDENCE.md §CT Signing](docs/BITCOIN_CORE_BACKEND_EVIDENCE.md).
 
 > **ConnectBlock (primary block-validation workload):** within ±1.5% of libsecp256k1 depending on build configuration.
 > - With Release+LTO (GCC 14.2.0, **required for any positive result — without LTO the result is negative**): **+0.9–1.5%** across ConnectBlock aggregate profiles (AllEcdsa, AllSchnorr, Mixed)
@@ -270,7 +274,7 @@ This project: `code → test → execution → evidence → continuous verificat
 We do not rely on trust. We provide reproducible evidence.
 
 - Every exploit attempt becomes a permanent regression test
-- Every commit runs ≈600K explicitly itemized field/scalar/point/CT assertions (plus full-suite KAT/differential/fuzz checks, not individually counted) across 166 non-exploit audit modules and 270 exploit PoCs ( 436 modules total; count via `python3 ci/sync_module_count.py`; canonical data: `docs/canonical_data.json`)
+- Every commit runs ≈600K explicitly itemized field/scalar/point/CT assertions (plus full-suite KAT/differential/fuzz checks, not individually counted) across 202 non-exploit audit modules and 276 exploit PoCs ( 478 modules total; count via `python3 ci/sync_module_count.py`; canonical data: `docs/canonical_data.json`)
 - Every claim maps to a test in [docs/AUDIT_TRACEABILITY.md](docs/AUDIT_TRACEABILITY.md)
 - Every performance number has pinned compiler/driver/toolkit versions and raw logs
 
@@ -303,13 +307,13 @@ Benchmark numbers and historical milestones are maintained in [`docs/BENCHMARKS.
 
 > All performance claims in this README link to that document. Do not rely on inline numbers without checking the corresponding benchmark entry for hardware, batch size, and measurement conditions.
 >
-> Canonical raw data (GCC 14.2.0, 2026-05-30): [`docs/bench_unified_2026-05-30_gcc14_x86-64.json`](docs/bench_unified_2026-05-30_gcc14_x86-64.json)
+> Canonical raw data (GCC 14.2.0, 2026-09-07): [`docs/bench_unified_2026-09-07_gcc14_x86-64.json`](docs/bench_unified_2026-09-07_gcc14_x86-64.json)
 
 ## Why UltrafastSecp256k1? — Detail
 
 > TL;DR is above. This section covers what differentiates this library in depth.
 
-- **Continuous adversarial audit system** -- every exploit attempt becomes a permanent regression test; ≈600K explicitly itemized field/scalar/point/CT assertions (plus full-suite KAT/differential/fuzz checks, not individually counted) per release evidence run, 270 exploit PoCs runner modules in `unified_audit_runner.cpp` (some source files contain multiple registered test functions; all wired, verified by `ci/check_exploit_wiring.py`) across 200+ attack vectors, a block-based PR/push gate, release CAAS gate, and manual deep-assurance workflows — security hardens through executable evidence, not snapshot PDFs ([→ how it works](#engineering-quality--self-audit-culture))
+- **Continuous adversarial audit system** -- every exploit attempt becomes a permanent regression test; ≈600K explicitly itemized field/scalar/point/CT assertions (plus full-suite KAT/differential/fuzz checks, not individually counted) per release evidence run, 276 exploit PoCs runner modules in `unified_audit_runner.cpp` (some source files contain multiple registered test functions; all wired, verified by `ci/check_exploit_wiring.py`) across 200+ attack vectors, a block-based PR/push gate, release CAAS gate, and manual deep-assurance workflows — security hardens through executable evidence, not snapshot PDFs ([→ how it works](#engineering-quality--self-audit-culture))
 - **High-performance CPU secp256k1 engine** -- optimized generator multiply, scalar multiply, hashing, and serialization pipelines across x86-64, ARM64, RISC-V, and embedded targets ([see bench_unified ratio table](docs/BENCHMARKS.md))
 - **Built for modern secp256k1 workloads** -- signing, verification, wallet derivation, threshold protocols, adaptor signatures, ZK primitives, address generation, and large-scale public-key pipelines in one engine
 - **Dual-layer security** -- variable-time FAST path for throughput, constant-time CT path for secret-key operations
@@ -349,8 +353,8 @@ Full adopter list: [ADOPTERS.md](docs/ADOPTERS.md)
 
 [![GitHub stars](https://img.shields.io/github/stars/shrec/UltrafastSecp256k1?style=flat-square&logo=github&label=Stars)](https://github.com/shrec/UltrafastSecp256k1/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/shrec/UltrafastSecp256k1?style=flat-square&logo=github&label=Forks)](https://github.com/shrec/UltrafastSecp256k1/network/members)
-[![Gate](https://img.shields.io/github/actions/workflow/status/shrec/UltrafastSecp256k1/gate.yml?branch=dev&label=Gate)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml)
-[![Research](https://img.shields.io/github/actions/workflow/status/shrec/UltrafastSecp256k1/research-monitor.yml?branch=dev&label=Research)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/research-monitor.yml)
+[![Gate (dev)](https://img.shields.io/github/actions/workflow/status/shrec/UltrafastSecp256k1/gate.yml?branch=dev&label=Gate%20%28dev%29)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/gate.yml?query=branch%3Adev)
+[![Research (dev)](https://img.shields.io/github/actions/workflow/status/shrec/UltrafastSecp256k1/research-monitor.yml?branch=dev&label=Research%20%28dev%29)](https://github.com/shrec/UltrafastSecp256k1/actions/workflows/research-monitor.yml?query=branch%3Adev)
 [![Release](https://img.shields.io/github/v/release/shrec/UltrafastSecp256k1?label=Release)](https://github.com/shrec/UltrafastSecp256k1/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
@@ -475,7 +479,7 @@ In addition to the `unified_audit_runner`, UltrafastSecp256k1 ships exploit-styl
 | Self-Test / Recovery | self-test API behavior and recovery boundary cases |
 | Batch Verify | aggregate verification math correctness |
 
-> All 270 registered exploit-PoC modules live in `audit/test_exploit_*.cpp` (258 source files; some files register multiple modules). Build with `python3 ci/configure_build.py audit` (or `cmake -S . -B out/audit -G Ninja -DCMAKE_BUILD_TYPE=Release`) and run them standalone or via `ctest`.
+> All 276 registered exploit-PoC modules live in `audit/test_exploit_*.cpp` (264 source files; some files register multiple modules). Build with `python3 ci/configure_build.py audit` (or `cmake -S . -B out/audit -G Ninja -DCMAKE_BUILD_TYPE=Release`) and run them standalone or via `ctest`.
 
 ### Self-Audit Document Index
 
@@ -864,7 +868,7 @@ Full CPU signature support and GPU public-data batch verification:
 
 ### CPU Signature Benchmarks
 
-Current release-grade CPU signature numbers are kept in benchmark artifacts, not duplicated here. Use [`docs/bench_unified_2026-05-30_gcc14_x86-64.json`](docs/bench_unified_2026-05-30_gcc14_x86-64.json) for the canonical GCC 14.2.0 run and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology, hardware notes, and historical comparisons.
+Current release-grade CPU signature numbers are kept in benchmark artifacts, not duplicated here. Use [`docs/bench_unified_2026-09-07_gcc14_x86-64.json`](docs/bench_unified_2026-09-07_gcc14_x86-64.json) for the canonical GCC 14.2.0 run and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology, hardware notes, and historical comparisons.
 
 ---
 
@@ -878,10 +882,10 @@ The `ct::` namespace provides constant-time operations for secret-key material -
 | Generator Mul (k×G) | 9,200 ns | 15,347 ns | 1.67× |
 | Scalar Inverse | — | 2,503 ns | CT-only |
 | Point Add (complete) | — | 400 ns | CT-only |
-| ECDSA sign (end-to-end) | 22,063 ns | 21,945 ns | **0.99× (CT faster)** |
-| Schnorr sign (end-to-end) | 17,980 ns | 17,804 ns | **0.99× (CT faster)** |
+| ECDSA sign (end-to-end) | 19,442 ns | 19,311 ns | **0.99× (CT faster)** |
+| Schnorr sign (end-to-end) | 15,219 ns | 15,233 ns | **1.00× (parity)** |
 
-*GCC 14.2.0, Intel i5-14400F, turbo disabled, CPU-pinned. Source: [`docs/bench_unified_2026-05-30_gcc14_x86-64.json`](docs/bench_unified_2026-05-30_gcc14_x86-64.json)*
+*GCC 14.2.0, Intel i5-14400F, turbo disabled, CPU-pinned. Source: [`docs/bench_unified_2026-09-07_gcc14_x86-64.json`](docs/bench_unified_2026-09-07_gcc14_x86-64.json)*
 
 **CT layer provides:** `ct::field_mul`, `ct::field_inv`, `ct::scalar_mul`, `ct::point_add_complete`, `ct::point_dbl`
 
@@ -1287,7 +1291,7 @@ Two security profiles are **always active** -- no flag-based selection:
 ### CT / Hardened Profile (`ct::` namespace)
 
 - Constant-time arithmetic -- no secret-dependent branches or memory access
-- ~1.1–1.9× performance penalty vs FAST for primitive operations (see CT overhead table in docs/BENCHMARKS.md; release-grade measurement: `docs/bench_unified_2026-05-30_gcc14_x86-64.json`, CT overhead table, GCC 14.2.0)
+- ~1.1–1.9× performance penalty vs FAST for primitive operations (see CT overhead table in docs/BENCHMARKS.md; release-grade measurement: `docs/bench_unified_2026-09-07_gcc14_x86-64.json`, CT overhead table, GCC 14.2.0)
 - Use for: signing, private key handling, nonce generation, ECDH
 
 **Choose the appropriate profile for your use case.** Using FAST with secret data is a security vulnerability.
@@ -1620,7 +1624,7 @@ cosign verify-blob SHA256SUMS \
 | [GPU Validation Matrix](docs/GPU_VALIDATION_MATRIX.md) | Per-backend op coverage and validation status |
 | [Feature Maturity](docs/FEATURE_MATURITY.md) | Per-feature GPU/CT/fuzz/tier status table |
 | [Supported Guarantees](include/ufsecp/SUPPORTED_GUARANTEES.md) | ABI stability tiers and commitment levels |
-| [Audit Coverage](docs/AUDIT_COVERAGE.md) | Full audit report with 166 non-exploit modules + 270 exploit PoCs and platform verdicts |
+| [Audit Coverage](docs/AUDIT_COVERAGE.md) | Full audit report with 202 non-exploit modules + 276 exploit PoCs and platform verdicts |
 | [Audit Guide](docs/AUDIT_GUIDE.md) | How to run and interpret audit suite |
 | [Test Matrix](docs/TEST_MATRIX.md) | Comprehensive test coverage map for auditors |
 | [ARM64 Audit & Benchmark](docs/ARM64_AUDIT_BENCHMARK.md) | ARM64 platform certification and performance analysis |
@@ -1686,6 +1690,8 @@ We want to acknowledge the teams whose public work informed parts of our journey
 - **Pieter Wuille, Jonas Nick, Tim Ruffing** and the libsecp256k1 maintainers -- For publicly sharing research and implementation insights on side-channel resistance, exhaustive testing, field representation trade-offs, and practical optimization techniques. Their published work was valuable to study in the later optimization phase and helped us push our independently built engine further.
 - **[@craigraw](https://github.com/craigraw)** ([Sparrow Wallet](https://sparrowwallet.com)) -- For creating the [bench_bip352](https://github.com/craigraw/bench_bip352) standalone BIP-352 Silent Payments scanning benchmark, which provided an independent, reproducible pipeline comparison between secp256k1 implementations.
 - **Community / GigaChad** -- For running the full CUDA test suite on RTX 5070 Ti (Blackwell), confirming 45/45 tests pass, and identifying the `CMAKE_CUDA_SEPARABLE_COMPILATION` flag required for Blackwell devices. Results in [docs/COMMUNITY_BENCHMARKS.md](docs/COMMUNITY_BENCHMARKS.md).
+- **[@kawacukennedy](https://github.com/kawacukennedy)** -- For systematic code review across CPU, GPU (CUDA/OpenCL/Metal), and bindings layers, reporting 9 verified issues including Metal `is_ready()` guard omissions ([#344](https://github.com/shrec/UltrafastSecp256k1/issues/344)), CUDA device memory leaks ([#345](https://github.com/shrec/UltrafastSecp256k1/issues/345)), OpenCL synchronization gaps ([#346](https://github.com/shrec/UltrafastSecp256k1/issues/346)), Metal sentinel guard omissions ([#347](https://github.com/shrec/UltrafastSecp256k1/issues/347)), and API/documentation inconsistencies ([#343](https://github.com/shrec/UltrafastSecp256k1/issues/343), [#348](https://github.com/shrec/UltrafastSecp256k1/issues/348), [#349](https://github.com/shrec/UltrafastSecp256k1/issues/349), [#350](https://github.com/shrec/UltrafastSecp256k1/issues/350), [#352](https://github.com/shrec/UltrafastSecp256k1/issues/352)).
+- **[@tatotogonidze-cmd](https://github.com/tatotogonidze-cmd)** -- For the BIP-352 GPU audit coverage finding ([#384](https://github.com/shrec/UltrafastSecp256k1/pull/384)): independently diagnosing that CPU-only builds linked no GPU provider, and separating "a GPU backend was selected" from "the operation actually ran" -- the latter was a silent-pass advisory in our own regression, where an available backend with an unsupported `bip352_scan_batch_multispend` reported PASS having verified nothing.
 
 We share our optimizations, GPU kernels, embedded ports, and cross-platform techniques freely -- because open-source cryptography grows stronger when knowledge flows in every direction.
 

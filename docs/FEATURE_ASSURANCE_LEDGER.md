@@ -2,7 +2,7 @@
 
 **Generated:** 2026-04-06
 **Scope:** All `UFSECP_API` exported functions + internal library capabilities
-**Total API functions:** 200
+**Total API functions:** 210
 
 ## Legend
 
@@ -159,15 +159,18 @@
 
 ---
 
-## 8. Bitcoin Addresses (3 functions)
+## 8. Bitcoin Addresses (6 functions)
 
 | Function | Unit Test | Fuzz | Adversarial | Differential | CT Path | GPU | Ext. Vectors | Zeroization |
 |----------|-----------|------|-------------|--------------|---------|-----|-------------|-------------|
 | `ufsecp_addr_p2pkh` | Y | Y | Y | - | N/A (public) | - | - | N/A |
 | `ufsecp_addr_p2wpkh` | Y | Y | Y | - | N/A | - | - | N/A |
 | `ufsecp_addr_p2tr` | Y | Y | Y | - | N/A | - | Y (BIP-341) | N/A |
+| `ufsecp_addr_p2sh` | Y | Y | Y | Y (context-entry parity) | N/A (public) | - | - | N/A |
+| `ufsecp_addr_p2sh_with_ctx` | Y (`regression_p2sh_context_abi`) | - | Y (null/network/buffer) | Y (legacy output parity) | N/A (public) | - | - | N/A |
+| `ufsecp_addr_p2sh_p2wpkh` | Y | Y | Y | - | N/A (public) | - | - | N/A |
 
-**Test files:** `audit/test_ffi_round_trip.cpp`, `audit/test_fuzz_address_bip32_ffi.cpp`, `audit/test_adversarial_protocol.cpp`
+**Test files:** `audit/test_ffi_round_trip.cpp`, `audit/test_fuzz_address_bip32_ffi.cpp`, `audit/test_adversarial_protocol.cpp`, `audit/test_regression_p2sh_context_abi.cpp`
 
 ---
 
@@ -630,6 +633,8 @@ Backend-neutral GPU acceleration surface (`ufsecp_gpu.h`). Separate opaque conte
 | `ufsecp_gpu_tagged_hash_var` | fb | Y | fb | Y (GPU==shim tagged_sha256) | libbitcoin: TapLeaf per-item-length tagged hash; CUDA native kernel, OpenCL/Metal CPU fallback |
 | `ufsecp_gpu_hash256` | fb | Y | fb | Y (GPU==SHA256d ref) | libbitcoin: batch HASH256 / merkle node hashing; CUDA native kernel, OpenCL/Metal CPU fallback |
 | `ufsecp_gpu_hash256_var` | Y | Y | Y | Y (GPU==SHA256d ref, cross-backend parity) | libbitcoin: batch variable-length HASH256 (txid/wtxid preimage primitive, no tag prefix, no tx parsing); CUDA/OpenCL/Metal native block-streaming SHA-256 kernels (no fixed-buffer cap); stride <= kMaxHash256VarStride (4 MiB); host-validates per-row input_lens[i] in [1,stride] |
+| `ufsecp_gpu_merkle_pair_hash` | Y | Y | Y | Y (GPU==SHA256d ref, cross-backend parity) | libbitcoin: batch Merkle pair HASH256 (left32 || right32, SoA column layout, fixed 2×32-byte input per row); CUDA/OpenCL/Metal native on-device kernels; PUBLIC-DATA variable-time; covered by test_regression_merkle_pair_hash.cpp + test_exploit_merkle_pair_bounds.cpp |
+| `ufsecp_gpu_sighash_descriptor_hash` | Y | Y (real hardware, RTX 5060 Ti) | Y (source-complete, code-reviewed; NOT Apple-hardware-verified) | Y (GPU==CPU HASH256 oracle, KAT) | libbitcoin: descriptor-shaped Bitcoin sighash preimage HASH256 (legacy/BIP143-style only; rejects Taproot field IDs 0x0C-0x0F); streams each referenced field column directly into a running SHA-256 context (no full preimage buffer materialized). PUBLIC-DATA variable-time — no secret key/nonce/scalar touched. CUDA and OpenCL were both built and executed on real NVIDIA hardware (RTX 5060 Ti): `regression_sighash_descriptor_gpu` passed 66/66 and `exploit_sighash_descriptor_malformed` passed 77/77 across both backends (round-4 evidence, accepted 2026-07-12). Metal remains source-implemented and code-reviewed only — NOT hardware-run (no Apple device available). Covered by `test_regression_sighash_descriptor_gpu.cpp` (KAT/boundary) + `test_exploit_sighash_descriptor_malformed.cpp` (hostile-input/malformed-descriptor). |
 | `ufsecp_gpu_ecdsa_verify_lbtc_columns` | Y | Y | Y | Y (GPU==CPU lbtc columns) | libbitcoin: batch ECDSA column verify (digests32 | pubkeys33 | opaque-LE sig64); Structure-of-Arrays layout |
 | `ufsecp_gpu_schnorr_verify_lbtc_columns` | Y | Y | Y | Y (GPU==CPU lbtc columns) | libbitcoin: batch Schnorr column verify (digests32 | xonly32 | BIP-340 sig64); Structure-of-Arrays layout |
 | `ufsecp_gpu_frost_verify_partial_batch` | Y | Y | Y | - | Batch FROST partial verification |
@@ -641,7 +646,9 @@ Backend-neutral GPU acceleration surface (`ufsecp_gpu.h`). Separate opaque conte
 | `ufsecp_gpu_bip324_aead_decrypt_batch` | - | - | - | CUDA only | Batch BIP-324 AEAD decrypt |
 | `ufsecp_gpu_zk_ecdsa_snark_witness_batch` | Y | Y | Y | CUDA+OpenCL | ECDSA SNARK witness batch (eprint 2025/695) |
 | `ufsecp_gpu_zk_schnorr_snark_witness_batch` | Y | Y | Y | - | Schnorr SNARK witness batch (GPU kernel pending — stubs return Unsupported) |
-| `ufsecp_gpu_bip352_scan_batch` | Y | Y | Y | CUDA+OpenCL | BIP-352 Silent Payment GPU batch scan; scan_privkey SECRET-BEARING |
+| `ufsecp_gpu_bip352_scan_batch` | Y | Y | Y | CUDA+OpenCL | BIP-352 Silent Payment GPU batch scan; scan_privkey SECRET-BEARING; non-virtual `n_spend=1` wrapper around `bip352_scan_batch_multispend` (issue #335) |
+| `ufsecp_gpu_bip352_scan_batch_multispend` | Y | Y | Y | CUDA (CPU-oracle verified, byte-exact at every 64-bit limb boundary); OpenCL (2026-07-16, RTX 5060 Ti, real on-device end-to-end run — see below) | Multi-spend-key BIP-352 scan (issue #335): ECDH/tagged-hash/hash×G once per tweak, one mixed add per (tweak,spend) cell; scan_privkey SECRET-BEARING. `GpuBackend::bip352_scan_batch_multispend` is pure virtual (2026-07-15 acceptance repair) — no backend can silently rely on an `Unsupported` default; `ci/check_gpu_backend_parity.py`'s `MUST_BE_PURE_VIRTUAL`/`NO_EXCEPTION_ALLOWED` (2026-07-16) hard-reject any future regression of this or any doc-table waiver attempt. ABI rejects output/input pointer-range overlap; OpenCL checks every driver call (all 18 documented control-call sites, not just some) and fails closed; CUDA has local bounds validation + a fail-closed output guard. OpenCL implemented natively and on-device VERIFIED 2026-07-16 (`audit/test_exploit_opencl_bip352_control_call_failclosed.cpp`: `37 passed, 0 failed, 0 inconclusive`; `audit/test_regression_opencl_kernel_resolver_unrelated_cwd.cpp`: `3 passed, 0 failed`) — the independently-documented OpenCL JIT-compile stall on `secp256k1_bip352.cl` is non-deterministic (confirmed present on some runs, absent on others, same machine/driver) and did not occur on this run; Metal on-device run remains blocked by lack of Apple hardware on this machine — see `benchmarks/github_issue_335/README.md` and `benchmarks/github_issue_335/opencl_round3_evidence/README.md` |
+| `ufsecp_gpu_set_metal_shader_path` | N/A (Metal-only) | N/A (Metal-only) | Y | N/A (no cross-backend equivalence — config, not a batch op) | Explicit absolute-path override for Metal shader/metallib discovery (issue #335); no-op-safe (symbol present, validates input, has no effect) on CUDA/OpenCL builds and non-Metal platforms |
 
 **Test file:** `audit/test_gpu_abi_gate.cpp` (opaque-row alias negative tests),
 `audit/test_gpu_ops_equivalence.cpp`, `audit/test_gpu_lbtc_columns_diff.cpp`,

@@ -31,51 +31,51 @@ class Secp256k1
     private FFI $ffi;
 
     private const C_HEADER = <<<'CDEF'
-    const char* secp256k1_version(void);
-    int secp256k1_init(void);
+    const char* ultrafast_secp256k1_version(void);
+    int ultrafast_secp256k1_init(void);
 
-    int secp256k1_ec_pubkey_create(const uint8_t* privkey, uint8_t* pubkey_out);
-    int secp256k1_ec_pubkey_create_uncompressed(const uint8_t* privkey, uint8_t* pubkey_out);
-    int secp256k1_ec_pubkey_parse(const uint8_t* input, size_t input_len, uint8_t* pubkey_out);
-    int secp256k1_ec_seckey_verify(const uint8_t* privkey);
-    int secp256k1_ec_privkey_negate(uint8_t* privkey);
-    int secp256k1_ec_privkey_tweak_add(uint8_t* privkey, const uint8_t* tweak);
-    int secp256k1_ec_privkey_tweak_mul(uint8_t* privkey, const uint8_t* tweak);
+    int ultrafast_secp256k1_ec_pubkey_create(const uint8_t* privkey, uint8_t* pubkey_out);
+    int ultrafast_secp256k1_ec_pubkey_create_uncompressed(const uint8_t* privkey, uint8_t* pubkey_out);
+    int ultrafast_secp256k1_ec_pubkey_parse(const uint8_t* input, size_t input_len, uint8_t* pubkey_out);
+    int ultrafast_secp256k1_ec_seckey_verify(const uint8_t* privkey);
+    int ultrafast_secp256k1_ec_privkey_negate(uint8_t* privkey);
+    int ultrafast_secp256k1_ec_privkey_tweak_add(uint8_t* privkey, const uint8_t* tweak);
+    int ultrafast_secp256k1_ec_privkey_tweak_mul(uint8_t* privkey, const uint8_t* tweak);
 
-    int secp256k1_ecdsa_sign(const uint8_t* msg_hash, const uint8_t* privkey, uint8_t* sig_out);
-    int secp256k1_ecdsa_verify(const uint8_t* msg_hash, const uint8_t* sig, const uint8_t* pubkey);
-    int secp256k1_ecdsa_signature_serialize_der(const uint8_t* sig, uint8_t* der_out, size_t* der_len);
+    int ultrafast_secp256k1_ecdsa_sign(const uint8_t* msg_hash, const uint8_t* privkey, uint8_t* sig_out);
+    int ultrafast_secp256k1_ecdsa_verify(const uint8_t* msg_hash, const uint8_t* sig, const uint8_t* pubkey);
+    int ultrafast_secp256k1_ecdsa_signature_serialize_der(const uint8_t* sig, uint8_t* der_out, size_t* der_len);
 
-    int secp256k1_ecdsa_sign_recoverable(const uint8_t* msg_hash, const uint8_t* privkey, uint8_t* sig_out, int* recid_out);
-    int secp256k1_ecdsa_recover(const uint8_t* msg_hash, const uint8_t* sig, int recid, uint8_t* pubkey_out);
+    int ultrafast_secp256k1_ecdsa_sign_recoverable(const uint8_t* msg_hash, const uint8_t* privkey, uint8_t* sig_out, int* recid_out);
+    int ultrafast_secp256k1_ecdsa_recover(const uint8_t* msg_hash, const uint8_t* sig, int recid, uint8_t* pubkey_out);
 
-    int secp256k1_schnorr_sign(const uint8_t* msg, const uint8_t* privkey, const uint8_t* aux_rand, uint8_t* sig_out);
-    int secp256k1_schnorr_verify(const uint8_t* msg, const uint8_t* sig, const uint8_t* pubkey_x);
-    int secp256k1_schnorr_pubkey(const uint8_t* privkey, uint8_t* pubkey_x_out);
+    int ultrafast_secp256k1_schnorr_sign(const uint8_t* msg, const uint8_t* privkey, const uint8_t* aux_rand, uint8_t* sig_out);
+    int ultrafast_secp256k1_schnorr_verify(const uint8_t* msg, const uint8_t* sig, const uint8_t* pubkey_x);
+    int ultrafast_secp256k1_schnorr_pubkey(const uint8_t* privkey, uint8_t* pubkey_x_out);
 
-    int secp256k1_ecdh(const uint8_t* privkey, const uint8_t* pubkey, uint8_t* secret_out);
-    int secp256k1_ecdh_xonly(const uint8_t* privkey, const uint8_t* pubkey, uint8_t* secret_out);
-    int secp256k1_ecdh_raw(const uint8_t* privkey, const uint8_t* pubkey, uint8_t* secret_out);
+    int ultrafast_secp256k1_ecdh(const uint8_t* privkey, const uint8_t* pubkey, uint8_t* secret_out);
+    int ultrafast_secp256k1_ecdh_xonly(const uint8_t* privkey, const uint8_t* pubkey, uint8_t* secret_out);
+    int ultrafast_secp256k1_ecdh_raw(const uint8_t* privkey, const uint8_t* pubkey, uint8_t* secret_out);
 
-    void secp256k1_sha256(const uint8_t* data, size_t data_len, uint8_t* digest_out);
-    void secp256k1_hash160(const uint8_t* data, size_t data_len, uint8_t* digest_out);
-    void secp256k1_tagged_hash(const char* tag, const uint8_t* data, size_t data_len, uint8_t* digest_out);
+    void ultrafast_secp256k1_sha256(const uint8_t* data, size_t data_len, uint8_t* digest_out);
+    void ultrafast_secp256k1_hash160(const uint8_t* data, size_t data_len, uint8_t* digest_out);
+    void ultrafast_secp256k1_tagged_hash(const char* tag, const uint8_t* data, size_t data_len, uint8_t* digest_out);
 
-    int secp256k1_address_p2pkh(const uint8_t* pubkey, int network, char* addr_out, size_t* addr_len);
-    int secp256k1_address_p2wpkh(const uint8_t* pubkey, int network, char* addr_out, size_t* addr_len);
-    int secp256k1_address_p2tr(const uint8_t* internal_key_x, int network, char* addr_out, size_t* addr_len);
+    int ultrafast_secp256k1_address_p2pkh(const uint8_t* pubkey, int network, char* addr_out, size_t* addr_len);
+    int ultrafast_secp256k1_address_p2wpkh(const uint8_t* pubkey, int network, char* addr_out, size_t* addr_len);
+    int ultrafast_secp256k1_address_p2tr(const uint8_t* internal_key_x, int network, char* addr_out, size_t* addr_len);
 
-    int secp256k1_wif_encode(const uint8_t* privkey, int compressed, int network, char* wif_out, size_t* wif_len);
-    int secp256k1_wif_decode(const char* wif, uint8_t* privkey_out, int* compressed_out, int* network_out);
+    int ultrafast_secp256k1_wif_encode(const uint8_t* privkey, int compressed, int network, char* wif_out, size_t* wif_len);
+    int ultrafast_secp256k1_wif_decode(const char* wif, uint8_t* privkey_out, int* compressed_out, int* network_out);
 
-    int secp256k1_bip32_master_key(const uint8_t* seed, size_t seed_len, uint8_t* key_out);
-    int secp256k1_bip32_derive_path(const uint8_t* master, const char* path, uint8_t* key_out);
-    int secp256k1_bip32_get_privkey(const uint8_t* key, uint8_t* privkey_out);
-    int secp256k1_bip32_get_pubkey(const uint8_t* key, uint8_t* pubkey_out);
+    int ultrafast_secp256k1_bip32_master_key(const uint8_t* seed, size_t seed_len, uint8_t* key_out);
+    int ultrafast_secp256k1_bip32_derive_path(const uint8_t* master, const char* path, uint8_t* key_out);
+    int ultrafast_secp256k1_bip32_get_privkey(const uint8_t* key, uint8_t* privkey_out);
+    int ultrafast_secp256k1_bip32_get_pubkey(const uint8_t* key, uint8_t* pubkey_out);
 
-    int secp256k1_taproot_output_key(const uint8_t* internal_key_x, const uint8_t* merkle_root, uint8_t* output_key_x_out, int* parity_out);
-    int secp256k1_taproot_tweak_privkey(const uint8_t* privkey, const uint8_t* merkle_root, uint8_t* tweaked_privkey_out);
-    int secp256k1_taproot_verify_commitment(const uint8_t* output_key_x, int output_key_parity, const uint8_t* internal_key_x, const uint8_t* merkle_root, size_t merkle_root_len);
+    int ultrafast_secp256k1_taproot_output_key(const uint8_t* internal_key_x, const uint8_t* merkle_root, uint8_t* output_key_x_out, int* parity_out);
+    int ultrafast_secp256k1_taproot_tweak_privkey(const uint8_t* privkey, const uint8_t* merkle_root, uint8_t* tweaked_privkey_out);
+    int ultrafast_secp256k1_taproot_verify_commitment(const uint8_t* output_key_x, int output_key_parity, const uint8_t* internal_key_x, const uint8_t* merkle_root, size_t merkle_root_len);
     CDEF;
 
     /**
@@ -86,15 +86,15 @@ class Secp256k1
         $path = $libPath ?? $this->findLibrary();
         $this->ffi = FFI::cdef(self::C_HEADER, $path);
 
-        $rc = $this->ffi->secp256k1_init();
+        $rc = $this->ffi->ultrafast_secp256k1_init();
         if ($rc !== 0) {
-            throw new RuntimeException('secp256k1_init() failed: library selftest failure');
+            throw new RuntimeException('ultrafast_secp256k1_init() failed: library selftest failure');
         }
     }
 
     public function version(): string
     {
-        return FFI::string($this->ffi->secp256k1_version());
+        return FFI::string($this->ffi->ultrafast_secp256k1_version());
     }
 
     // ── Key Operations ───────────────────────────────────────────────────
@@ -104,7 +104,7 @@ class Secp256k1
     {
         self::check($privkey, 32, 'privkey');
         $out = $this->alloc(33);
-        $rc = $this->ffi->secp256k1_ec_pubkey_create($this->ptr($privkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_ec_pubkey_create($this->ptr($privkey), $out);
         if ($rc !== 0) throw new InvalidArgumentException('Invalid private key');
         return FFI::string($out, 33);
     }
@@ -114,7 +114,7 @@ class Secp256k1
     {
         self::check($privkey, 32, 'privkey');
         $out = $this->alloc(65);
-        $rc = $this->ffi->secp256k1_ec_pubkey_create_uncompressed($this->ptr($privkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_ec_pubkey_create_uncompressed($this->ptr($privkey), $out);
         if ($rc !== 0) throw new InvalidArgumentException('Invalid private key');
         return FFI::string($out, 65);
     }
@@ -123,7 +123,7 @@ class Secp256k1
     public function ecPubkeyParse(string $pubkey): string
     {
         $out = $this->alloc(33);
-        $rc = $this->ffi->secp256k1_ec_pubkey_parse($this->ptr($pubkey), strlen($pubkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_ec_pubkey_parse($this->ptr($pubkey), strlen($pubkey), $out);
         if ($rc !== 0) throw new InvalidArgumentException('Invalid public key');
         return FFI::string($out, 33);
     }
@@ -132,7 +132,7 @@ class Secp256k1
     public function ecSeckeyVerify(string $privkey): bool
     {
         self::check($privkey, 32, 'privkey');
-        return $this->ffi->secp256k1_ec_seckey_verify($this->ptr($privkey)) === 1;
+        return $this->ffi->ultrafast_secp256k1_ec_seckey_verify($this->ptr($privkey)) === 1;
     }
 
     /** Negate private key. */
@@ -140,7 +140,7 @@ class Secp256k1
     {
         self::check($privkey, 32, 'privkey');
         $buf = $this->allocCopy($privkey, 32);
-        $rc = $this->ffi->secp256k1_ec_privkey_negate($buf);
+        $rc = $this->ffi->ultrafast_secp256k1_ec_privkey_negate($buf);
         if ($rc !== 0) throw new \RuntimeException('ec_privkey_negate failed: invalid (zero) key');
         return FFI::string($buf, 32);
     }
@@ -151,7 +151,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         self::check($tweak, 32, 'tweak');
         $buf = $this->allocCopy($privkey, 32);
-        $rc = $this->ffi->secp256k1_ec_privkey_tweak_add($buf, $this->ptr($tweak));
+        $rc = $this->ffi->ultrafast_secp256k1_ec_privkey_tweak_add($buf, $this->ptr($tweak));
         if ($rc !== 0) throw new RuntimeException('Tweak add produced invalid key');
         return FFI::string($buf, 32);
     }
@@ -162,7 +162,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         self::check($tweak, 32, 'tweak');
         $buf = $this->allocCopy($privkey, 32);
-        $rc = $this->ffi->secp256k1_ec_privkey_tweak_mul($buf, $this->ptr($tweak));
+        $rc = $this->ffi->ultrafast_secp256k1_ec_privkey_tweak_mul($buf, $this->ptr($tweak));
         if ($rc !== 0) throw new RuntimeException('Tweak mul produced invalid key');
         return FFI::string($buf, 32);
     }
@@ -175,7 +175,7 @@ class Secp256k1
         self::check($msgHash, 32, 'msgHash');
         self::check($privkey, 32, 'privkey');
         $sig = $this->alloc(64);
-        $rc = $this->ffi->secp256k1_ecdsa_sign($this->ptr($msgHash), $this->ptr($privkey), $sig);
+        $rc = $this->ffi->ultrafast_secp256k1_ecdsa_sign($this->ptr($msgHash), $this->ptr($privkey), $sig);
         if ($rc !== 0) throw new RuntimeException('ECDSA signing failed');
         return FFI::string($sig, 64);
     }
@@ -186,7 +186,7 @@ class Secp256k1
         self::check($msgHash, 32, 'msgHash');
         self::check($sig, 64, 'sig');
         self::check($pubkey, 33, 'pubkey');
-        return $this->ffi->secp256k1_ecdsa_verify(
+        return $this->ffi->ultrafast_secp256k1_ecdsa_verify(
             $this->ptr($msgHash), $this->ptr($sig), $this->ptr($pubkey)
         ) === 1;
     }
@@ -197,7 +197,7 @@ class Secp256k1
         self::check($sig, 64, 'sig');
         $der = $this->alloc(72);
         $len = $this->allocSize(72);
-        $rc = $this->ffi->secp256k1_ecdsa_signature_serialize_der($this->ptr($sig), $der, $len);
+        $rc = $this->ffi->ultrafast_secp256k1_ecdsa_signature_serialize_der($this->ptr($sig), $der, $len);
         if ($rc !== 0) throw new RuntimeException('DER serialization failed');
         return FFI::string($der, $len[0]);
     }
@@ -211,7 +211,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         $sig = $this->alloc(64);
         $recid = $this->allocInt();
-        $rc = $this->ffi->secp256k1_ecdsa_sign_recoverable(
+        $rc = $this->ffi->ultrafast_secp256k1_ecdsa_sign_recoverable(
             $this->ptr($msgHash), $this->ptr($privkey), $sig, $recid
         );
         if ($rc !== 0) throw new RuntimeException('Recoverable signing failed');
@@ -224,7 +224,7 @@ class Secp256k1
         self::check($msgHash, 32, 'msgHash');
         self::check($sig, 64, 'sig');
         $pubkey = $this->alloc(33);
-        $rc = $this->ffi->secp256k1_ecdsa_recover(
+        $rc = $this->ffi->ultrafast_secp256k1_ecdsa_recover(
             $this->ptr($msgHash), $this->ptr($sig), $recid, $pubkey
         );
         if ($rc !== 0) throw new RuntimeException('Recovery failed');
@@ -240,7 +240,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         self::check($auxRand, 32, 'auxRand');
         $sig = $this->alloc(64);
-        $rc = $this->ffi->secp256k1_schnorr_sign(
+        $rc = $this->ffi->ultrafast_secp256k1_schnorr_sign(
             $this->ptr($msg), $this->ptr($privkey), $this->ptr($auxRand), $sig
         );
         if ($rc !== 0) throw new RuntimeException('Schnorr signing failed');
@@ -253,7 +253,7 @@ class Secp256k1
         self::check($msg, 32, 'msg');
         self::check($sig, 64, 'sig');
         self::check($pubkeyX, 32, 'pubkeyX');
-        return $this->ffi->secp256k1_schnorr_verify(
+        return $this->ffi->ultrafast_secp256k1_schnorr_verify(
             $this->ptr($msg), $this->ptr($sig), $this->ptr($pubkeyX)
         ) === 1;
     }
@@ -263,7 +263,7 @@ class Secp256k1
     {
         self::check($privkey, 32, 'privkey');
         $out = $this->alloc(32);
-        $rc = $this->ffi->secp256k1_schnorr_pubkey($this->ptr($privkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_schnorr_pubkey($this->ptr($privkey), $out);
         if ($rc !== 0) throw new InvalidArgumentException('Invalid private key');
         return FFI::string($out, 32);
     }
@@ -276,7 +276,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         self::check($pubkey, 33, 'pubkey');
         $out = $this->alloc(32);
-        $rc = $this->ffi->secp256k1_ecdh($this->ptr($privkey), $this->ptr($pubkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_ecdh($this->ptr($privkey), $this->ptr($pubkey), $out);
         if ($rc !== 0) throw new RuntimeException('ECDH failed');
         return FFI::string($out, 32);
     }
@@ -287,7 +287,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         self::check($pubkey, 33, 'pubkey');
         $out = $this->alloc(32);
-        $rc = $this->ffi->secp256k1_ecdh_xonly($this->ptr($privkey), $this->ptr($pubkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_ecdh_xonly($this->ptr($privkey), $this->ptr($pubkey), $out);
         if ($rc !== 0) throw new RuntimeException('ECDH xonly failed');
         return FFI::string($out, 32);
     }
@@ -298,7 +298,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         self::check($pubkey, 33, 'pubkey');
         $out = $this->alloc(32);
-        $rc = $this->ffi->secp256k1_ecdh_raw($this->ptr($privkey), $this->ptr($pubkey), $out);
+        $rc = $this->ffi->ultrafast_secp256k1_ecdh_raw($this->ptr($privkey), $this->ptr($pubkey), $out);
         if ($rc !== 0) throw new RuntimeException('ECDH raw failed');
         return FFI::string($out, 32);
     }
@@ -309,7 +309,7 @@ class Secp256k1
     public function sha256(string $data): string
     {
         $out = $this->alloc(32);
-        $this->ffi->secp256k1_sha256($this->ptr($data), strlen($data), $out);
+        $this->ffi->ultrafast_secp256k1_sha256($this->ptr($data), strlen($data), $out);
         return FFI::string($out, 32);
     }
 
@@ -317,7 +317,7 @@ class Secp256k1
     public function hash160(string $data): string
     {
         $out = $this->alloc(20);
-        $this->ffi->secp256k1_hash160($this->ptr($data), strlen($data), $out);
+        $this->ffi->ultrafast_secp256k1_hash160($this->ptr($data), strlen($data), $out);
         return FFI::string($out, 20);
     }
 
@@ -325,7 +325,7 @@ class Secp256k1
     public function taggedHash(string $tag, string $data): string
     {
         $out = $this->alloc(32);
-        $this->ffi->secp256k1_tagged_hash($tag, $this->ptr($data), strlen($data), $out);
+        $this->ffi->ultrafast_secp256k1_tagged_hash($tag, $this->ptr($data), strlen($data), $out);
         return FFI::string($out, 32);
     }
 
@@ -336,7 +336,7 @@ class Secp256k1
     {
         self::check($pubkey, 33, 'pubkey');
         return $this->getAddress(
-            fn($buf, $len) => $this->ffi->secp256k1_address_p2pkh($this->ptr($pubkey), $network, $buf, $len)
+            fn($buf, $len) => $this->ffi->ultrafast_secp256k1_address_p2pkh($this->ptr($pubkey), $network, $buf, $len)
         );
     }
 
@@ -345,7 +345,7 @@ class Secp256k1
     {
         self::check($pubkey, 33, 'pubkey');
         return $this->getAddress(
-            fn($buf, $len) => $this->ffi->secp256k1_address_p2wpkh($this->ptr($pubkey), $network, $buf, $len)
+            fn($buf, $len) => $this->ffi->ultrafast_secp256k1_address_p2wpkh($this->ptr($pubkey), $network, $buf, $len)
         );
     }
 
@@ -354,7 +354,7 @@ class Secp256k1
     {
         self::check($internalKeyX, 32, 'internalKeyX');
         return $this->getAddress(
-            fn($buf, $len) => $this->ffi->secp256k1_address_p2tr($this->ptr($internalKeyX), $network, $buf, $len)
+            fn($buf, $len) => $this->ffi->ultrafast_secp256k1_address_p2tr($this->ptr($internalKeyX), $network, $buf, $len)
         );
     }
 
@@ -365,7 +365,7 @@ class Secp256k1
     {
         self::check($privkey, 32, 'privkey');
         return $this->getAddress(
-            fn($buf, $len) => $this->ffi->secp256k1_wif_encode(
+            fn($buf, $len) => $this->ffi->ultrafast_secp256k1_wif_encode(
                 $this->ptr($privkey), $compressed ? 1 : 0, $network, $buf, $len
             )
         );
@@ -377,7 +377,7 @@ class Secp256k1
         $privkey = $this->alloc(32);
         $comp = $this->allocInt();
         $net = $this->allocInt();
-        $rc = $this->ffi->secp256k1_wif_decode($wif, $privkey, $comp, $net);
+        $rc = $this->ffi->ultrafast_secp256k1_wif_decode($wif, $privkey, $comp, $net);
         if ($rc !== 0) throw new InvalidArgumentException('Invalid WIF string');
         return [FFI::string($privkey, 32), $comp[0] === 1, $net[0]];
     }
@@ -390,7 +390,7 @@ class Secp256k1
         $len = strlen($seed);
         if ($len < 16 || $len > 64) throw new InvalidArgumentException('Seed must be 16-64 bytes');
         $key = $this->alloc(79);
-        $rc = $this->ffi->secp256k1_bip32_master_key($this->ptr($seed), $len, $key);
+        $rc = $this->ffi->ultrafast_secp256k1_bip32_master_key($this->ptr($seed), $len, $key);
         if ($rc !== 0) throw new RuntimeException('Master key generation failed');
         return FFI::string($key, 79);
     }
@@ -400,7 +400,7 @@ class Secp256k1
     {
         self::check($masterKey, 79, 'masterKey');
         $key = $this->alloc(79);
-        $rc = $this->ffi->secp256k1_bip32_derive_path($this->ptr($masterKey), $path, $key);
+        $rc = $this->ffi->ultrafast_secp256k1_bip32_derive_path($this->ptr($masterKey), $path, $key);
         if ($rc !== 0) throw new RuntimeException("Path derivation failed: $path");
         return FFI::string($key, 79);
     }
@@ -410,7 +410,7 @@ class Secp256k1
     {
         self::check($key, 79, 'key');
         $privkey = $this->alloc(32);
-        $rc = $this->ffi->secp256k1_bip32_get_privkey($this->ptr($key), $privkey);
+        $rc = $this->ffi->ultrafast_secp256k1_bip32_get_privkey($this->ptr($key), $privkey);
         if ($rc !== 0) throw new RuntimeException('Key is not a private key');
         return FFI::string($privkey, 32);
     }
@@ -420,7 +420,7 @@ class Secp256k1
     {
         self::check($key, 79, 'key');
         $pubkey = $this->alloc(33);
-        $rc = $this->ffi->secp256k1_bip32_get_pubkey($this->ptr($key), $pubkey);
+        $rc = $this->ffi->ultrafast_secp256k1_bip32_get_pubkey($this->ptr($key), $pubkey);
         if ($rc !== 0) throw new RuntimeException('Public key extraction failed');
         return FFI::string($pubkey, 33);
     }
@@ -434,7 +434,7 @@ class Secp256k1
         $out = $this->alloc(32);
         $parity = $this->allocInt();
         $mr = $merkleRoot !== null ? $this->ptr($merkleRoot) : null;
-        $rc = $this->ffi->secp256k1_taproot_output_key($this->ptr($internalKeyX), $mr, $out, $parity);
+        $rc = $this->ffi->ultrafast_secp256k1_taproot_output_key($this->ptr($internalKeyX), $mr, $out, $parity);
         if ($rc !== 0) throw new RuntimeException('Taproot output key failed');
         return [FFI::string($out, 32), $parity[0]];
     }
@@ -445,7 +445,7 @@ class Secp256k1
         self::check($privkey, 32, 'privkey');
         $out = $this->alloc(32);
         $mr = $merkleRoot !== null ? $this->ptr($merkleRoot) : null;
-        $rc = $this->ffi->secp256k1_taproot_tweak_privkey($this->ptr($privkey), $mr, $out);
+        $rc = $this->ffi->ultrafast_secp256k1_taproot_tweak_privkey($this->ptr($privkey), $mr, $out);
         if ($rc !== 0) throw new RuntimeException('Taproot tweak failed');
         return FFI::string($out, 32);
     }

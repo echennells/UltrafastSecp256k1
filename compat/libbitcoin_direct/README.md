@@ -44,7 +44,7 @@ and in explicit normalization/standardness utilities.
 | **`ecdsa_verify_columns` / `schnorr_verify_columns`** (Structure-of-Arrays, MT) | ✅ done + tested — **matches libbitcoin's column-span batch** |
 | parallelism: fused parallel parse+verify, **7.6× / 16 cores** (no serial-parse Amdahl wall) | ✅ validated |
 | public-data batch ops (`xonly_validate`, `pubkey_validate`, `taproot_commitment_verify`, `tagged_hash`, `tagged_hash_var`, `hash256`, `hash256_var`) | ✅ done + tested — one direct API, transparent GPU hook, deterministic CPU fallback |
-| sign / recover / keys / math / serialize / context | ⏳ next increment |
+| sign / recover / keys / math / serialize / context | ✅ done + tested — ECDSA (sign/verify/normalize/DER/compact), recoverable sign/recover (hedged + standard), pubkey create/parse/serialize/combine/negate/tweak (compressed + uncompressed), seckey verify/negate/tweak, Schnorr sign/verify/xonly/keypair, taproot tweak_add_check, context no-ops |
 | silent payments (BIP-352 scan) | ⏳ engine has `bip352_*`; awaiting evoskuil's `silent::batch` design |
 | GPU verify / scan | ✅ direct libbitcoin GPU hook for columns + public-data batch ops; BIP-352 scan remains engine-level until libbitcoin exposes its batch design |
 
@@ -138,6 +138,36 @@ deterministic CPU fallback, not a GPU performance claim.
 
 The shim, the C ABI, and the `ufsecp_lbtc_*` bridge are compatibility-only and
 live behind a separate flag — `-DSECP256K1_BUILD_LIBBITCOIN_BRIDGE=ON`.
+
+## Windows / MSVC toolchain notes
+
+The GPU accelerator path (`SECP256K1_BUILD_LIBBITCOIN_GPU=ON`) retains the
+self-installing `GpuColumnsVerifyHook` provider object (`gpu_engine_hook.cpp`)
+at link time using a linker option, because none of these executables
+reference any symbol in that object directly. That option is
+**platform-specific**:
+
+| toolchain | linker option |
+|-----------|---------------|
+| GCC / Clang / any GNU-like linker | `LINKER:--undefined=secp256k1_gpu_columns_provider_anchor` |
+| MSVC (`link.exe`, Visual Studio 17 2022) | `LINKER:/INCLUDE:secp256k1_gpu_columns_provider_anchor` |
+
+CMake selects the correct option automatically via `if(MSVC)` in this file —
+no consumer action required. Using the GNU-style flag unconditionally on
+MSVC means `link.exe` does not retain the anchor object, the self-installing
+hook never runs, and `SECP256K1_BUILD_LIBBITCOIN_GPU=ON` silently downgrades
+to CPU-only column verify on Windows — no build error, no test failure, just
+a lost optimization. See `docs/WINDOWS_CUDA_BUILD_CONTRACT.md` for the full
+contract, the CI fixture proving the retention actually happens
+(`ci/fixtures/pr353_msvc_link_retention/`), and the adversarial CUDA fixture
+for the `field_mul_small` reserved-name collision with Windows `<rpcndr.h>`
+(`ci/fixtures/pr353_windows_small_macro_smoke.cu`).
+
+A real `SECP256K1_BUILD_CUDA=ON` + `SECP256K1_BUILD_LIBBITCOIN_GPU=ON`
+Windows binary additionally needs the NVIDIA CUDA Toolkit's MSBuild
+integration; that combination is currently exercised only outside this
+repo's GitHub-hosted CI — see `docs/WINDOWS_CUDA_BUILD_CONTRACT.md`'s
+"Unresolved limitations".
 
 ## Consumer rule
 

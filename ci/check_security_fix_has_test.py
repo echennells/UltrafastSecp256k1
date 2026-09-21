@@ -98,6 +98,18 @@ TEST_PATTERNS = (
 # commit (retroactive coverage). The gate accepts these provided the named
 # test file exists on disk. Format: sha_prefix → [test_file, reason].
 RETROACTIVELY_COVERED: dict[str, tuple[list[str], str]] = {
+    "8c25dd3eb1": (
+        ["audit/test_regression_scalar_decomposition_and_comb.cpp"],
+        "Pure dead-code removal: jac52_add_mixed_inplace_zr (src/cpu/src/point.cpp) "
+        "lost its only caller in 49925a1a, which made the co-Z table build the default "
+        "and deleted the #else arm that called it. A static function with no callers "
+        "emits no code, so the deletion has no behavioural effect -- but GCC 14's "
+        "-Wunused-function made the Security Audit 'Build with -Werror' job fail on "
+        "every push. The surviving co-Z table path is covered by "
+        "test_regression_scalar_decomposition_and_comb (515 boundary scalars, k*P vs "
+        "(k-1)*P + P, fast:: vs ct::), and the -Werror job is itself the regression "
+        "gate for the warning.",
+    ),
     "ce2906b86c": (
         ["compat/libsecp256k1_shim/tests/shim_test.cpp", "ci/run_libsecp_shim_api_test.sh"],
         "CI security gate wiring commit: enabled the already-existing shim API/layout "
@@ -720,7 +732,7 @@ RETROACTIVELY_COVERED: dict[str, tuple[list[str], str]] = {
 # Frozen count guard (CAAS-006): prevents silent whitelist growth.
 # When adding a new entry above, increment this constant too.
 # Unauthorized bypass (adding an entry without incrementing) → import-time assertion failure.
-RETROACTIVELY_COVERED_FROZEN_COUNT: int = 64
+RETROACTIVELY_COVERED_FROZEN_COUNT: int = 65
 assert len(RETROACTIVELY_COVERED) == RETROACTIVELY_COVERED_FROZEN_COUNT, (
     f"RETROACTIVELY_COVERED has {len(RETROACTIVELY_COVERED)} entries but "
     f"RETROACTIVELY_COVERED_FROZEN_COUNT={RETROACTIVELY_COVERED_FROZEN_COUNT}. "

@@ -13,6 +13,211 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-21 v4.6.0 — the field defects were correctness, not CT
+
+Two field bugs fixed in this release returned **wrong answers for legal inputs**,
+and it is worth being precise about what that does and does not say about the CT
+claims in this document.
+
+`reduce()` lost a carry two ways and `FieldElement::sqrt()` returned a non-root
+for ~18% of inputs. Neither is a timing or a secrecy defect: no branch or memory
+access became data-dependent, no secret was exposed through a side channel, and
+no CT boundary in the table below moved. They are correctness defects, and the CT
+claims here were never claims of correctness.
+
+What they do say is that **a green KAT suite is not evidence for a surface the
+KATs do not reach**. Both defects live on the 4x64 chain; the BIP-340 hot paths
+run on `FieldElement52`, so every standard vector stayed green while
+`ellswift`, `adaptor`, `zk`, `pedersen` and `address` were calling a `sqrt()`
+that returned a non-root almost one time in five. The affected callers that
+re-validate `y^2 == x^3+7` turned it into a false negative; the ones that do not
+propagated an off-curve y. The fix for `reduce()` is pinned by an exact-limb
+regression over the trigger family plus 200,000 randomised rows compared at
+32-byte granularity against big-integer ground truth — never through normalised
+`operator==`, which is exactly what hid it.
+
+CT surfaces in the table below are unaffected by both, and their evidence is
+unchanged.
+
+### 2026-09-21 v4.6.0 — OpenCL scan-only guard and a dead co-Z helper (no CT boundary moved)
+
+Two changes reach the gate-watched surface (`CHANGELOG.md`); neither moves a CT
+boundary, and this records why rather than waiving the classification.
+
+**`src/opencl/kernels/secp256k1_extended.cl` — preprocessor only.**
+`SECP256K1_OPENCL_SCAN_ONLY` (GitHub issue #415) excludes the four
+`secp256k1_ct_*.cl` includes and every function and kernel that reaches them, so
+a consumer embedding the six scan-only kernel files can compile them with the
+`#include` lines stripped. No statement inside any CT routine was edited, no
+scalar-mul or inverse was substituted, and the CT sign/ECDH paths are unchanged
+in every build that defines nothing. Verified as text identity rather than
+asserted: preprocessing the file with no macro defined, before (`17fceb76`) and
+after, yields 2169 identical lines and an empty diff. A scan-only build does not
+contain the CT sign paths at all — it therefore makes no CT claim about them.
+
+**`src/cpu/src/point.cpp` — dead code removed.** `jac52_add_mixed_inplace_zr`
+lost its only caller in `49925a1a` (the `#else` arm superseded by the co-Z table
+build) and was deleted. A static function with no callers emits no code, so no
+CT surface, timing profile or instruction sequence changes. The co-Z path that
+replaced its call site keeps its existing coverage under
+`regression_scalar_decomposition_and_comb`.
+
+**CT evidence:** the residual CT artifacts in `audit/ci-evidence/` were refreshed
+from real runs on this tree the same day — `regression_ct_ops` 42/42,
+`adversarial_protocol` 793/793, `ecies_regression` 92/92, `fuzz_parsers`
+580019/580019, `fuzz_address_bip32_ffi` 82976/82976, 0 crashes.
+
+### 2026-09-15 legacy c_api renamed off libsecp256k1's namespace (no CT boundary moved)
+
+The 36 functions in `bindings/c_api` are `ultrafast_secp256k1_*` now instead of
+`secp256k1_*`. Recorded here because the secret-path gate classifies `CHANGELOG.md`
+as a CT secret-bearing surface.
+
+**No constant-time property changes and no cryptographic code was edited.** The
+change is C symbol names, the export macro (`ULTRAFAST_SECP256K1_API`) and the
+linker version script. Each renamed function's body is byte-for-byte what it was
+and still delegates to the same `secp256k1::ct::*` / `secp256k1::fast::*` primitive.
+No branch, table index or memory access became dependent on secret data, and none
+stopped being.
+
+The defect repaired is an ABI-safety one, not a timing one -- see
+[`SECURITY_CLAIMS.md`](SECURITY_CLAIMS.md) and
+[`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) under the same date, and KB
+`BCH-SCHNORR-CAPI-SYMBOL-COLLISION`.
+
+### 2026-09-14 ecdsa.cpp — RFC 6979 algo16 became a parameter (no CT boundary moved)
+
+`rfc6979_nonce_libsecp_compat` gained an optional `algo16` argument so the BCH
+Schnorr shim can pass the tag its specification requires. `src/cpu/src/ecdsa.cpp`
+is a CT secret-bearing surface, so the classification is answered here.
+
+**The HMAC-DRBG is untouched.** The keydata layout, the V/K ladder, the fixed
+two-iteration candidate loop (CT-001) and every `secure_erase` are exactly as
+they were. The only change is which 16 bytes get appended: `nullptr` selects the
+`"ECDSA\0..."` constant the function always used, so every existing caller --
+`ct::ecdsa_sign_libsecp_compat` and its recoverable variant -- produces
+byte-identical nonces to before. Verified by construction and by the 8/8
+cross-check against an independent RFC 6979 implementation described in
+`regression_bch_schnorr_spec`.
+
+**What the tag fixes is a CT-adjacent secret-lifetime defect, not a timing one.**
+The BCH shim previously called `rfc6979_nonce(d, msg)`, the same call
+`ct::ecdsa_sign` makes, so one nonce could serve two different signature
+equations and the private key is recoverable from that pair (16/16 recovered in
+measurement). Domain separation removes it. See
+[`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) and
+[`SECURITY_CLAIMS.md`](SECURITY_CLAIMS.md) under the same date, and KB
+`BCH-SCHNORR-NONCE-REUSE-ECDSA`.
+
+**On the shim side**, the quadratic-residue normalisation added to
+`secp256k1_schnorr_sign` negates the nonce through `ct::scalar_cneg` with an
+arithmetic mask (`(uint64_t)is_qr - 1`), not a branch. The bit being tested is
+public -- `R.x` is the signature's `r`, and anyone can `lift_x(r)` and recompute
+it -- but `k` is secret and the test sits inside its live range, so the negation
+is constant time regardless. The matching verifier check is variable-time, which
+is correct: verify is a public-data path (CT-VERIFY).
+
+### 2026-09-14 ct_point.cpp / point.cpp — co-Z table build and CT SafeGCD inverse became the default (no CT boundary moved)
+
+Two representation-search wins stopped being macro-guarded (`REPSEARCH_COZ_TABLE`,
+`REPSEARCH_CT_SAFEGCD_INV`) and became the default build; the superseded branches
+were deleted. The secret-path gate classifies `src/cpu/src/ct_point.cpp` as a CT
+secret-bearing surface, so the classification is answered here rather than waived.
+
+**Nothing became variable-time and nothing became constant-time.** Both changes
+replace one implementation with another *inside* the existing boundary.
+
+**1. Field inverse — `ct::ecmult_const_xonly`, `Point::batch_scalar_mul_fixed_k`.**
+Was `FieldElement52::inverse()`: the Fermat chain, 255 squarings + 15 multiplies,
+a fixed operation sequence and therefore constant-time. Is now `ct::field_inv`:
+Bernstein-Yang SafeGCD, 10 x 59 = 590 divsteps on `__int128` platforms and
+25 x 30 = 750 on the generic (MSVC / 32-bit) arm, both fixed iteration counts.
+`ct_divsteps_59` (`src/cpu/src/ct_field.cpp:262`) carries no branch and no memory
+access dependent on `f`, `g` or `zeta` — every conditional is a mask built from
+`zeta >> 63` and `-(g & 1)`. Unlike `ct::scalar_inverse`, whose multiply chain
+falls back to `fast::` when `__int128` is absent (SEC-001-INCOMPLETE), `field_inv`
+is constant-time on **both** dispatch arms.
+
+The inverted value is secret-derived at both sites, so a CT inverse is required at
+both: the ElligatorSwift XDH denominator is `R.z^2 * g * xd` where `R = q*P_eff`
+and `q` is the secret ECDH scalar; the batch site inverts a Montgomery prefix
+product of Z-coordinates derived from the `KPlan`'s scalar, which callers populate
+with the BIP-352 scan key (`bch_scan.cpp`, `sp_scan_batch_impl.hpp`, `address.cpp`)
+— a CT-mandatory input per CLAUDE.md. A CT inverse is what runs, before and after.
+Only the algorithm changed. See KB `FE52-INVERSE-CT-DOMINATED`.
+
+**2. Odd-multiple table build — four sites.** Was a mixed-add chain on an
+isomorphic curve (`jac_add_ge_var_zr`, `jac52_add_mixed_inplace_zr`); is now a
+co-Z DBLU/ZADDU chain (`jac52_dblu_ct` / `jac52_zaddu_ct` on the ct:: track,
+`jac52_dblu` / `jac52_zaddu_zr` on the fast:: track). **The table is a function of
+the base point only, never of the scalar** — before and after. `jac52_zaddu_ct`
+does hold one variable-time test, `dx.normalizes_to_zero_var()`, guarding the
+`X1 == X2` case ZADDU cannot represent; its timing is therefore a function of the
+base point, exactly as the `_var` mixed add it replaces already was. No branch,
+table index or memory access in either chain reads the secret scalar. The scalar
+is consumed afterwards by `table_lookup_core`, which is untouched.
+
+Evidence: `regression_table_build_invariants` gained section (5)
+`ecmult_const_xonly(x_P, 1, q) == x(q*P)` over 16 random cases and section (6)
+`batch_scalar_mul_fixed_k(k) == scalar_mul(k)` over 64 points — the two sites
+newly on the default path that sections (1)-(3) could not reach. 12/12 checks
+pass. Equivalence to the previously-measured macro-on build was established as
+code identity: `point.cpp` and `ct_point.cpp` compiled from the default tree emit
+assembly identical to the prior tree compiled with both macros set.
+
+### 2026-09-07 precompute.cpp / CMakeLists.txt — fixed-base cache location and no-op reconfigure (no CT surface moved)
+
+Two changes touch files the secret-path gate classifies as CT secret-bearing
+surfaces. **Neither moves a CT boundary**, and both are recorded here so the
+classification is answered rather than waived.
+
+- **Fixed-base table cached in the per-user cache directory.** The table is
+  precomputed multiples of the generator `G` — public data any observer can
+  derive independently. Nothing secret has ever been written to
+  `cache_w*.bin`, so no advisory is warranted for the earlier revisions that
+  left the file in the caller's working directory; it was a filesystem
+  side-effect defect, not a key-material disclosure. What changed is the
+  location (per-user cache directory, created and kept; never the CWD) and the
+  fact that the table is built once and loaded thereafter.
+- **`configure_fixed_base()` no longer invalidates on a no-op.** Re-applying an
+  identical configuration keeps the built context instead of recomputing it. The
+  comparison is over the whole configuration, so the context and `g_config` can
+  never describe different settings. This changes *when* a public table is
+  rebuilt, not what any constant-time primitive does: `ct::scalar_mul`,
+  `ct::generator_mul_blinded`, `ct::scalar_inverse` and the RFC 6979 nonce path
+  are untouched, and no branch or memory access anywhere became dependent on
+  secret data.
+
+Tests: `regression_fixed_base_cache_lifecycle` (FBC-1..4, location and
+lifetime, both cache modes) and `regression_precompute_noop_reconfigure`
+(PNR-1..4, with a negative control proving a real config change still
+invalidates).
+
+### 2026-09-10 GPU compact-ECDSA strict-range guard — public-data boundary, no CT boundary moved
+
+Three files the secret-path gate classifies as CT secret-bearing surfaces gained
+a guard for public compact-signature scalars; this section answers that
+classification rather than waiving it.
+
+- **`src/cuda/include/ecdsa.cuh`**, **`src/metal/shaders/secp256k1_extended.h`**,
+  **`src/opencl/kernels/secp256k1_extended.cl`**: `ecdsa_verify()` on each GPU
+  backend now rejects a compact signature with `r >= n` or `s >= n` up front,
+  before the `scalar_inverse()` call, so every verify route (single, batch,
+  collect, sign-and-verify) shares one strict compact contract. The CUDA batch
+  path keeps its strict `ecdsa_sig_parse_compact_strict` parse.
+- **CT status: unchanged.** The guard compares the two public scalars `r`, `s`
+  of the already-parsed 64-byte compact signature against the group order `n`.
+  Both are public data; the comparisons are public-data (variable-time is
+  permitted for them), and no secret value reaches a new branch or memory
+  access. No CT primitive changed, no constant-time code path was made
+  variable-time, and the failure exits return before the verify math that
+  touches secret-path state.
+- Pinned by `gpu_ecdsa_compact_range` — `[A]` CPU-only source gate asserts the
+  guard sits inside each backend's `ecdsa_verify()` body before
+  `scalar_inverse()` (kills any helper-stranding regression), `[B]` on-device
+  small-`(r,s)` boundary differential through batch and collect vs the CPU
+  strict oracle. Identity with the entry in `docs/SECURITY_CLAIMS.md`.
+
 ### 2026-06-01 ct_sign.cpp — variable-length Schnorr CT sign overload (SHIM-001 restore)
 
 - **`src/cpu/src/ct_sign.cpp`**: added a variable-length overload
@@ -126,7 +331,7 @@
 
 
 
-**UltrafastSecp256k1 v4.5.0** -- CT Layer Methodology & Audit Status
+**UltrafastSecp256k1 v4.6.0** -- CT Layer Methodology & Audit Status
 
 ### 2026-05-11 ct_point::scalar_mul_jac_fe52_z1 — HAMBURG=true (xdh-dedicated path)
 
@@ -493,7 +698,7 @@ The OpenCL CT layer mirrors the CUDA CT implementation with OpenCL-native barrie
 - `value_barrier()` via inline OpenCL `asm volatile` or volatile loads
 - Branchless masks and conditional moves on all secret-dependent paths
 - CT scalar multiplication with fixed iteration count (GLV + signed-digit)
-- Audited via `opencl_audit_runner` ( 436 modules including CT sections)
+- Audited via `opencl_audit_runner` ( 478 modules including CT sections)
 
 ### Metal CT Layer
 
@@ -506,7 +711,7 @@ src/metal/shaders/
 The Metal CT layer uses Metal Shading Language (MSL) with:
 - `value_barrier()` via threadgroup memory fence pattern
 - Identical algorithms to CUDA/OpenCL CT layers
-- Audited via `metal_audit_runner` ( 436 modules including CT sections)
+- Audited via `metal_audit_runner` ( 478 modules including CT sections)
 
 ---
 
@@ -767,8 +972,8 @@ fixed iteration counts. All three GPU backends implement identical CT algorithms
 
 The GPU CT layers are tested via:
 - **CUDA**: `test_ct_smoke` (9 functional tests) + GPU audit runner (Section S6: CT Analysis)
-- **OpenCL**: `opencl_audit_runner` ( 436 modules including CT signing + CT ZK sections)
-- **Metal**: `metal_audit_runner` ( 436 modules including CT signing + CT ZK sections)
+- **OpenCL**: `opencl_audit_runner` ( 478 modules including CT signing + CT ZK sections)
+- **Metal**: `metal_audit_runner` ( 478 modules including CT signing + CT ZK sections)
 
 ### 5. Experimental Protocols
 
@@ -884,4 +1089,4 @@ add (unified_add_core<false>, 12M+2S) to incomplete mixed Jacobian+affine add
 fixed precomputed G multiples; degenerate probability ~2^-128. CT properties
 (fixed iteration count, branchless table lookup via cmov) unchanged. -->
 
-*UltrafastSecp256k1 v4.5.0 -- CT Verification*
+*UltrafastSecp256k1 v4.6.0 -- CT Verification*

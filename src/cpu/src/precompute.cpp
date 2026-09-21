@@ -71,6 +71,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
@@ -95,6 +96,7 @@
 #if defined(_WIN32)
 #include <process.h>  // _getpid()
 #include <io.h>       // _findfirst, _findnext
+#include <direct.h>   // _mkdir
 #else
 #include <unistd.h>   // getpid()
 #include <dirent.h>   // opendir, readdir
@@ -631,13 +633,52 @@ constexpr Limbs4 kGroupOrder{{
 std::mutex g_mutex;
 #endif
 FixedBaseConfig g_config{};
-// shared_ptr (not unique_ptr): scalar_mul_generator / batch_scalar_mul_generator
-// take a local shared_ptr snapshot under g_mutex, then release the lock and read the
-// tables. A concurrent configure_fixed_base() does g_context.reset(); with shared_ptr
-// the live snapshot keeps the PrecomputeContext alive until the reader finishes,
-// preventing a use-after-free (PRECOMPUTE-GCONTEXT-UAF). build_context() still returns
-// a unique_ptr, which converts to shared_ptr on assignment.
+#if SECP256K1_ESP32_BUILD
+// ESP32 has no desktop publication protocol or mutex. Its fixed-base fallback
+// keeps the historical single owner.
 std::shared_ptr<PrecomputeContext> g_context;
+#else
+// Desktop ownership/publication protocol (GitHub #336):
+//
+// * g_context_owner is accessed only while g_mutex is held.
+// * g_published_context is an identity token, never an unowned object handle.
+// * tl_context_owner is the lifetime owner for unlocked readers.
+//
+// A reader may dereference the published identity only by dereferencing the
+// matching TLS shared_ptr. A reset publishes nullptr before releasing the
+// mutex-owned owner, so an in-flight reader remains protected by its TLS owner.
+std::shared_ptr<PrecomputeContext> g_context_owner;
+std::atomic<PrecomputeContext const*> g_published_context{nullptr};
+// alignas(64): required for Android arm64, and right on its own merits.
+//
+// Bionic refuses to load an executable whose PT_TLS segment is aligned below
+// 64 bytes on arm64 ("executable's TLS segment is underaligned: alignment is 8,
+// needs to be at least 64 for ARM64 Bionic"). Every thread_local in this
+// library is naturally 8- or 16-aligned, so the segment came out at 8 and ANY
+// Android arm64 executable linking libfastsecp256k1 failed to start. Verified
+// on a Rockchip RK3588 (Cortex-A76) with a plain benchmark binary; the CI
+// android(arm64-v8a) job only cross-compiles and never executes on a device,
+// which is why this was never caught.
+//
+// Raising this one object to a cache line fixes the segment alignment for the
+// whole library, and it is the object worth aligning: it is the per-thread hot
+// owner on the issue #336 acquisition path, so a cache line of its own also
+// keeps it off a line shared with another thread's state.
+alignas(64) thread_local std::shared_ptr<PrecomputeContext const> tl_context_owner;
+
+static_assert(
+    std::atomic<PrecomputeContext const*>::is_always_lock_free,
+    "The issue #336 hot path requires an always-lock-free pointer atomic");
+
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+std::atomic<std::uint64_t> g_diagnostic_epoch{0};
+std::atomic<std::uint64_t> g_published_epoch{0};
+thread_local std::uint64_t tl_context_epoch{0};
+thread_local std::uint64_t tl_acquisition_calls{0};
+std::atomic<bool> g_test_pause_after_acquire{false};
+std::atomic<bool> g_test_acquire_paused{false};
+#endif
+#endif
 
 Scalar make_scalar(const std::array<std::uint8_t, 32>& bytes) {
     return Scalar::from_bytes(bytes);
@@ -1367,7 +1408,7 @@ std::unique_ptr<PrecomputeContext> build_context(const FixedBaseConfig& config) 
         window_bases[window] = base;
         if (window + 1 < ctx->window_count) {
             for (unsigned rep = 0; rep < ctx->window_bits; ++rep) {
-                base = base.dbl();
+                base.dbl_inplace();
             }
         }
     }
@@ -1444,7 +1485,7 @@ std::unique_ptr<PrecomputeContext> build_context(const FixedBaseConfig& config) 
 
         if (window + 1 < ctx->window_count) {
             for (unsigned rep = 0; rep < ctx->window_bits; ++rep) {
-                base = base.dbl();
+                base.dbl_inplace();
             }
         }
     }
@@ -2229,30 +2270,211 @@ ScalarDecomposition split_scalar_internal(const Scalar& scalar) {
 // Cache System
 // ============================================================================
 
+// g_mutex must be held by every caller. Construction and validation happen
+// before this function, then ownership is installed before the release-store
+// publishes its identity.
+void publish_context_locked(std::shared_ptr<PrecomputeContext> next) {
+    g_context_owner = std::move(next);
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+    const std::uint64_t epoch =
+        g_diagnostic_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_published_epoch.store(epoch, std::memory_order_relaxed);
+#endif
+    g_published_context.store(g_context_owner.get(), std::memory_order_release);
+}
+
+// g_mutex must be held by every caller. Publishing nullptr first prevents a
+// new reader from accepting the retiring identity. Existing readers keep the
+// allocation alive through tl_context_owner until their thread refreshes/exits.
+void invalidate_context_locked() {
+    g_published_context.store(nullptr, std::memory_order_release);
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+    const std::uint64_t epoch =
+        g_diagnostic_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_published_epoch.store(epoch, std::memory_order_release);
+#endif
+    g_context_owner.reset();
+}
+
 #if defined(__clang__)
 __attribute__((no_sanitize("memory")))
 #endif
-std::string get_default_cache_path(unsigned window_bits) {
-    // Build cache filename with GLV suffix if enabled
+// Create one directory. Existing is success; a missing parent is not created.
+bool make_directory(const std::string& path) {
+    if (path.empty()) return false;
+    struct stat st{};
+    if (::stat(path.c_str(), &st) == 0) {
+        return (st.st_mode & S_IFDIR) != 0;
+    }
+#if defined(_WIN32)
+    return _mkdir(path.c_str()) == 0 || errno == EEXIST;
+#else
+    return ::mkdir(path.c_str(), 0700) == 0 || errno == EEXIST;
+#endif
+}
+
+// mkdir -p, splitting on both separators so a Windows path works too.
+bool make_directories(const std::string& path) {
+    if (path.empty()) return false;
+    std::string built;
+    built.reserve(path.size());
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        char const c = path[i];
+        bool const sep = (c == '/' || c == '\\');
+        if (sep) {
+            // A leading "/" or a drive root ("C:\") is not a directory to create.
+            if (!built.empty() && built != "." && built.find_first_not_of("/\\") != std::string::npos &&
+                !(built.size() == 2 && built[1] == ':')) {
+                if (!make_directory(built)) return false;
+            }
+        }
+        built += c;
+    }
+    return make_directory(built);
+}
+
+// The system temp directory. Used only as a fallback when no per-user cache
+// directory can be determined -- a file placed there is session-scoped and is
+// removed when the process exits (see register_temp_cache_for_cleanup).
+//
+// Deliberately not std::filesystem::temp_directory_path(): it throws on a
+// missing TMPDIR target and reads env through libstdc++ internals that MSan
+// does not instrument. The variables below are the same ones it consults.
+std::string system_temp_dir() {
+    for (const char* var : {"TMPDIR", "TMP", "TEMP"}) {
+        const char* v = std::getenv(var);
+        if (v && *v) {
+            std::string d(v);
+            while (d.size() > 1 && (d.back() == '/' || d.back() == '\\')) d.pop_back();
+            return d;
+        }
+    }
+#if defined(_WIN32)
+    return ".";   // no TMP/TEMP set on Windows is pathological; stay put
+#else
+    return "/tmp";
+#endif
+}
+
+// Where the cache goes when the caller did not name a directory.
+//
+// The point of the cache is that the fixed-base table is built ONCE and every
+// later process loads it, so the default has to be somewhere that survives the
+// process -- the per-user cache directory the platform already reserves for
+// exactly this. Never the current working directory: a math library dropping a
+// 255 MB cache_w18.bin into whatever directory it happened to run in was
+// Eric Voskuil's report, and it is what this replaces.
+//
+//   Linux/BSD   $XDG_CACHE_HOME/secp256k1  else  $HOME/.cache/secp256k1
+//   macOS       $HOME/Library/Caches/secp256k1
+//   Windows     %LOCALAPPDATA%\secp256k1
+//
+// The same convention write_fixed_base_config() already used for the auto-tune
+// config file, so a machine keeps its table and its config side by side.
+//
+// `persistent` is false only when none of those could be determined or created
+// and we fell back to the temp directory. That is the one case where the file
+// is ours to delete on exit; a table in the user cache directory is the whole
+// point and stays.
+struct DefaultCacheDir {
+    std::string path;
+    bool persistent = false;
+};
+
+DefaultCacheDir compute_default_cache_dir() {
+    std::string user_dir;
+#if defined(_WIN32)
+    if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
+        if (*local_app_data) user_dir = std::string(local_app_data) + "\\secp256k1";
+    }
+#elif defined(__APPLE__)
+    if (const char* home = std::getenv("HOME")) {
+        if (*home) user_dir = std::string(home) + "/Library/Caches/secp256k1";
+    }
+#else
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
+        if (*xdg) user_dir = std::string(xdg) + "/secp256k1";
+    }
+    if (user_dir.empty()) {
+        if (const char* home = std::getenv("HOME")) {
+            if (*home) user_dir = std::string(home) + "/.cache/secp256k1";
+        }
+    }
+#endif
+    if (!user_dir.empty() && make_directories(user_dir)) {
+        return DefaultCacheDir{user_dir, true};
+    }
+    return DefaultCacheDir{system_temp_dir(), false};
+}
+
+// Resolved once: the answer cannot change within a process, and the directory
+// creation should not be repeated on every cache lookup.
+const DefaultCacheDir& default_cache_dir_info() {
+    static const DefaultCacheDir info = compute_default_cache_dir();
+    return info;
+}
+
+std::string default_cache_dir() { return default_cache_dir_info().path; }
+
+std::string cache_filename(unsigned window_bits) {
     std::string filename = "cache_w" + std::to_string(window_bits);
     if (g_config.enable_glv) {
         filename += "_glv";
     }
     filename += ".bin";
-    
-    // Use configured cache directory
-    if (!g_config.cache_dir.empty()) {
-        std::string cache_path = g_config.cache_dir + "/" + filename;
-        // Use stat() instead of std::filesystem::exists() to avoid
-        // MSan false positives from uninstrumented libstdc++ internals.
-        struct stat st;
-        if (::stat(cache_path.c_str(), &st) == 0) {
-            return cache_path;
-        }
-    }
-    
-    // Fall back to current directory
     return filename;
+}
+
+// Resolve the cache path for BOTH reading and writing.
+//
+// The previous version consulted cache_dir only when a file already existed
+// there and otherwise returned a bare filename -- i.e. the current working
+// directory. Two consequences, both reported from the field: a caller that had
+// set a cache directory still wrote its first cache into the CWD, and a caller
+// that had set nothing got a 255 MB cache_w18.bin dropped wherever it happened
+// to be running. Neither is a thing a math library should do.
+std::string get_default_cache_path(unsigned window_bits) {
+    std::string const filename = cache_filename(window_bits);
+    std::string const dir = g_config.cache_dir.empty() ? default_cache_dir()
+                                                       : g_config.cache_dir;
+    return dir + "/" + filename;
+}
+
+// True when the cache file is a temp-directory fallback that WE chose and that
+// is therefore ours to delete on exit.
+//
+// Two things have to hold. The caller must not have named a path or directory
+// -- a named location means the caller wants the file and keeps it. And our own
+// default must have fallen back to the temp directory, which happens only when
+// no per-user cache directory could be determined or created. A table in the
+// per-user cache directory is deliberately kept: building it once and loading
+// it ever after is the entire reason the cache exists.
+bool cache_path_is_ours() {
+    return !g_config.cache_path_set && g_config.cache_dir.empty() &&
+           !default_cache_dir_info().persistent;
+}
+
+// Remove-on-exit for a cache file this library placed in the temp directory.
+//
+// evoskuil's preference order was: don't write it at all; else let us control
+// the path; else treat it as a temp file that is cleaned up; and only last,
+// leave it in the working directory. The default is now the first of those, and
+// this makes the opt-in-without-a-path case the third rather than the fourth.
+//
+// std::atexit rather than a static destructor: the path is a plain C string
+// captured by value, so nothing here depends on the order in which other static
+// objects (including g_config) are destroyed.
+void register_temp_cache_for_cleanup(const std::string& path) {
+    static std::once_flag once;
+    static std::string kept_path;
+    std::call_once(once, [&path] {
+        kept_path = path;
+        std::atexit([] {
+            if (!kept_path.empty()) {
+                std::remove(kept_path.c_str());
+            }
+        });
+    });
 }
 
 bool write_field_element(std::ofstream& file, const FieldElement& fe) {
@@ -2296,12 +2518,24 @@ bool read_affine_point(std::ifstream& file, AffinePointPacked& point) {
 
 // Internal version without lock - must be called with g_mutex already locked
 bool save_precompute_cache_locked(const std::string& path) {
-    if (!g_context) {
+    if (!g_context_owner) {
         return false;  // Nothing to save
     }
     
-    PrecomputeContext const& ctx = *g_context;
-    
+    PrecomputeContext const& ctx = *g_context_owner;
+
+    // Create the directory if the caller named one that does not exist yet.
+    // Our own default is created when it is resolved; this covers
+    // set_cache_directory() / SECP256K1_CACHE_DIR pointing somewhere new, so
+    // "name a directory and the table lands there" works on the FIRST run
+    // rather than only after someone has created it by hand.
+    {
+        std::size_t const slash = path.find_last_of("/\\");
+        if (slash != std::string::npos && slash > 0) {
+            (void)make_directories(path.substr(0, slash));
+        }
+    }
+
     // Atomic write: write to a temporary file, then rename.
     // This prevents cross-process races where a reader sees a partially-written file
     // (e.g. when CTest runs tests in parallel with -j).
@@ -2474,8 +2708,7 @@ bool load_precompute_cache_locked(const std::string& path, unsigned max_windows)
         return false;
     }
     
-    // Install the loaded context
-    g_context = std::move(ctx);
+    publish_context_locked(std::shared_ptr<PrecomputeContext>(std::move(ctx)));
     
 #if SECP256K1_DEBUG_GLV
     auto load_end = std::chrono::steady_clock::now();
@@ -2530,7 +2763,7 @@ static bool load_precompute_from_static_w8() {
         }
     }
     if (!validate_precompute_context(*ctx)) return false;
-    g_context = std::move(ctx);
+    publish_context_locked(std::shared_ptr<PrecomputeContext>(std::move(ctx)));
     return true;
 }
 #endif // SECP256K1_CORE_BACKEND_MODE
@@ -2539,7 +2772,7 @@ static bool load_precompute_from_static_w8() {
 __attribute__((no_sanitize("memory")))
 #endif
 void ensure_built_locked() {
-    if (!g_context) {
+    if (!g_context_owner) {
 #if defined(SECP256K1_CORE_BACKEND_MODE)
         if (load_precompute_from_static_w8()) return;
         // Fallback: in-memory build (should not normally be reached)
@@ -2559,22 +2792,155 @@ void ensure_built_locked() {
                 return;
             }
             
-            // Cache load failed, use in-memory generation
-            g_context = build_context(g_config);
-            if (!g_context || !validate_precompute_context(*g_context)) {
+            std::shared_ptr<PrecomputeContext> next(build_context(g_config));
+            if (!next || !validate_precompute_context(*next)) {
                 throw std::runtime_error("Precompute context validation failed after cache fallback rebuild");
             }
-            
-            // Save to cache for next time
-            save_precompute_cache_locked(cache_path);
+            publish_context_locked(std::move(next));
+
+            // Save to cache for next time.
+            if (save_precompute_cache_locked(cache_path) && cache_path_is_ours()) {
+                // We chose this path (the temp default), so we clean it up.
+                // A caller who named a directory asked for persistence and keeps
+                // their file. Registered once; the path is stable for the process.
+                register_temp_cache_for_cleanup(cache_path);
+            }
         } else {
             // Cache disabled, just build in memory
-            g_context = build_context(g_config);
-            if (!g_context || !validate_precompute_context(*g_context)) {
+            std::shared_ptr<PrecomputeContext> next(build_context(g_config));
+            if (!next || !validate_precompute_context(*next)) {
                 throw std::runtime_error("Precompute context validation failed");
             }
+            publish_context_locked(std::move(next));
         }
     }
+}
+
+// Apply a complete desktop configuration while g_mutex is held. Keeping the
+// copy, environment overrides and invalidation in one critical section avoids
+// racing configure_fixed_base_auto()'s cache-directory preservation with
+// configure_fixed_base() or set_cache_directory().
+// Field-by-field equality. Deliberately exhaustive rather than a subset of
+// "the fields that shape the table": build_context() snapshots the WHOLE config
+// into ctx->config, and callers read settings back off that snapshot, so
+// keeping a context alive across a change to any field would let g_config and
+// ctx->config disagree. Comparing everything means the only thing this can do
+// is skip work that was provably unnecessary.
+bool same_fixed_base_config(const FixedBaseConfig& a, const FixedBaseConfig& b) {
+    return a.window_bits          == b.window_bits &&
+           a.enable_glv           == b.enable_glv &&
+           a.use_jsf              == b.use_jsf &&
+           a.adaptive_glv         == b.adaptive_glv &&
+           a.glv_min_window_bits  == b.glv_min_window_bits &&
+           a.use_comb             == b.use_comb &&
+           a.comb_width           == b.comb_width &&
+           a.thread_count         == b.thread_count &&
+           a.use_cache            == b.use_cache &&
+           a.cache_path           == b.cache_path &&
+           a.cache_path_set       == b.cache_path_set &&
+           a.cache_dir            == b.cache_dir &&
+           a.max_windows_to_load  == b.max_windows_to_load &&
+           a.progress_callback    == b.progress_callback &&
+           a.autotune             == b.autotune &&
+           a.autotune_iters       == b.autotune_iters &&
+           a.autotune_min_w       == b.autotune_min_w &&
+           a.autotune_max_w       == b.autotune_max_w &&
+           a.autotune_log_path    == b.autotune_log_path &&
+           a.db_path              == b.db_path &&
+           a.bloom_filter_path    == b.bloom_filter_path &&
+           a.fulldb_path          == b.fulldb_path;
+}
+
+// Apply a configuration, and rebuild the table only if the configuration
+// actually changed.
+//
+// Re-applying the SAME settings used to throw away the built context and
+// recompute it from scratch. That is a real cost -- the default window_bits=18
+// table is ~250 MB -- and callers reasonably configure defensively: Selftest()
+// (src/cpu/src/selftest.cpp) opens with `FixedBaseConfig cfg{}; configure...;
+// ensure_fixed_base_ready();` on EVERY invocation, so a process that ran the
+// selftest eight times rebuilt the table eight times.
+//
+// This went unnoticed while the disk cache defaulted on: each "rebuild" was a
+// load of cache_w18.bin rather than a recomputation. Turning that default off
+// (evoskuil's report: the file was being left in the caller's working
+// directory) removed the padding and exposed the waste -- audit/
+// test_exploit_selftest_api went from 6.6 s to a 120 s CI timeout, and the
+// whole ctest suite from 496 s to 1670 s. Measured on this tree, one binary,
+// SECP256K1_FIXED_BASE_DISK_CACHE toggled and nothing else:
+//   cache ON, cold  6.0 s     cache ON, warm  4.3 s     cache OFF  23.8-24.3 s
+//
+// The cache is not the fix and neither is a longer timeout: a no-op
+// reconfiguration should not be a quarter-gigabyte of arithmetic.
+void apply_fixed_base_config_locked(const FixedBaseConfig& config) {
+    FixedBaseConfig incoming = config;
+
+    if (incoming.adaptive_glv && incoming.enable_glv &&
+        incoming.window_bits < incoming.glv_min_window_bits) {
+        incoming.enable_glv = false;
+    }
+
+    // Environment overrides are folded in BEFORE the comparison: they are part
+    // of the effective configuration, so a second call with the same argument
+    // and the same environment has to compare equal.
+    if (const char* env_dir = std::getenv("SECP256K1_CACHE_DIR")) {
+        if (*env_dir && std::string(env_dir).find("..") == std::string::npos) {
+            incoming.cache_dir = env_dir;
+        }
+    }
+    if (const char* env_path = std::getenv("SECP256K1_CACHE_PATH")) {
+        if (*env_path && std::string(env_path).find("..") == std::string::npos) {
+            incoming.cache_path = env_path;
+            incoming.cache_path_set = true;
+        }
+    }
+    if (const char* env_maxw = std::getenv("SECP256K1_MAX_WINDOWS")) {
+        auto const value =
+            static_cast<unsigned>(std::strtoul(env_maxw, nullptr, 10));
+        if (value > 0U) {
+            incoming.max_windows_to_load = value;
+        }
+    }
+
+    // A context that does not exist yet cannot be kept, so the first call
+    // through here always falls through to invalidate.
+    bool const unchanged =
+        g_context_owner && same_fixed_base_config(incoming, g_config);
+
+    g_config = incoming;
+
+    if (!unchanged) {
+        invalidate_context_locked();
+    }
+}
+
+PrecomputeContext const& acquire_context_for_current_thread() {
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+    ++tl_acquisition_calls;
+#endif
+
+    PrecomputeContext const* const published =
+        g_published_context.load(std::memory_order_acquire);
+    if (published == nullptr || published != tl_context_owner.get()) {
+        std::lock_guard<std::mutex> const lock(g_mutex);
+        ensure_built_locked();
+        tl_context_owner = g_context_owner;
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+        tl_context_epoch = g_published_epoch.load(std::memory_order_relaxed);
+#endif
+    }
+
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+    if (g_test_pause_after_acquire.load(std::memory_order_acquire)) {
+        g_test_acquire_paused.store(true, std::memory_order_release);
+        while (g_test_pause_after_acquire.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        g_test_acquire_paused.store(false, std::memory_order_release);
+    }
+#endif
+
+    return *tl_context_owner;
 }
 
 } // namespace
@@ -2728,9 +3094,15 @@ bool configure_fixed_base_auto() {
     // directory (set_cache_directory()/SECP256K1_CACHE_DIR), or the current
     // working directory when unset. Callers that want explicit settings attach
     // them via configure_fixed_base_from_file(<their path>).
-    FixedBaseConfig cfg{};                 // struct defaults: w=18, GLV off, use_cache=true
-    cfg.cache_dir = g_config.cache_dir;    // preserve a caller-set cache directory
-    configure_fixed_base(cfg);             // also honours SECP256K1_CACHE_DIR/PATH env
+    FixedBaseConfig cfg{};  // struct defaults: w=18, GLV off, use_cache=true
+#if SECP256K1_ESP32_BUILD
+    cfg.cache_dir = g_config.cache_dir;
+    configure_fixed_base(cfg);
+#else
+    std::lock_guard<std::mutex> const lock(g_mutex);
+    cfg.cache_dir = g_config.cache_dir;
+    apply_fixed_base_config_locked(cfg);
+#endif
     return true;
 }
 
@@ -3154,7 +3526,9 @@ std::vector<int32_t> compute_wnaf(const Scalar& scalar, unsigned window_bits) {
 // implicit subtraction without modifying the scalar.
 //
 // Performance: ~3 ops per zero position, ~10 ops per non-zero position.
-// For 128-bit GLV scalars with w=15: ~120 skip + ~8 extract = ~400 ops total.
+// The scan stops just past the scalar's top set bit (see the `hi` bound
+// below), so for the ~128-bit GLV half-scalars every caller passes, the ~128
+// positions above that bit are never walked.
 // Prior shift-and-subtract: ~256 * 13 + ~60 * 20 = ~4500 ops per call.
 void compute_wnaf_into(const Scalar& scalar,
                        unsigned window_bits,
@@ -3179,7 +3553,27 @@ void compute_wnaf_into(const Scalar& scalar,
     int last_set = -1;
     int bit = 0;
 
-    while (bit < 256) {
+    // Bound the scan by the scalar's top set bit: above it every extracted bit
+    // is zero, so a position there can only ever take the skip branch. The one
+    // exception is a carry still pending when the scan crosses the top bit --
+    // it emits a single digit at msb+1 (word = 0 + 1 = 1, and 1 >> (w - 1) == 0
+    // for every w >= 2, so the carry clears itself) and the rest are skips.
+    // Hence msb + 2 and NOT msb + 1: a tighter bound would drop that pending
+    // digit and shorten out_len. A pending carry can never reach further than
+    // msb + 1, because carry is set only when the extracted window has bit
+    // w-1 set, which puts a set scalar bit at position p + w - 1 and so lands
+    // the next scan position at p + w <= msb + 1.
+    int msb = -1;
+    for (std::size_t i = d.size(); i-- > 0;) {
+        if (d[i] != 0U) {
+            msb = (static_cast<int>(i) * 64) +
+                  (63 - static_cast<int>(clz64_local(d[i])));
+            break;
+        }
+    }
+    const int hi = (msb + 2 < 256) ? (msb + 2) : 256;
+
+    while (bit < hi) {
         // Read single bit at position `bit`
         const auto cur = static_cast<unsigned>(
             (d[static_cast<unsigned>(bit) >> 6] >>
@@ -3190,7 +3584,9 @@ void compute_wnaf_into(const Scalar& scalar,
             continue;
         }
 
-        // Non-zero digit: extract up to w bits (clamped at 256)
+        // Non-zero digit: extract up to w bits. The window is clamped against
+        // the full 256-bit scalar, never against `hi` -- a narrower `now` would
+        // change both the digit value and the stride.
         int now = w;
         if (now > 256 - bit) now = 256 - bit;
 
@@ -3256,35 +3652,7 @@ void set_cache_directory(const std::string& dir) {
 // Desktop version with full features
 void configure_fixed_base(const FixedBaseConfig& config) {
     std::lock_guard<std::mutex> const lock(g_mutex);
-    g_config = config;
-
-    // Adaptive GLV override: if enabled and window_bits below threshold, disable GLV.
-    if (g_config.adaptive_glv && g_config.enable_glv && g_config.window_bits < g_config.glv_min_window_bits) {
-        g_config.enable_glv = false; // Effective disable due to insufficient window size
-    }
-
-    // Environment overrides for external configuration
-    // SECP256K1_CACHE_DIR  -> overrides cache directory containing cache_w{bits}[ _glv].bin
-    // SECP256K1_CACHE_PATH -> overrides exact cache file path
-    // SECP256K1_MAX_WINDOWS -> limits how many windows to load from cache (for memory control)
-    if (const char* env_dir = std::getenv("SECP256K1_CACHE_DIR")) {
-        if (*env_dir && std::string(env_dir).find("..") == std::string::npos) { // lgtm[cpp/path-injection]
-            g_config.cache_dir = env_dir;
-        }
-    }
-    if (const char* env_path = std::getenv("SECP256K1_CACHE_PATH")) {
-        if (*env_path && std::string(env_path).find("..") == std::string::npos) { // lgtm[cpp/path-injection]
-            g_config.cache_path = env_path;
-            g_config.cache_path_set = true;
-        }
-    }
-    if (const char* env_maxw = std::getenv("SECP256K1_MAX_WINDOWS")) {
-        auto const v = static_cast<unsigned>(std::strtoul(env_maxw, nullptr, 10));
-        if (v > 0U) {
-            g_config.max_windows_to_load = v;
-        }
-    }
-    g_context.reset();
+    apply_fixed_base_config_locked(config);
 }
 
 void ensure_fixed_base_ready() {
@@ -3294,15 +3662,87 @@ void ensure_fixed_base_ready() {
 
 bool fixed_base_ready() {
     std::lock_guard<std::mutex> const lock(g_mutex);
-    return static_cast<bool>(g_context);
+    return static_cast<bool>(g_context_owner);
 }
 
 void set_cache_directory(const std::string& dir) {
     std::lock_guard<std::mutex> const lock(g_mutex);
     g_config.cache_dir = dir;
-    g_context.reset();
+    invalidate_context_locked();
 }
 #endif // !SECP256K1_ESP32_BUILD
+
+bool fixed_base_context_identity_is_lock_free() noexcept {
+#if SECP256K1_ESP32_BUILD
+    return false;
+#else
+    return g_published_context.is_lock_free();
+#endif
+}
+
+bool fixed_base_context_identity_is_always_lock_free() noexcept {
+#if SECP256K1_ESP32_BUILD
+    return false;
+#else
+    return std::atomic<PrecomputeContext const*>::is_always_lock_free;
+#endif
+}
+
+#if defined(SECP256K1_PRECOMPUTE_TEST_HOOKS)
+PrecomputeContextDiagnostics precompute_context_diagnostics() {
+    PrecomputeContextDiagnostics out{};
+#if !SECP256K1_ESP32_BUILD
+    {
+        std::lock_guard<std::mutex> const lock(g_mutex);
+        PrecomputeContext const* const published =
+            g_published_context.load(std::memory_order_acquire);
+        out.published_identity =
+            reinterpret_cast<std::uintptr_t>(published);
+        out.published_window_bits =
+            g_context_owner && published == g_context_owner.get()
+                ? g_context_owner->window_bits
+                : 0U;
+        out.published_epoch =
+            g_published_epoch.load(std::memory_order_relaxed);
+    }
+    out.tls_identity =
+        reinterpret_cast<std::uintptr_t>(tl_context_owner.get());
+    out.tls_window_bits =
+        tl_context_owner ? tl_context_owner->window_bits : 0U;
+    out.tls_epoch = tl_context_epoch;
+    out.acquisition_calls = tl_acquisition_calls;
+    out.runtime_lock_free = g_published_context.is_lock_free();
+    out.always_lock_free =
+        std::atomic<PrecomputeContext const*>::is_always_lock_free;
+#endif
+    return out;
+}
+
+void precompute_test_reset_acquisition_count() {
+#if !SECP256K1_ESP32_BUILD
+    tl_acquisition_calls = 0;
+#endif
+}
+
+void precompute_test_set_pause_after_acquire(bool pause) {
+#if !SECP256K1_ESP32_BUILD
+    g_test_pause_after_acquire.store(pause, std::memory_order_release);
+    if (pause) {
+        g_test_acquire_paused.store(false, std::memory_order_release);
+    }
+#else
+    (void)pause;
+#endif
+}
+
+bool precompute_test_acquire_is_paused() {
+#if SECP256K1_ESP32_BUILD
+    return false;
+#else
+    return g_test_acquire_paused.load(std::memory_order_acquire);
+#endif
+}
+#endif
 
 ScalarDecomposition split_scalar_glv(const Scalar& scalar) {
     return split_scalar_internal(scalar);
@@ -3543,18 +3983,16 @@ Point scalar_mul_generator_glv_predecomposed(const Scalar& /*k1*/, const Scalar&
     return Point::infinity();
 }
 #else
-Point scalar_mul_generator(const Scalar& scalar) {
-    std::unique_lock<std::mutex> lock(g_mutex);
-    ensure_built_locked();
-    // Snapshot the shared_ptr under the lock so a concurrent configure_fixed_base()
-    // (which does g_context.reset()) cannot free the table while we read it after
-    // unlock() — ctx_ptr keeps it alive for this whole call (PRECOMPUTE-GCONTEXT-UAF).
-    std::shared_ptr<PrecomputeContext> const ctx_ptr = g_context;
-    PrecomputeContext const& ctx = *ctx_ptr;
+namespace {
+
+// Context-taking implementation shared by scalar and batch entry points. It
+// never acquires/publishes context ownership; the caller's TLS owner remains
+// alive for the complete call.
+Point scalar_mul_generator_with_context(const Scalar& scalar,
+                                        const PrecomputeContext& ctx) {
     if (!validate_precompute_context(ctx)) {
         throw std::runtime_error("Invalid precompute context");
     }
-    lock.unlock();
 
     // PHASE 3 OPTIMIZED (Mixed Jacobian-Affine addition - 8 muls instead of 12)
     // PHASE 4: Added prefetching for next iteration data
@@ -3714,17 +4152,19 @@ Point scalar_mul_generator(const Scalar& scalar) {
     return Point::from_jacobian_coords(result.x, result.y, result.z, result.infinity);
 }
 
+} // namespace
+
+Point scalar_mul_generator(const Scalar& scalar) {
+    PrecomputeContext const& ctx = acquire_context_for_current_thread();
+    return scalar_mul_generator_with_context(scalar, ctx);
+}
+
 // ============================================================================
 // Missing API Implementations (Restored)
 // ============================================================================
 
 Point scalar_mul_generator_glv_predecomposed(const Scalar& k1, const Scalar& k2, bool neg1, bool neg2) {
-    std::unique_lock<std::mutex> const lock(g_mutex);
-    ensure_built_locked();
-    // Safe to read *g_context directly: this function holds g_mutex for its whole body
-    // (no unlock), so configure_fixed_base()->g_context.reset() cannot run concurrently.
-    // Only the unlock-then-read fast paths (scalar_mul_generator/batch) need the snapshot.
-    PrecomputeContext const& ctx = *g_context;
+    PrecomputeContext const& ctx = acquire_context_for_current_thread();
 
     // Direct GLV combination using pre-split scalars.
     // Stack-allocated digit buffers: zero heap allocation.
@@ -3754,83 +4194,50 @@ Point scalar_mul_generator_glv_predecomposed(const Scalar& k1, const Scalar& k2,
 
 // ── batch_scalar_mul_generator ────────────────────────────────────────────────
 // Compute results[i] = scalars[i] × G for all i in [0, n).
-// One mutex lock + one table access warms L2/L3 for all N calls;
-// each subsequent shamir_windowed_glv hits the warm cache.
+// One context acquisition covers the whole batch. On a steady-state TLS hit
+// that acquisition is only a raw atomic identity load; a refresh takes the
+// publication mutex once. Each multiply then hits the same warm table.
 // Thread-local digit scratch avoids heap per scalar.
 void batch_scalar_mul_generator(const Scalar* scalars, Point* results, std::size_t n) {
     if (n == 0) return;
-#if defined(SECP256K1_ESP32_BUILD)
+#if SECP256K1_ESP32_BUILD
     for (std::size_t i = 0; i < n; ++i)
         results[i] = Point::generator().scalar_mul(scalars[i]);
 #else
     if (n == 1) { results[0] = scalar_mul_generator(scalars[0]); return; }
 
-    // Lock once: verify context is ready, then release.
-    std::unique_lock<std::mutex> lock(g_mutex);
-    ensure_built_locked();
-    // Snapshot under the lock — keeps the table alive past unlock() even if another
-    // thread calls configure_fixed_base()->g_context.reset() (PRECOMPUTE-GCONTEXT-UAF).
-    std::shared_ptr<PrecomputeContext> const ctx_ptr = g_context;
-    PrecomputeContext const& ctx = *ctx_ptr;
-    if (!validate_precompute_context(ctx)) throw std::runtime_error("Invalid precompute context");
-    lock.unlock();
-
-    const std::size_t wc = ctx.window_count;
-    const unsigned    wb = ctx.window_bits;
-    const bool        use_glv = ctx.config.enable_glv;
-
-    // Thread-local digit scratch: no heap after first call.
-    static thread_local std::array<int32_t, kMaxWindowCount> tl_d1{};
-    static thread_local std::array<int32_t, kMaxWindowCount> tl_d2{};
-
-    // Inline accumulate for the non-GLV path (mirrors scalar_mul_generator).
-    auto do_accumulate = [&](const int32_t* digits,
-                              const std::vector<std::vector<AffinePointPacked>>& tables,
-                              JacobianPoint& result) {
-        for (std::size_t w = 0; w < wc; ++w) {
-            int32_t const d = digits[w];
-            if (d == 0) continue;
-            bool const neg = (d < 0);
-            auto const idx = static_cast<std::size_t>(neg ? -static_cast<std::int64_t>(d)
-                                                           :  static_cast<std::int64_t>(d));
-            const auto& entry = tables[w][idx];
-            if (entry.infinity) continue;
-            AffinePointPacked pt = entry;
-            if (neg) pt.y = negate_fe(pt.y);
-            result = jacobian_add_mixed_local(result, pt);
-        }
-    };
+    // Exactly one acquisition for the whole batch. The context-taking helper
+    // below cannot reacquire, including when OpenMP distributes elements.
+    PrecomputeContext const& ctx = acquire_context_for_current_thread();
 
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static) if(n >= 64)
 #endif
     for (std::size_t i = 0; i < n; ++i) {
-        // tl_d1/tl_d2 are static thread_local — each OMP thread has its own copy.
-        JacobianPoint result{FieldElement::zero(), FieldElement::one(),
-                             FieldElement::zero(), true};
-        if (use_glv) {
-            ScalarDecomposition const dec = split_scalar_internal(scalars[i]);
-            fill_window_digits_into(dec.k1, wb, wc, tl_d1.data());
-            fill_window_digits_into(dec.k2, wb, wc, tl_d2.data());
-            if (dec.neg1) for (std::size_t w = 0; w < wc; ++w) if (tl_d1[w]) tl_d1[w] = -tl_d1[w];
-            if (dec.neg2) for (std::size_t w = 0; w < wc; ++w) if (tl_d2[w]) tl_d2[w] = -tl_d2[w];
-            result = shamir_windowed_glv(tl_d1.data(), tl_d2.data(),
-                                         ctx.base_tables, ctx.psi_tables, wc);
-        } else {
-            fill_window_digits_into(scalars[i], wb, wc, tl_d1.data());
-            do_accumulate(tl_d1.data(), ctx.base_tables, result);
-        }
-        results[i] = Point::from_jacobian_coords(result.x, result.y, result.z, result.infinity);
+        results[i] = scalar_mul_generator_with_context(scalars[i], ctx);
     }
 #endif
 }
 
 bool save_precompute_cache(const std::string& path) {
+#if SECP256K1_ESP32_BUILD
+    (void)path;
+    return false;
+#else
+    std::lock_guard<std::mutex> const lock(g_mutex);
     return save_precompute_cache_locked(path);
+#endif
 }
 
 bool load_precompute_cache(const std::string& path, unsigned max_windows) {
+#if SECP256K1_ESP32_BUILD
+    (void)path;
+    (void)max_windows;
+    return false;
+#else
+    std::lock_guard<std::mutex> const lock(g_mutex);
     return load_precompute_cache_locked(path, max_windows);
+#endif
 }
 
 Point scalar_mul_arbitrary(const Point& base, const Scalar& scalar, unsigned window_bits) {

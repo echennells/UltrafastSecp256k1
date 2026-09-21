@@ -63,7 +63,21 @@ add_library(secp256k1_metal_lib STATIC
     src/metal_runtime.mm
 )
 
-target_include_directories(secp256k1_metal_lib PUBLIC
+# Issue #335 acceptance repair (round 11): structural parity with the
+# OpenCL/CUDA export-set closure fix (src/opencl/CMakeLists.txt,
+# src/cuda/CMakeLists.txt, src/gpu/CMakeLists.txt) -- NOT runtime-verified,
+# METAL_RUNTIME_CONFIRMATION_PENDING (this file only reaches this point
+# under APPLE; see the `if(NOT APPLE) ... return()` guard above, so a Linux
+# configure/build never exercises any line below this comment). These paths
+# were PUBLIC and unwrapped, the same defect class that blocked
+# SECP256K1_INSTALL_CABI=ON + SECP256K1_BUILD_OPENCL/CUDA=ON on this host.
+# Demoted to PRIVATE: the local consumers in this same file
+# (metal_audit_runner) already explicitly add
+# "${CMAKE_CURRENT_SOURCE_DIR}/include" themselves, PRIVATE, so nothing here
+# depends on the PUBLIC propagation; there is no known out-of-file consumer
+# (src/gpu/CMakeLists.txt adds "${CMAKE_CURRENT_SOURCE_DIR}/../metal/include"
+# itself, PRIVATE, when SECP256K1_BUILD_METAL links secp256k1_metal_lib).
+target_include_directories(secp256k1_metal_lib PRIVATE
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
@@ -71,6 +85,17 @@ target_include_directories(secp256k1_metal_lib PUBLIC
 target_link_libraries(secp256k1_metal_lib PRIVATE
     ${METAL_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
+)
+
+# Join the ufsecp C ABI package's export set (see src/gpu/CMakeLists.txt for
+# the full issue #335 round-11 rationale). Configure-level parity only --
+# this code path is unreachable on non-Apple hosts (see the `if(NOT APPLE)`
+# guard above), so it cannot be exercised by this round's real
+# cmake --install verification (Linux-only machine).
+include(GNUInstallDirs)
+install(TARGETS secp256k1_metal_lib
+    EXPORT ufsecpTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 # Enable ARC for Objective-C++
@@ -85,6 +110,11 @@ target_compile_options(secp256k1_metal_lib PRIVATE
 
 add_executable(metal_secp256k1_test
     app/metal_test.mm
+)
+
+target_include_directories(metal_secp256k1_test PRIVATE
+    include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
 )
 
 target_link_libraries(metal_secp256k1_test PRIVATE
@@ -103,6 +133,11 @@ target_compile_options(metal_secp256k1_test PRIVATE
 
 add_executable(metal_secp256k1_bench_full
     app/bench_metal.mm
+)
+
+target_include_directories(metal_secp256k1_bench_full PRIVATE
+    include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
 )
 
 target_link_libraries(metal_secp256k1_bench_full PRIVATE
@@ -148,8 +183,15 @@ target_compile_features(metal_audit_runner PRIVATE cxx_std_20)
 # Find Metal compiler (xcrun metal)
 find_program(METAL_COMPILER xcrun)
 
+# The shader SOURCE directory, which exists whether or not a Metal compiler
+# does. It used to be set only inside if(METAL_COMPILER), while the
+# SHADER_FILES copy list below sits outside that guard -- so on any build
+# without xcrun (a non-Apple host with SECP256K1_BUILD_METAL=ON, or an Apple
+# host without the Xcode command-line tools) every entry expanded to a bare
+# "/secp256k1_*.h" at the filesystem root.
+set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+
 if(METAL_COMPILER)
-    set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
     set(METAL_SOURCE ${SHADER_DIR}/secp256k1_kernels.metal)
     set(METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/secp256k1_kernels.air)
     set(METAL_LIB ${CMAKE_CURRENT_BINARY_DIR}/secp256k1_kernels.metallib)
@@ -209,6 +251,31 @@ if(METAL_COMPILER)
             $<TARGET_FILE_DIR:metal_audit_runner>/secp256k1_kernels.metallib
         COMMENT "[Metal] Copying metallib to audit runner directory"
     )
+
+    # The CPU audit binaries -- unified_audit_runner and ~500 standalone CTest
+    # targets -- live in ${CMAKE_BINARY_DIR}/audit, and ctest runs them from
+    # that directory. The three copies above all land in
+    # ${CMAKE_BINARY_DIR}/src/metal (that is where the metal_* targets are), and
+    # none of gpu_backend_metal.mm's CWD-relative candidates
+    # ("secp256k1_kernels.metallib", "../…", "../metal/…", "../../metal/…")
+    # reaches across from audit/ to src/metal/. So every Metal-backed audit
+    # module failed with "[Metal] ERROR: Failed to load metallib: library not
+    # found" -- on CI / macos (Release) that is gpu_abi_gate, unified_audit and
+    # regression_bip352_ct_varbase, all three reporting GPU failures for a
+    # missing file rather than for anything about the GPU.
+    #
+    # Attached to metal_shaders rather than to an audit target because
+    # add_custom_command(TARGET) requires the target to be defined in this
+    # directory, and audit/ is a sibling added later (CMakeLists.txt:772).
+    # make_directory first: this runs whether or not audit/ was configured
+    # (it is gated on SECP256K1_BUILD_CPU AND BUILD_TESTING).
+    add_custom_command(TARGET metal_shaders POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/audit
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${METAL_LIB}
+            ${CMAKE_BINARY_DIR}/audit/secp256k1_kernels.metallib
+        COMMENT "[Metal] Copying metallib to the CPU audit binary directory"
+    )
 else()
     message(WARNING "secp256k1-metal: 'xcrun' not found; shaders must be compiled at runtime")
 endif()
@@ -217,11 +284,23 @@ endif()
 # Copy shader source files (for runtime compilation fallback)
 # -------------------------------------------------------------
 
+# The COMPLETE #include closure of secp256k1_kernels.metal, not a subset.
+# gpu_backend_metal.mm's runtime-compile fallback expands the entry file's own
+# includes, so a copied shaders/ directory missing even one of them yields no
+# translation unit at all -- which is what the old four-header list did.
+# regression_metal_shader_closure pins this list against the actual includes.
 set(SHADER_FILES
     ${SHADER_DIR}/secp256k1_field.h
     ${SHADER_DIR}/secp256k1_point.h
     ${SHADER_DIR}/secp256k1_extended.h
     ${SHADER_DIR}/secp256k1_hash160.h
+    ${SHADER_DIR}/secp256k1_zk.h
+    ${SHADER_DIR}/secp256k1_bip324.h
+    ${SHADER_DIR}/secp256k1_ct_ops.h
+    ${SHADER_DIR}/secp256k1_ct_field.h
+    ${SHADER_DIR}/secp256k1_ct_scalar.h
+    ${SHADER_DIR}/secp256k1_ct_point.h
+    ${SHADER_DIR}/secp256k1_ct_sign.h
     ${SHADER_DIR}/secp256k1_kernels.metal
 )
 

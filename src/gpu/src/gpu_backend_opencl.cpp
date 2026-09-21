@@ -21,11 +21,39 @@
 
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <system_error>
+#include <limits>
+#include <mutex>
+
+#ifdef __linux__
+#include <unistd.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
+// Round 10 (issue #335 acceptance repair): relocatable installed-package
+// kernel-directory discovery asks the OS where the loaded module containing
+// THIS code actually lives on disk right now -- dladdr() (POSIX: Linux,
+// macOS, *BSD) or GetModuleHandleExA + GetModuleFileNameA (Windows). See
+// resolve_opencl_kernel() Strategy 2 below.
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 /* -- OpenCL Context (Layer 1) ---------------------------------------------- */
 #include "secp256k1_opencl.hpp"
@@ -61,6 +89,330 @@ std::string load_file_to_string(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return {};
     return {std::istreambuf_iterator<char>(f), {}};
+}
+
+/** Resolve an OpenCL kernel source file from multiple search strategies.
+ *  Returns {source, kernel_dir} on success, or {{},{}} on failure.
+ *  The kernel_dir is the parent directory of the found file, suitable for -I.
+ *
+ *  Search order (first match wins):
+ *  1. UFSECP_OPENCL_KERNEL_DIR env var + kernel_filename -- EXPLICIT
+ *     override. If set but the kernel is not found there, this is now a
+ *     HARD FAILURE with no fallthrough to any weaker strategy below (fail
+ *     closed, preserve explicit-override precedence -- round 9).
+ *  2. RELOCATABLE installed-package discovery (round 10): dladdr() /
+ *     GetModuleHandleExA on an address inside this TU -> the loaded
+ *     module's own on-disk path, right now -> <libdir>/../share/
+ *     secp256k1/opencl/<file>. This is the real production/installed-
+ *     package contract: it survives moving the installed package to a
+ *     different prefix after `cmake --install` because it reads the
+ *     module's CURRENT location instead of a value fixed at compile time.
+ *     Not an explicit user override: falls through on failure.
+ *  3. Compile-time baked install-prefix path
+ *     (SECP256K1_GPU_OPENCL_INSTALL_DIR + <file>), when this TU was built
+ *     with that macro defined -- round-9 mechanism, demoted (round 10) to
+ *     a defense-in-depth fallback for an un-relocated install; NOT
+ *     relocatable (see strategy 2 above -- a moved/renamed install prefix
+ *     silently breaks this one). Falls through on failure.
+ *  4. Compile-time baked UFSECP_SOURCE_ROOT + src/opencl/kernels/<file>,
+ *     when this translation unit was built with that macro defined --
+ *     developer/CAAS-build-only fallback (round 8); NOT the installed
+ *     contract (strategy 2 above is).
+ *  5. Executable-relative: <exe_dir>/../../../src/opencl/kernels/<file>
+ *  6. Executable-relative: <exe_dir>/../../src/opencl/kernels/<file>
+ *  7. Executable-relative: <exe_dir>/../src/opencl/kernels/<file>
+ *  8. Executable-relative: <exe_dir>/src/opencl/kernels/<file>
+ *  9. Source-tree guess: walk up from exe dir AND from CWD looking for
+ *     src/opencl/kernels/<file>
+ *  10. CWD-relative legacy paths (../../opencl/kernels/<file>, etc.)
+ *
+ *  On failure, `candidates_searched` is populated with every path tried
+ *  so the caller can produce a useful diagnostic. */
+struct KernelResolveResult {
+    std::string source;
+    std::string kernel_dir;
+    std::string candidates_searched;
+};
+KernelResolveResult resolve_opencl_kernel(const std::string& kernel_filename) {
+    KernelResolveResult result;
+    std::string candidates;
+
+    auto try_path = [&](const std::string& p) -> bool {
+        if (!candidates.empty()) candidates += "\n    ";
+        candidates += p;
+        auto src = load_file_to_string(p);
+        if (!src.empty()) {
+            std::filesystem::path fp(p);
+            result.source     = std::move(src);
+            result.kernel_dir = fp.parent_path().string();
+            return true;
+        }
+        return false;
+    };
+
+    // Strategy 1 (round 9, issue #335 acceptance repair): EXPLICIT
+    // environment-variable override, checked FIRST. Round 8 had inserted a
+    // compile-time UFSECP_SOURCE_ROOT fallback ahead of this env-var check,
+    // which silently inverted precedence: a caller's explicit
+    // UFSECP_OPENCL_KERNEL_DIR could be shadowed by a baked dev source root
+    // the caller has no way to know is even active -- fixed by moving the
+    // env var back to first position. Separately: the OLD code fell through
+    // to weaker (exe/CWD-relative) strategies whenever the env var was set
+    // but the kernel wasn't found there -- an "override" that silently
+    // falls open to guessing is not a real override, and could mask exactly
+    // the kind of misconfiguration a caller most needs surfaced (this is
+    // the bug-to-CAAS "invalid-override" negative case, RCU-7). Fixed: an
+    // explicit override that fails to resolve is now an immediate, hard
+    // failure -- no fallthrough -- with the same useful
+    // candidates_searched diagnostic every other failure path produces.
+    {
+        const char* env_dir = std::getenv("UFSECP_OPENCL_KERNEL_DIR");
+        if (env_dir && env_dir[0]) {
+            std::filesystem::path env_path(env_dir);
+            env_path /= kernel_filename;
+            try_path(env_path.string());   // populates `candidates` either way
+            result.candidates_searched = candidates;
+            return result;                  // explicit override: no fallthrough, ever
+        }
+    }
+
+    // Strategy 2 (round 10, issue #335 acceptance repair): RELOCATABLE
+    // installed-package discovery via the loaded module's OWN, CURRENT
+    // on-disk path. The old strategy 2 (now demoted to strategy 3 below,
+    // SECP256K1_GPU_OPENCL_INSTALL_DIR) bakes CMAKE_INSTALL_PREFIX into the
+    // binary at COMPILE time -- provably correct only as long as the
+    // installed package never physically moves after `cmake --install`. A
+    // real installed/packaged consumer (a distro package relocating a
+    // build root, a vendored copy re-rooted into a container image, a CI
+    // artifact unpacked to a path different from its original build
+    // prefix) breaks that assumption outright: the baked path still names
+    // a prefix that may no longer exist, with no way to recover once the
+    // env-var override (strategy 1) is absent.
+    //
+    // This strategy instead asks the OS, AT RUNTIME, which loaded module
+    // contains an address inside THIS translation unit -- dladdr() on
+    // POSIX (Linux/macOS/*BSD all implement it identically via
+    // <dlfcn.h>), GetModuleHandleExA + GetModuleFileNameA on Windows -- and
+    // derives the kernel directory relative to THAT module's actual
+    // location: <module_dir>/../share/secp256k1/opencl/<file>. That is
+    // byte-for-byte the same relative layout src/opencl/CMakeLists.txt's
+    // own `install(DIRECTORY kernels/ DESTINATION share/secp256k1/opencl
+    // ...)` rule produces relative to GNUInstallDirs' CMAKE_INSTALL_LIBDIR
+    // (where the ufsecp C ABI shared library this code ships in is
+    // installed) -- but computed from where the module ACTUALLY is on
+    // disk right now, not a value frozen at build time. This also works
+    // for a static-linked build (this code compiled into the consumer
+    // binary itself rather than a separate .so): dladdr on a local address
+    // still resolves to the ENCLOSING loaded module, i.e. the host
+    // binary, which for an installed package lives under <prefix>/bin at
+    // the same fixed relative depth from <prefix>/share.
+    //
+    // Deliberately NOT /proc/self/exe (used by strategy 5-8 below): that
+    // resolves the CALLING PROCESS's own executable, which is simply wrong
+    // once this code ships inside a .so dlopen()'d or linked by some other
+    // host program -- the loadable-library consumer scenario the original
+    // round-9 comment on the old strategy 2 already flagged as out of
+    // reach for exe-relative guessing. dladdr()/GetModuleHandleExA resolve
+    // THIS module specifically, regardless of which process loaded it.
+    //
+    // Not an explicit user directive like strategy 1: failure here falls
+    // through to strategy 3, it does not hard-fail.
+    {
+        std::string self_module_dir;
+#if defined(_WIN32)
+        {
+            HMODULE hmod = nullptr;
+            if (GetModuleHandleExA(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCSTR>(&resolve_opencl_kernel),
+                    &hmod) && hmod) {
+                char buf[MAX_PATH];
+                DWORD len = GetModuleFileNameA(hmod, buf, sizeof(buf));
+                if (len > 0 && len < sizeof(buf)) {
+                    std::filesystem::path mod_path(std::string(buf, len));
+                    self_module_dir = mod_path.parent_path().string();
+                }
+            }
+        }
+#else
+        {
+            Dl_info info;
+            if (dladdr(reinterpret_cast<void*>(&resolve_opencl_kernel), &info) &&
+                info.dli_fname && info.dli_fname[0]) {
+                std::filesystem::path lib_path(info.dli_fname);
+                self_module_dir = lib_path.parent_path().string();
+            }
+        }
+#endif
+        if (!self_module_dir.empty()) {
+            auto candidate = std::filesystem::path(self_module_dir) / ".." /
+                              "share" / "secp256k1" / "opencl" / kernel_filename;
+            if (try_path(candidate.lexically_normal().string())) {
+                result.candidates_searched = candidates;
+                return result;
+            }
+        }
+    }
+
+    // Strategy 3 (round 9, demoted round 10): compile-time baked
+    // install-prefix path -- kept as a defense-in-depth fallback for an
+    // installed package that has NOT been relocated since `cmake
+    // --install` (strategy 2 above is the relocation-safe mechanism and is
+    // tried first). Strategy 4 below (UFSECP_SOURCE_ROOT) is explicitly a
+    // DEVELOPER fallback (an absolute path into this repo's own source
+    // checkout) and must not be the SOLE "installed" story for a shipped
+    // secp256k1_gpu_host consumer. Baked by src/gpu/CMakeLists.txt from
+    // CMAKE_INSTALL_PREFIX, matching exactly where
+    // src/opencl/CMakeLists.txt's own
+    // `install(DIRECTORY kernels/ DESTINATION share/secp256k1/opencl ...)`
+    // rule places the .cl files when the project is installed AND the
+    // resulting package prefix is never moved. Unlike the env-var override
+    // above, this is a convenience discovery path, not an explicit user
+    // directive: failure here falls through, it does not hard-fail.
+#ifdef SECP256K1_GPU_OPENCL_INSTALL_DIR
+    {
+        std::filesystem::path install_path(SECP256K1_GPU_OPENCL_INSTALL_DIR);
+        auto candidate = install_path / kernel_filename;
+        if (try_path(candidate.string())) {
+            result.candidates_searched = candidates;
+            return result;
+        }
+    }
+#endif
+
+    // Strategy 4 (round 8): compile-time baked absolute DEVELOPER source
+    // root, when available (unified_audit_runner/CAAS build only -- see
+    // audit/CMakeLists.txt's UFSECP_SOURCE_ROOT compile definition).
+    // Mirrors audit/audit_check.hpp's audit_read_source_file(). Production
+    // builds of secp256k1_gpu_host (src/gpu/CMakeLists.txt) do not define
+    // this macro, so it is a no-op there -- strategy 2 above (round 10,
+    // relocatable dladdr-based discovery) is the real production-safe
+    // path; this one is a dev-only convenience, live wherever the resolver
+    // is exercised by CAAS.
+#ifdef UFSECP_SOURCE_ROOT
+    {
+        std::filesystem::path root_path(UFSECP_SOURCE_ROOT);
+        auto candidate = root_path / "src" / "opencl" / "kernels" / kernel_filename;
+        if (try_path(candidate.string())) {
+            result.candidates_searched = candidates;
+            return result;
+        }
+    }
+#endif
+
+    // Strategy 5-8: Executable-relative paths
+    std::string exe_dir;
+#ifdef __linux__
+    {
+        char buf[4096];
+        ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (len > 0) {
+            buf[len] = '\0';
+            std::filesystem::path exe_path(buf);
+            exe_dir = exe_path.parent_path().string();
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        char buf[4096];
+        uint32_t size = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &size) == 0) {
+            std::filesystem::path exe_path(buf);
+            exe_dir = exe_path.parent_path().string();
+        }
+    }
+#endif
+    if (!exe_dir.empty()) {
+        // Try various relative depths from the executable
+        const char* rel_paths[] = {
+            "/../../../src/opencl/kernels/",
+            "/../../src/opencl/kernels/",
+            "/../src/opencl/kernels/",
+            "/src/opencl/kernels/",
+            "/../../../opencl/kernels/",
+            "/../../opencl/kernels/",
+            "/../opencl/kernels/",
+            "/opencl/kernels/",
+        };
+        for (auto* rel : rel_paths) {
+            if (try_path(exe_dir + rel + kernel_filename))
+                { result.candidates_searched = candidates; return result; }
+        }
+    }
+
+    // Strategy 9: Walk up from exe dir looking for src/opencl/kernels/
+    //
+    // Repair (issue #335 acceptance repair, round 3): this used to walk up
+    // from CWD ONLY when exe_dir resolution failed entirely (readlink
+    // failure) -- if exe_dir resolved to ANYTHING, even a path totally
+    // unrelated to the source tree (e.g. an out-of-tree build directory in
+    // /tmp, exactly what this repo's own ci/ci_local.sh produces via
+    // `BUILD_DIR="${TMPDIR:-/tmp}/ci_local_build_$$"`, or any ad-hoc/relink
+    // scratch binary), the CWD-based walk-up was skipped entirely. But this
+    // repo's own CTest WORKING_DIRECTORY convention
+    // (`set_tests_properties(... WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")`,
+    // audit/CMakeLists.txt) guarantees CWD == the source repo root at test
+    // time regardless of where the build directory physically lives --
+    // walking up from CWD is therefore an independent, equally-valid
+    // resolution path that must not be skipped just because exe_dir also
+    // resolved to *something*. Try both roots (deduplicated when equal).
+    {
+        auto walk_up_from = [&](const std::filesystem::path& start) -> bool {
+            auto root = start;
+            for (int i = 0; i < 12; ++i) {
+                auto candidate = root / "src" / "opencl" / "kernels" / kernel_filename;
+                if (try_path(candidate.string())) return true;
+                auto parent = root.parent_path();
+                if (parent == root) break;
+                root = parent;
+            }
+            return false;
+        };
+
+        std::error_code ec;
+        std::filesystem::path cwd_root = std::filesystem::current_path(ec);
+        if (ec) cwd_root = std::filesystem::path(".");
+
+        if (!exe_dir.empty()) {
+            if (walk_up_from(std::filesystem::path(exe_dir))) {
+                result.candidates_searched = candidates; return result;
+            }
+        }
+        // Always also try CWD-based walk-up (even when exe_dir resolved),
+        // skipping a redundant identical search when the two roots coincide.
+        if (exe_dir.empty() || std::filesystem::path(exe_dir) != cwd_root) {
+            if (walk_up_from(cwd_root)) {
+                result.candidates_searched = candidates; return result;
+            }
+        }
+    }
+
+    // Strategy 10: Legacy CWD-relative paths (backward compatibility).
+    //
+    // Repair (issue #335 acceptance repair, round 3): the ORIGINAL list here
+    // never included a "src/opencl/kernels/" candidate, so it could not
+    // resolve when CWD is exactly the source repo root -- this repo's own
+    // CTest WORKING_DIRECTORY convention (see comment on Strategy 9 above).
+    // That candidate is listed FIRST (most specific / most likely correct
+    // for this repo's actual layout); the rest are kept for any other
+    // invocation convention that happened to rely on them.
+    const char* legacy_paths[] = {
+        "src/opencl/kernels/",
+        "opencl/kernels/",
+        "../opencl/kernels/",
+        "../../opencl/kernels/",
+        "../../../opencl/kernels/",
+        "kernels/",
+        "../kernels/",
+    };
+    for (auto* rel : legacy_paths) {
+        if (try_path(std::string(rel) + kernel_filename))
+            { result.candidates_searched = candidates; return result; }
+    }
+
+    result.candidates_searched = candidates;
+    return result;
 }
 
 struct OpenCLECDSASig {
@@ -196,7 +548,262 @@ struct OclColumnsPool {
 
 static thread_local OclColumnsPool g_ocl_columns_pool;
 
+/* libbitcoin sighash-descriptor persistent buffer pool -- grow-only, reused
+ * across engine calls so the hot sighash path performs no per-call
+ * clCreateBuffer/CL_MEM_COPY_HOST_PTR (mirrors OclColumnsPool above, same
+ * thread_local-per-thread strategy, no locking needed). Holds PUBLIC sighash
+ * preimage data only (tx field columns, var-lens, output digests) -- no
+ * secret material, so no pre-release zeroing is required.
+ *
+ * The four per-field metadata buffers (col_offsets/strides/fixed_lens/
+ * varlen_offsets) are sized once at the compile-time-bounded MAX_FIELDS (64)
+ * -- that upper bound never changes, so they need no grow check, only a
+ * one-time allocation. The three bulk buffers (packed_cols, packed_varlens,
+ * out) grow independently by BYTE capacity via ensure_bytes(), since their
+ * size depends on which fields a caller's descriptor references and how many
+ * rows are hashed -- not a fixed row count like OclColumnsPool. */
+struct OclSighashPool {
+    static constexpr size_t MAX_FIELDS = 64;
+
+    cl_mem d_col_offsets    = nullptr;  // MAX_FIELDS x uint64, allocated once
+    cl_mem d_strides        = nullptr;  // MAX_FIELDS x uint32, allocated once
+    cl_mem d_fixed_lens     = nullptr;  // MAX_FIELDS x uint32, allocated once
+    cl_mem d_varlen_offsets = nullptr;  // MAX_FIELDS x uint32, allocated once
+    bool meta_ready = false;
+    cl_context owning_ctx   = nullptr;  // context the buffers above are bound to
+
+    cl_mem d_packed_cols    = nullptr;  // grow-only, bytes
+    size_t packed_cols_cap  = 0;
+    cl_mem d_packed_varlens = nullptr;  // grow-only, bytes
+    size_t packed_varlens_cap = 0;
+    cl_mem d_out            = nullptr;  // grow-only, bytes (count * 32)
+    size_t out_cap          = 0;
+
+    bool ensure_meta(cl_context ctx) {
+        // This pool is thread_local, but a single thread can still drive two
+        // independent GPU contexts over its lifetime (backend re-init, or a
+        // test that creates two contexts and calls both from one thread). If
+        // the owning context changed, the meta_ready short-circuit below would
+        // otherwise hand back cl_mem handles bound to a stale/foreign context
+        // -- invalid and unsafe. Release and reallocate against the new
+        // context first; free_all() also resets the three bulk-buffer caps to
+        // 0, which forces ensure_bytes() to reallocate them against ctx too.
+        if (owning_ctx != nullptr && owning_ctx != ctx) free_all();
+        if (meta_ready) return true;
+        cl_int err = CL_SUCCESS;
+        d_col_offsets    = clCreateBuffer(ctx, CL_MEM_READ_ONLY, MAX_FIELDS * sizeof(uint64_t), nullptr, &err);
+        if (err != CL_SUCCESS || !d_col_offsets)    { free_all(); return false; }
+        d_strides        = clCreateBuffer(ctx, CL_MEM_READ_ONLY, MAX_FIELDS * sizeof(uint32_t), nullptr, &err);
+        if (err != CL_SUCCESS || !d_strides)        { free_all(); return false; }
+        d_fixed_lens     = clCreateBuffer(ctx, CL_MEM_READ_ONLY, MAX_FIELDS * sizeof(uint32_t), nullptr, &err);
+        if (err != CL_SUCCESS || !d_fixed_lens)     { free_all(); return false; }
+        d_varlen_offsets = clCreateBuffer(ctx, CL_MEM_READ_ONLY, MAX_FIELDS * sizeof(uint32_t), nullptr, &err);
+        if (err != CL_SUCCESS || !d_varlen_offsets) { free_all(); return false; }
+        meta_ready = true;
+        owning_ctx = ctx;
+        return true;
+    }
+
+    // Grow-only-by-bytes helper shared by the three bulk buffers: releases +
+    // recreates only the one buffer that is too small, leaving the other two
+    // (and any already-adequate capacity) untouched.
+    static bool ensure_bytes(cl_mem& buf, size_t& cap, size_t need, cl_context ctx, cl_mem_flags flags) {
+        if (buf && need <= cap) return true;
+        if (buf) { clReleaseMemObject(buf); buf = nullptr; cap = 0; }
+        cl_int err = CL_SUCCESS;
+        cl_mem created = clCreateBuffer(ctx, flags, need, nullptr, &err);
+        if (err != CL_SUCCESS || !created) { return false; }
+        buf = created;
+        cap = need;
+        return true;
+    }
+
+    void free_all() {
+        if (d_col_offsets)    { clReleaseMemObject(d_col_offsets);    d_col_offsets = nullptr; }
+        if (d_strides)        { clReleaseMemObject(d_strides);        d_strides = nullptr; }
+        if (d_fixed_lens)     { clReleaseMemObject(d_fixed_lens);     d_fixed_lens = nullptr; }
+        if (d_varlen_offsets) { clReleaseMemObject(d_varlen_offsets); d_varlen_offsets = nullptr; }
+        meta_ready = false;
+        owning_ctx = nullptr;
+        if (d_packed_cols)    { clReleaseMemObject(d_packed_cols);    d_packed_cols = nullptr; }
+        packed_cols_cap = 0;
+        if (d_packed_varlens) { clReleaseMemObject(d_packed_varlens); d_packed_varlens = nullptr; }
+        packed_varlens_cap = 0;
+        if (d_out)            { clReleaseMemObject(d_out);            d_out = nullptr; }
+        out_cap = 0;
+    }
+
+    ~OclSighashPool() { free_all(); }
+};
+
+static thread_local OclSighashPool g_ocl_sighash_pool;
+
 } // anonymous namespace
+
+// ============================================================================
+// OpenCL control-call indirection for the BIP-352 multi-spend path
+// (GitHub issue #335 acceptance repair, round 3)
+// ============================================================================
+// bip352_fault_injection::fi_call() wraps every OpenCL control call reachable
+// from OpenCLBackend::bip352_scan_batch_multispend (clGetCommandQueueInfo,
+// both clGetKernelWorkGroupInfo queries, every clSetKernelArg, both
+// clEnqueueNDRangeKernel launches, clFinish, clEnqueueReadBuffer) behind one
+// indirection point per call, so a dedicated test build can force any ONE
+// named call site to fail with a chosen cl_int error code, deterministically,
+// without needing a genuine GPU/driver fault -- and assert real fail-closed
+// behavior end-to-end (see
+// audit/test_exploit_opencl_bip352_control_call_failclosed.cpp).
+//
+// P0 FIX (round 3, replacing round 2's rejected design): round 2 compiled the
+// extern "C" ufsecp_test_opencl_bip352_* hook functions UNCONDITIONALLY into
+// this translation unit, which is linked into the production
+// secp256k1_gpu_host static/shared library with no test-only guard --
+// reachable fault-injection hooks in a release build's exported symbol table
+// are a real attack surface (anything that can call an exported symbol can
+// force GPU control calls to report success/failure at will). Hiding the
+// symbols with __attribute__((visibility("hidden"))) is NOT sufficient --
+// the hooks must not be compiled in at all for a normal build.
+//
+// Fix: the injector state, the 4 extern "C" hook functions, AND fi_call()'s
+// ability to actually short-circuit a call are now gated behind
+// SECP256K1_BUILD_FAULT_INJECTION_TESTS, an opt-in macro that is OFF unless
+// explicitly defined by an internal/test-only build variant. No target in
+// this repo's CMakeLists.txt defines it today -- wiring a
+// `option(SECP256K1_BUILD_FAULT_INJECTION_TESTS ... OFF)` in the root
+// CMakeLists.txt plus a matching entry in src/gpu/CMakeLists.txt's
+// GPU_BACKEND_DEFS (OFF/undefined by default, never set for release
+// packaging) is outside this file's allowed_writes for this task -- see the
+// scope-blocker note returned with this change. With the macro undefined
+// (every build today), fi_call() collapses to a direct, unconditional call
+// to `real()`: no thread_local injector state and no extern "C" hook symbols
+// exist anywhere in this translation unit -- nothing for `nm` to find. See
+// audit/test_regression_opencl_bip352_faultinject_symbols_absent.cpp for the
+// runtime nm proof against the actual compiled object.
+#if defined(SECP256K1_BUILD_FAULT_INJECTION_TESTS)
+
+namespace bip352_fault_injection {
+
+enum Site : int {
+    SITE_NONE               = -1,
+    SITE_QUEUE_INFO         = 0,  // clGetCommandQueueInfo (device query)
+    SITE_WG_INFO_DECOMPRESS = 1,  // clGetKernelWorkGroupInfo (decompress kernel)
+    SITE_WG_INFO_MAIN       = 2,  // clGetKernelWorkGroupInfo (main scan kernel)
+    SITE_DECOMPRESS_ARG0    = 3,  // clSetKernelArg(decompress, 0, ...)
+    SITE_DECOMPRESS_ARG1    = 4,
+    SITE_DECOMPRESS_ARG2    = 5,
+    SITE_DECOMPRESS_ARG3    = 6,
+    SITE_DECOMPRESS_LAUNCH  = 7,  // clEnqueueNDRangeKernel (decompress)
+    SITE_MAIN_ARG0          = 8,  // clSetKernelArg(main scan, 0, ...)
+    SITE_MAIN_ARG1          = 9,
+    SITE_MAIN_ARG2          = 10,
+    SITE_MAIN_ARG3          = 11,
+    SITE_MAIN_ARG4          = 12,
+    SITE_MAIN_ARG5          = 13,
+    SITE_MAIN_ARG6          = 14,
+    SITE_MAIN_LAUNCH        = 15, // clEnqueueNDRangeKernel (main scan)
+    SITE_FINISH             = 16, // clFinish
+    SITE_READBACK           = 17, // clEnqueueReadBuffer
+    SITE_COUNT              = 18,
+};
+
+static thread_local int    g_fi_site_id   = SITE_NONE;
+static thread_local cl_int g_fi_error     = CL_SUCCESS;
+static thread_local int    g_fi_hit_count = 0;
+
+// Call-site wrapper: `site` identifies the call; `real` performs the actual
+// clXxx(...) invocation. Returns the injected error (without calling `real`
+// at all) iff `site == g_fi_site_id`; otherwise calls `real` and returns its
+// genuine result -- a real end-to-end call with exactly one call substituted.
+template <typename Fn>
+static cl_int fi_call(Site site, Fn&& real) {
+    if (site == g_fi_site_id) {
+        ++g_fi_hit_count;
+        return g_fi_error;
+    }
+    return real();
+}
+
+} // namespace bip352_fault_injection
+
+extern "C" {
+// Arm fault injection (current thread only): the next call reaching
+// call-site `site_id` (bip352_fault_injection::Site) inside
+// bip352_scan_batch_multispend returns `cl_error_code` instead of invoking
+// the real OpenCL function. Persists until
+// ufsecp_test_opencl_bip352_clear_fault() is called. Only exists when
+// SECP256K1_BUILD_FAULT_INJECTION_TESTS is defined -- see the block comment
+// above.
+void ufsecp_test_opencl_bip352_inject_fault(int site_id, int32_t cl_error_code) {
+    bip352_fault_injection::g_fi_site_id   = site_id;
+    bip352_fault_injection::g_fi_error     = static_cast<cl_int>(cl_error_code);
+    bip352_fault_injection::g_fi_hit_count = 0;
+}
+// Disarm fault injection (current thread only).
+void ufsecp_test_opencl_bip352_clear_fault() {
+    bip352_fault_injection::g_fi_site_id   = bip352_fault_injection::SITE_NONE;
+    bip352_fault_injection::g_fi_hit_count = 0;
+}
+// How many times the currently-armed site has fired since the last
+// inject_fault()/clear_fault() call (current thread only). Lets a caller
+// distinguish "the call site was never reached" from "the injected fault
+// fired as expected".
+int32_t ufsecp_test_opencl_bip352_fault_hit_count() {
+    return bip352_fault_injection::g_fi_hit_count;
+}
+// Deterministic, GPU/driver-independent probe: invokes fi_call(site, []{
+// return CL_SUCCESS; }) directly and returns the result. Proves the injector
+// mechanism itself works correctly WITHOUT any real OpenCL device, context,
+// or kernel build -- see
+// audit/test_exploit_opencl_bip352_control_call_failclosed.cpp.
+int32_t ufsecp_test_opencl_bip352_probe_fault(int site_id) {
+    using namespace bip352_fault_injection;
+    return static_cast<int32_t>(
+        fi_call(static_cast<Site>(site_id), []() -> cl_int { return CL_SUCCESS; }));
+}
+} // extern "C"
+
+#else // !SECP256K1_BUILD_FAULT_INJECTION_TESTS -- every normal build today
+
+// Same Site enum (named call sites make the dispatch code below readable)
+// but NO thread_local injector state and NO extern "C" hook functions exist
+// anywhere in this translation unit -- fi_call() is a transparent, always-
+// inlined passthrough to `real()`. This is what production/release/default
+// builds compile; audit/test_regression_opencl_bip352_faultinject_symbols_absent.cpp
+// asserts none of the four hook symbol names appear in this file's compiled
+// object (nm), proving they are not merely hidden but genuinely absent.
+namespace bip352_fault_injection {
+
+enum Site : int {
+    SITE_NONE               = -1,
+    SITE_QUEUE_INFO         = 0,
+    SITE_WG_INFO_DECOMPRESS = 1,
+    SITE_WG_INFO_MAIN       = 2,
+    SITE_DECOMPRESS_ARG0    = 3,
+    SITE_DECOMPRESS_ARG1    = 4,
+    SITE_DECOMPRESS_ARG2    = 5,
+    SITE_DECOMPRESS_ARG3    = 6,
+    SITE_DECOMPRESS_LAUNCH  = 7,
+    SITE_MAIN_ARG0          = 8,
+    SITE_MAIN_ARG1          = 9,
+    SITE_MAIN_ARG2          = 10,
+    SITE_MAIN_ARG3          = 11,
+    SITE_MAIN_ARG4          = 12,
+    SITE_MAIN_ARG5          = 13,
+    SITE_MAIN_ARG6          = 14,
+    SITE_MAIN_LAUNCH        = 15,
+    SITE_FINISH             = 16,
+    SITE_READBACK           = 17,
+    SITE_COUNT              = 18,
+};
+
+template <typename Fn>
+static inline cl_int fi_call(Site /*site*/, Fn&& real) {
+    return real();
+}
+
+} // namespace bip352_fault_injection
+
+#endif // SECP256K1_BUILD_FAULT_INJECTION_TESTS
 
 namespace secp256k1 {
 namespace gpu {
@@ -288,6 +895,8 @@ public:
         if (ext_tagged_hash_var_)      { clReleaseKernel(ext_tagged_hash_var_);      ext_tagged_hash_var_      = nullptr; }
         if (ext_hash256_)              { clReleaseKernel(ext_hash256_);              ext_hash256_              = nullptr; }
         if (ext_hash256_var_)          { clReleaseKernel(ext_hash256_var_);          ext_hash256_var_          = nullptr; }
+        if (ext_merkle_pair_)          { clReleaseKernel(ext_merkle_pair_);          ext_merkle_pair_          = nullptr; }
+        if (ext_sighash_descriptor_)   { clReleaseKernel(ext_sighash_descriptor_);   ext_sighash_descriptor_   = nullptr; }
         if (ext_ecrecover_)      { clReleaseKernel(ext_ecrecover_);      ext_ecrecover_      = nullptr; }
         if (ext_schnorr_verify_) { clReleaseKernel(ext_schnorr_verify_); ext_schnorr_verify_ = nullptr; }
         if (ext_ecdsa_snark_)    { clReleaseKernel(ext_ecdsa_snark_);    ext_ecdsa_snark_    = nullptr; }
@@ -313,7 +922,10 @@ public:
 
         if (bip352_scan_compressed_kernel_) { clReleaseKernel(bip352_scan_compressed_kernel_); bip352_scan_compressed_kernel_ = nullptr; }
         if (bip352_scan_kernel_)  { clReleaseKernel(bip352_scan_kernel_);  bip352_scan_kernel_  = nullptr; }
+        if (bip352_decompress_kernel_) { clReleaseKernel(bip352_decompress_kernel_); bip352_decompress_kernel_ = nullptr; }
+        if (bip352_scan_compressed_multispend_kernel_) { clReleaseKernel(bip352_scan_compressed_multispend_kernel_); bip352_scan_compressed_multispend_kernel_ = nullptr; }
         if (bip352_program_)      { clReleaseProgram(bip352_program_);     bip352_program_      = nullptr; }
+        bip352_init_attempted_ = false;
         bip324_init_attempted_ = false;
         auto* shutdown_queue = ctx_ ? static_cast<cl_command_queue>(ctx_->native_queue()) : nullptr;
         msm_pool_.free_all(shutdown_queue);
@@ -631,6 +1243,88 @@ public:
         return (count < cap) ? count : cap;
     }
 
+    /* Explicit local work-group size for a 1-D lbtc_columns kernel launch,
+     * derived from THIS kernel object's own device-compiled limits (kernels
+     * differ in register pressure, so CL_KERNEL_WORK_GROUP_SIZE is queried
+     * per kernel, never assumed as a global constant).
+     *
+     * WHY THIS EXISTS (measured root cause of the OpenCL lbtc_columns latency
+     * cliff): every column-verify launch used to pass local_work_size=nullptr
+     * and let the OpenCL driver auto-select a local size for the requested
+     * global size (== the row count). Bounded instrumentation on this host
+     * (RTX 5060 Ti, NVIDIA driver 580.173.02) confirmed: the two catastrophic
+     * (cpu_faster) cliffs in the evidence artifact are at row counts 78,643
+     * and 1,258,291 -- both are PRIME (sympy.factorint confirms neither has
+     * any factor besides 1 and itself), and the milder-but-real regressions
+     * are at 1,153,434 (=2*3*192239, largest prime factor 192239) and
+     * 314,573 (=7*44939). Every FAST cell is a power of two (65536=2^16,
+     * 262144=2^18, 1048576=2^20). The engine-owned chunk cap
+     * (lbtc_columns_chunk, hard cap 4,194,304) never actually engages for any
+     * row count in the measured cliff range, so the chunk/remainder loop
+     * itself was ruled out as the cause -- this was verified with
+     * clGetDeviceInfo(CL_DEVICE_MAX_MEM_ALLOC_SIZE) on this host, not
+     * assumed. The pattern (severity scales with the size of the row count's
+     * largest prime factor, worst when the count IS prime) is the textbook
+     * signature of an OpenCL driver choosing a degenerate local work-group
+     * size (observed effect consistent with falling back toward
+     * local_size=1) when it cannot find a local size that evenly divides a
+     * NULL-local global size with few/no small factors. Requesting an
+     * explicit, kernel/device-derived local size here and padding the global
+     * range up to a multiple of it (lbtc_columns_padded_global) removes the
+     * launch's dependency on the row count's factorization entirely --
+     * regardless of backend/vendor, never just this one driver.
+     *
+     * Padding is safe ONLY because every lbtc_columns kernel already
+     * bounds-checks `if (gid >= count) return;` (secp256k1_extended.cl,
+     * ecdsa_verify_lbtc_columns / schnorr_verify_lbtc_columns): the extra
+     * "ghost" work-items past `count` are guaranteed no-ops -- they never
+     * read or write any buffer, so correctness/output is unaffected. */
+    // Return codes of the three underlying queries are explicitly captured and
+    // checked (acceptance repair for opencl-signature-chunk-cliff-fix-claude-v1):
+    // a failed query is NOT treated as fatal here -- unlike clSetKernelArg /
+    // clEnqueueNDRangeKernel / clFinish / clEnqueueReadBuffer in the callers
+    // below, a wrong or default local-work-group size can only affect
+    // performance/occupancy, never correctness (every lbtc_columns kernel
+    // bounds-checks `gid >= count`, and clEnqueueNDRangeKernel's own return
+    // code -- checked and fail-closed in both callers -- already rejects any
+    // local size the driver considers invalid for the launch). So a query
+    // failure degrades to the same conservative default (64) as a query that
+    // legitimately reports "no limit found", which is the intended, safe,
+    // pre-existing fallback design of this helper; the checks below just make
+    // that "checked, not blindly trusted" contract explicit and auditable.
+    size_t lbtc_columns_local_size(cl_kernel kernel, cl_command_queue queue) const {
+        cl_device_id dev = nullptr;
+        const cl_int q_dev = clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(dev), &dev, nullptr);
+        size_t kernel_max = 0;
+        if (q_dev == CL_SUCCESS && dev) {
+            const cl_int q_max = clGetKernelWorkGroupInfo(kernel, dev, CL_KERNEL_WORK_GROUP_SIZE,
+                                     sizeof(kernel_max), &kernel_max, nullptr);
+            if (q_max != CL_SUCCESS) kernel_max = 0;
+        }
+        if (kernel_max == 0) kernel_max = 64;  // conservative fallback: query unavailable or failed
+        size_t pref_mult = 0;
+        if (q_dev == CL_SUCCESS && dev) {
+            const cl_int q_pref = clGetKernelWorkGroupInfo(kernel, dev, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+                                     sizeof(pref_mult), &pref_mult, nullptr);
+            if (q_pref != CL_SUCCESS) pref_mult = 0;
+        }
+        size_t local = (kernel_max < 256) ? kernel_max : 256;
+        if (pref_mult > 0 && pref_mult <= local)
+            local -= (local % pref_mult);
+        if (local == 0)
+            local = (pref_mult > 0 && pref_mult <= kernel_max) ? pref_mult : kernel_max;
+        if (local == 0) local = 1;
+        return local;
+    }
+
+    /* Round n up to the next multiple of local (>=1): the padded global range
+     * for an explicit-local-work-size launch. See lbtc_columns_local_size for
+     * why padding past `count` is safe for these kernels. */
+    static size_t lbtc_columns_padded_global(size_t n, size_t local) {
+        if (local <= 1) return n;
+        return ((n + local - 1) / local) * local;
+    }
+
     GpuError ecdsa_verify_lbtc_columns(
         const uint8_t* digests32, const uint8_t* pubkeys33,
         const uint8_t* sigs64, size_t count,
@@ -654,6 +1348,21 @@ public:
         auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
         auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
         cl_int clerr;
+        // Fail-closed helper for the per-chunk dispatch below (acceptance repair
+        // for opencl-signature-chunk-cliff-fix-claude-v1): on ANY OpenCL
+        // control-call failure inside the loop (upload, kernel-arg bind, launch,
+        // finish, or readback) the ENTIRE out_results buffer is re-zeroed before
+        // returning a non-OK GpuError -- not just the untouched tail. Without
+        // this, a failure on chunk k>0 would leave real GPU verdicts from
+        // chunks [0,k) sitting in out_results even though the call as a whole
+        // reports failure; the direct hook (gpu_engine_hook.cpp) and the C ABI
+        // wrapper (ufsecp_gpu_impl.cpp::to_abi_error_clear_on_fail) both already
+        // ignore/re-clear the buffer on a non-OK return, so this is defence in
+        // depth, not a behavior change for either existing caller.
+        auto fail_closed = [&](GpuError code, const char* msg) -> GpuError {
+            std::memset(out_results, 0, count);
+            return set_error(code, msg);
+        };
         const size_t chunk = lbtc_columns_chunk(queue, count);
         // Reusable, grow-only device + host staging (acceptance A6): the four
         // column buffers persist across engine calls and chunks — no per-call or
@@ -668,6 +1377,9 @@ public:
         cl_mem d_res = g_ocl_columns_pool.d_res;
         g_opencl_batch_scratch.ensure_results(chunk);
         int* const h_res = g_opencl_batch_scratch.results.data();
+        // Fixed for the whole call (depends only on kernel/device, not on the
+        // per-chunk row count n) -- see lbtc_columns_local_size doc comment.
+        const size_t local = lbtc_columns_local_size(ext_ecdsa_lbtc_columns_, queue);
 
         for (size_t off = 0; off < count; off += chunk) {
             const size_t n = (count - off < chunk) ? (count - off) : chunk;
@@ -677,24 +1389,44 @@ public:
                     const_cast<uint8_t*>(pubkeys33 + off * 33), 0, nullptr, nullptr) != CL_SUCCESS ||
                 clEnqueueWriteBuffer(queue, d_sig, CL_FALSE, 0, 64 * n,
                     const_cast<uint8_t*>(sigs64 + off * 64), 0, nullptr, nullptr) != CL_SUCCESS)
-                return set_error(GpuError::Memory, "ecdsa columns upload failed");
+                return fail_closed(GpuError::Memory, "ecdsa columns upload failed");
 
             cl_uint cl_count = static_cast<cl_uint>(n);
-            clSetKernelArg(ext_ecdsa_lbtc_columns_, 0, sizeof(cl_mem), &d_dig);
-            clSetKernelArg(ext_ecdsa_lbtc_columns_, 1, sizeof(cl_mem), &d_pub);
-            clSetKernelArg(ext_ecdsa_lbtc_columns_, 2, sizeof(cl_mem), &d_sig);
-            clSetKernelArg(ext_ecdsa_lbtc_columns_, 3, sizeof(cl_mem), &d_res);
-            clSetKernelArg(ext_ecdsa_lbtc_columns_, 4, sizeof(cl_uint), &cl_count);
+            // Every clSetKernelArg return code is checked (OR-accumulated -- CL
+            // error codes are non-zero and CL_SUCCESS==0, so an OR of several
+            // codes is zero iff every individual call was CL_SUCCESS): arg 4
+            // (the row count) is a FRESH per-chunk value, so a silently-failed
+            // bind here would leave the kernel using a STALE count from a
+            // previous chunk while still launching over the current chunk's
+            // (correctly re-uploaded) buffers -- a wrong-count kernel run that
+            // clEnqueueNDRangeKernel's own return code cannot detect, because
+            // the launch call itself still succeeds.
+            cl_int argerr = CL_SUCCESS;
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_columns_, 0, sizeof(cl_mem), &d_dig);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_columns_, 1, sizeof(cl_mem), &d_pub);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_columns_, 2, sizeof(cl_mem), &d_sig);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_columns_, 3, sizeof(cl_mem), &d_res);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_columns_, 4, sizeof(cl_uint), &cl_count);
+            if (argerr != CL_SUCCESS)
+                return fail_closed(GpuError::Launch, "ecdsa columns kernel arg bind failed");
 
-            size_t global = n;
+            // Explicit local size + padded global range (never nullptr local):
+            // avoids the driver's poor auto-selected local size for a global
+            // size with no small factors (e.g. a prime n) -- see
+            // lbtc_columns_local_size doc comment for the measured evidence.
+            // The kernel bounds-checks gid >= count, so the padding
+            // (global - n ghost work-items) is a correctness no-op.
+            size_t global = lbtc_columns_padded_global(n, local);
             clerr = clEnqueueNDRangeKernel(queue, ext_ecdsa_lbtc_columns_, 1, nullptr,
-                                           &global, nullptr, 0, nullptr, nullptr);
+                                           &global, &local, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
-                return set_error(GpuError::Launch, "ecdsa columns kernel launch failed");
-            clFinish(queue);
+                return fail_closed(GpuError::Launch, "ecdsa columns kernel launch failed");
+            clerr = clFinish(queue);
+            if (clerr != CL_SUCCESS)
+                return fail_closed(GpuError::Launch, "ecdsa columns queue finish failed");
             clerr = clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0, sizeof(int) * n, h_res, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
-                return set_error(GpuError::Memory, "ecdsa columns result read failed");
+                return fail_closed(GpuError::Memory, "ecdsa columns result read failed");
             for (size_t i = 0; i < n; ++i)
                 out_results[off + i] = h_res[i] ? 1 : 0;
         }
@@ -749,6 +1481,7 @@ public:
         cl_mem d_pub  = g_ocl_columns_pool.d_key;
         cl_mem d_sig  = g_ocl_columns_pool.d_sig;
         cl_mem d_keys = g_ocl_columns_pool.d_keys;
+        const size_t local = lbtc_columns_local_size(ext_ecdsa_lbtc_collect_, queue);
 
         for (size_t off = 0; off < count; off += chunk) {
             const size_t n = (count - off < chunk) ? (count - off) : chunk;
@@ -766,18 +1499,23 @@ public:
                 return set_error(GpuError::Memory, "ecdsa collect upload failed");
 
             cl_uint cl_count = static_cast<cl_uint>(n);
-            clSetKernelArg(ext_ecdsa_lbtc_collect_, 0, sizeof(cl_mem), &d_dig);
-            clSetKernelArg(ext_ecdsa_lbtc_collect_, 1, sizeof(cl_mem), &d_pub);
-            clSetKernelArg(ext_ecdsa_lbtc_collect_, 2, sizeof(cl_mem), &d_sig);
-            clSetKernelArg(ext_ecdsa_lbtc_collect_, 3, sizeof(cl_mem), &d_keys);
-            clSetKernelArg(ext_ecdsa_lbtc_collect_, 4, sizeof(cl_uint), &cl_count);
+            cl_int argerr = CL_SUCCESS;
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_collect_, 0, sizeof(cl_mem), &d_dig);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_collect_, 1, sizeof(cl_mem), &d_pub);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_collect_, 2, sizeof(cl_mem), &d_sig);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_collect_, 3, sizeof(cl_mem), &d_keys);
+            argerr |= clSetKernelArg(ext_ecdsa_lbtc_collect_, 4, sizeof(cl_uint), &cl_count);
+            if (argerr != CL_SUCCESS)
+                return set_error(GpuError::Launch, "ecdsa collect kernel arg bind failed");
 
-            size_t global = n;
+            size_t global = lbtc_columns_padded_global(n, local);
             clerr = clEnqueueNDRangeKernel(queue, ext_ecdsa_lbtc_collect_, 1, nullptr,
-                                           &global, nullptr, 0, nullptr, nullptr);
+                                           &global, &local, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
                 return set_error(GpuError::Launch, "ecdsa collect kernel launch failed");
-            clFinish(queue);
+            clerr = clFinish(queue);
+            if (clerr != CL_SUCCESS)
+                return set_error(GpuError::Queue, "ecdsa collect queue finish failed");
             // Read the verdict channel back VERBATIM — valid rows are now 0,
             // invalid rows retain the caller's seed.
             clerr = clEnqueueReadBuffer(queue, d_keys, CL_TRUE, 0, n, key_buffer + off, 0, nullptr, nullptr);
@@ -814,6 +1552,7 @@ public:
         cl_mem d_xon  = g_ocl_columns_pool.d_key;  // 33 B/row buffer backs 32 B x-only
         cl_mem d_sig  = g_ocl_columns_pool.d_sig;
         cl_mem d_keys = g_ocl_columns_pool.d_keys;
+        const size_t local = lbtc_columns_local_size(ext_schnorr_lbtc_collect_, queue);
 
         for (size_t off = 0; off < count; off += chunk) {
             const size_t n = (count - off < chunk) ? (count - off) : chunk;
@@ -828,18 +1567,23 @@ public:
                 return set_error(GpuError::Memory, "schnorr collect upload failed");
 
             cl_uint cl_count = static_cast<cl_uint>(n);
-            clSetKernelArg(ext_schnorr_lbtc_collect_, 0, sizeof(cl_mem), &d_dig);
-            clSetKernelArg(ext_schnorr_lbtc_collect_, 1, sizeof(cl_mem), &d_xon);
-            clSetKernelArg(ext_schnorr_lbtc_collect_, 2, sizeof(cl_mem), &d_sig);
-            clSetKernelArg(ext_schnorr_lbtc_collect_, 3, sizeof(cl_mem), &d_keys);
-            clSetKernelArg(ext_schnorr_lbtc_collect_, 4, sizeof(cl_uint), &cl_count);
+            cl_int argerr = CL_SUCCESS;
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_collect_, 0, sizeof(cl_mem), &d_dig);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_collect_, 1, sizeof(cl_mem), &d_xon);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_collect_, 2, sizeof(cl_mem), &d_sig);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_collect_, 3, sizeof(cl_mem), &d_keys);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_collect_, 4, sizeof(cl_uint), &cl_count);
+            if (argerr != CL_SUCCESS)
+                return set_error(GpuError::Launch, "schnorr collect kernel arg bind failed");
 
-            size_t global = n;
+            size_t global = lbtc_columns_padded_global(n, local);
             clerr = clEnqueueNDRangeKernel(queue, ext_schnorr_lbtc_collect_, 1, nullptr,
-                                           &global, nullptr, 0, nullptr, nullptr);
+                                           &global, &local, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
                 return set_error(GpuError::Launch, "schnorr collect kernel launch failed");
-            clFinish(queue);
+            clerr = clFinish(queue);
+            if (clerr != CL_SUCCESS)
+                return set_error(GpuError::Queue, "schnorr collect queue finish failed");
             clerr = clEnqueueReadBuffer(queue, d_keys, CL_TRUE, 0, n, key_buffer + off, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
                 return set_error(GpuError::Memory, "schnorr collect result read failed");
@@ -1205,6 +1949,416 @@ public:
         return GpuError::Ok;
     }
 
+    /* out32[i] = SHA256(SHA256(left32[i] || right32[i])) — Bitcoin Merkle-tree
+     * parent hash from two 32-byte child hashes. SoA layout: left32/right32 are
+     * separate n*32-byte buffers (not interleaved). Public-data hashing only. */
+    GpuError merkle_pair_hash(
+        const uint8_t* left32, const uint8_t* right32,
+        size_t n, uint8_t* out32) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (n == 0) { clear_error(); return GpuError::Ok; }
+        if (!left32 || !right32 || !out32) return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_extended_kernels();
+        if (err != GpuError::Ok) return err;
+        if (!ext_merkle_pair_)
+            return set_error(GpuError::Launch, "lbtc_merkle_pair kernel unavailable");
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int e;
+        cl_mem d_left = nullptr, d_right = nullptr, d_out = nullptr;
+        auto release_all = [&]() {
+            if (d_out)   clReleaseMemObject(d_out);
+            if (d_right) clReleaseMemObject(d_right);
+            if (d_left)  clReleaseMemObject(d_left);
+        };
+        d_left = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                n * 32, const_cast<uint8_t*>(left32), &e);
+        if (e != CL_SUCCESS) { release_all(); return set_error(GpuError::Memory, "merkle_pair_hash d_left"); }
+        d_right = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                 n * 32, const_cast<uint8_t*>(right32), &e);
+        if (e != CL_SUCCESS) { release_all(); return set_error(GpuError::Memory, "merkle_pair_hash d_right"); }
+        d_out = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY, n * 32, nullptr, &e);
+        if (e != CL_SUCCESS) { release_all(); return set_error(GpuError::Memory, "merkle_pair_hash d_out"); }
+
+        cl_uint cl_count = static_cast<cl_uint>(n);
+        clSetKernelArg(ext_merkle_pair_, 0, sizeof(cl_mem), &d_left);
+        clSetKernelArg(ext_merkle_pair_, 1, sizeof(cl_mem), &d_right);
+        clSetKernelArg(ext_merkle_pair_, 2, sizeof(cl_mem), &d_out);
+        clSetKernelArg(ext_merkle_pair_, 3, sizeof(cl_uint), &cl_count);
+        size_t global = n;
+        e = clEnqueueNDRangeKernel(queue, ext_merkle_pair_, 1, nullptr, &global, nullptr, 0, nullptr, nullptr);
+        if (e != CL_SUCCESS) { release_all(); return set_error(GpuError::Launch, "merkle_pair_hash kernel launch failed"); }
+        clFinish(queue);
+        e = clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, n * 32, out32, 0, nullptr, nullptr);
+        release_all();
+        if (e != CL_SUCCESS) return set_error(GpuError::Memory, "merkle_pair_hash result read failed");
+        clear_error();
+        return GpuError::Ok;
+    }
+
+    /* out32[i] = HASH256(descriptor-shaped concatenation of per-row field
+     * columns) -- Bitcoin sighash preimage hashing without a CPU-assembled
+     * per-row preimage. OpenCL 1.2 cannot bind an array of __global buffer
+     * pointers as a single kernel argument (unlike CUDA's device pointer
+     * array), so referenced field columns are written directly from the
+     * caller's own field_data/field_var_lens pointers into the pool's packed
+     * device buffers via clEnqueueWriteBuffer, one field at a time -- no
+     * intermediate host-side packing vector, no COPY_HOST_PTR -- plus a
+     * small per-field metadata table (byte offset / stride / fixed_len /
+     * var-lens offset) the kernel uses to locate each field.
+     *
+     * Full descriptor grammar validation is repeated here rather than
+     * trusted from the caller: this method is reachable both from the
+     * libbitcoin direct API (which fully validates before dispatch) and
+     * directly from the ufsecp_gpu C ABI (which only pre-checks
+     * length/terminator/mid-0xFF) -- field-id/duplicate/nHashType/var-len/
+     * preimage-size checks are this backend's own responsibility.
+     *
+     * The device-side pool buffers, the kernel object, and the command queue
+     * are all shared per backend instance (the pool is thread_local per
+     * calling thread; the kernel/queue are not): sighash_dispatch_mtx_ below
+     * serializes the whole dispatch (pool alloc through readback) so two
+     * threads calling this method concurrently on the same backend/context
+     * can never interleave clSetKernelArg with each other.
+     * Public data only, variable-time, no secret material. */
+    GpuError sighash_descriptor_hash(
+        const uint8_t* descriptor, size_t descriptor_len,
+        const uint8_t* const* field_data, const uint32_t* field_lengths,
+        const uint32_t* const* field_var_lens, size_t count,
+        uint8_t* out32) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!descriptor || !field_data || !field_lengths || !out32)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        // `count` is narrowed to cl_uint (32-bit) further down -- both as the
+        // kernel's row-count argument and via static_cast<uint32_t> when
+        // deriving per-field varlen offsets. Reject anything that would
+        // silently truncate through either cast before it can reach them:
+        // the overflow checks below only bound count*32 / count*stride
+        // against 64-bit/size_t limits, which still pass for count values
+        // far beyond UINT32_MAX (e.g. count=5e9).
+        if (count > 0xFFFFFFFFull)
+            return set_error(GpuError::BadInput, "count exceeds uint32_t range");
+
+        // Overflow-safe output size, checked before any use in allocation/copy
+        // -- this backend is directly reachable from the C ABI, not just the
+        // pre-validated C++ direct-API caller, so `count` cannot be trusted to
+        // keep count*32 within size_t. Fail-closed: zero out32 up front so any
+        // early non-Ok return below (validation, alloc, launch, read) leaves
+        // no stale or partially-written digests behind.
+        constexpr uint64_t kU64Max = (std::numeric_limits<uint64_t>::max)();
+        uint64_t out_bytes64 = static_cast<uint64_t>(count);
+        if (out_bytes64 > kU64Max / 32) return set_error(GpuError::BadInput, "output size overflow");
+        out_bytes64 *= 32;
+        if (out_bytes64 > static_cast<uint64_t>((std::numeric_limits<size_t>::max)()))
+            return set_error(GpuError::BadInput, "output size overflow");
+        const size_t out_bytes = static_cast<size_t>(out_bytes64);
+        std::memset(out32, 0, out_bytes);
+
+        // ── Descriptor pre-dispatch validation (mirrors libbitcoin.hpp / CUDA parser) ──
+        constexpr size_t MAX_FIELDS = 64;
+        constexpr size_t MAX_PREIMAGE = 4u * 1024u * 1024u;  // 4 MiB per row
+        struct HostPlan { uint16_t field_id; bool has_len; uint32_t fixed_len; };
+        HostPlan plan[MAX_FIELDS];
+        size_t num_fields = 0;
+        bool has_nHashType = false;
+
+        if (descriptor_len < 1 || descriptor_len > 129) return set_error(GpuError::BadInput, "descriptor_len");
+        if ((descriptor_len & 1u) == 0) return set_error(GpuError::BadInput, "descriptor_len even");
+        if (descriptor[descriptor_len - 1] != 0xFF) return set_error(GpuError::BadInput, "no terminator");
+        for (size_t i = 0; i < descriptor_len - 1; i += 2)
+            if (descriptor[i] == 0xFF) return set_error(GpuError::BadInput, "mid-0xFF");
+
+        const uint8_t* p = descriptor;
+        const uint8_t* dend = descriptor + descriptor_len;
+        while (p < dend && *p != 0xFF) {
+            if (num_fields >= MAX_FIELDS) return set_error(GpuError::BadInput, "too many fields");
+            if (p + 1 >= dend) return set_error(GpuError::BadInput, "truncated ref");
+            const uint16_t fid = static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1] & 0x0Fu) << 8);
+            const uint8_t flags_nib = p[1] >> 4;
+            if ((flags_nib & 0x0Cu) != 0) return set_error(GpuError::BadInput, "reserved flags");
+            if ((fid & 0xFFu) == 0xFFu) return set_error(GpuError::BadInput, "reserved low-byte");
+            for (size_t j = 0; j < num_fields; ++j)
+                if (plan[j].field_id == fid) return set_error(GpuError::BadInput, "duplicate field");
+            const bool has_len = (flags_nib & 0x01u) != 0;
+            uint32_t flen = 0;
+            switch (fid) {
+            case 0x00: flen = 4;  break; case 0x01: flen = 32; break; case 0x02: flen = 32; break;
+            case 0x03: flen = 36; break; case 0x04: /*var*/    break; case 0x05: flen = 8;  break;
+            case 0x06: flen = 4;  break; case 0x07: flen = 32; break; case 0x08: flen = 4;  break;
+            case 0x09: flen = 4;  has_nHashType = true; break;
+            case 0x0A: flen = 36; break; case 0x0B: flen = 4;  break;
+            // 0x0C..0x0F are Taproot-only (annex / tapleaf_hash / key_version /
+            // codesep_pos). This op computes legacy/BIP143-style HASH256, not
+            // BIP-341 TapSighash -- reject explicitly rather than silently
+            // accepting fields this backend does not implement. Independently
+            // enforced here (not just trusted from the caller) because this
+            // backend is also reachable directly from the C ABI.
+            case 0x0C: case 0x0D: case 0x0E: case 0x0F:
+                return set_error(GpuError::BadInput, "reserved taproot field id");
+            case 0xF0: /*var*/ break;
+            default: return set_error(GpuError::BadInput, "unsupported field_id");
+            }
+            const bool is_var = (flen == 0);
+            if (is_var && !has_len)  return set_error(GpuError::BadInput, "var w/o HAS_LENGTH");
+            if (!is_var && has_len)  return set_error(GpuError::BadInput, "fixed w/ HAS_LENGTH");
+            if (!field_data[fid])    return set_error(GpuError::BadInput, "null field_data");
+            if (field_lengths[fid] == 0) return set_error(GpuError::BadInput, "zero stride");
+            // Fixed-field stride must be >= its fixed serialized length --
+            // otherwise a row's fixed-length read would run past the bytes the
+            // caller actually populated for that field (undersized declared
+            // stride vs. protocol-fixed width). Mirrors the CPU direct parser
+            // (compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp) and the
+            // CUDA backend (gpu_backend_cuda.cu); same error text as CUDA.
+            if (!is_var && field_lengths[fid] < flen)
+                return set_error(GpuError::BadInput, "stride < fixed_len");
+            if (is_var && (!field_var_lens || !field_var_lens[fid]))
+                return set_error(GpuError::BadInput, "null var_lens");
+            plan[num_fields].field_id  = fid;
+            plan[num_fields].has_len   = has_len;
+            plan[num_fields].fixed_len = flen;
+            ++num_fields;
+            p += 2;
+        }
+        if (p != dend - 1) return set_error(GpuError::BadInput, "bad terminator pos");
+        if (!has_nHashType) return set_error(GpuError::BadInput, "missing nHashType");
+
+        // The kernel (lbtc_sighash_descriptor) indexes
+        // packed_varlens[varlen_offsets[fi] + gid] with both operands `uint`
+        // (32-bit) OpenCL device types. h_varlen_offsets[fi] is assigned
+        // num_var_fields * count further below (32-bit host multiply that can
+        // silently wrap) -- prove the total var-field element count fits
+        // uint32_t here, before any h_varlen_offsets[] value is computed or
+        // used, so a wrap can never let one work item read another field's or
+        // another row's varlen entry. Companion check to the count-range
+        // guard above (same "narrows to 32 bits" hazard).
+        {
+            uint64_t num_var_fields64 = 0;
+            for (size_t fi = 0; fi < num_fields; ++fi)
+                if (plan[fi].fixed_len == 0) ++num_var_fields64;
+            const uint64_t count64_guard = static_cast<uint64_t>(count);
+            if (num_var_fields64 != 0 && count64_guard != 0 &&
+                num_var_fields64 > kU64Max / count64_guard)
+                return set_error(GpuError::BadInput, "varlen element count overflow");
+            if (num_var_fields64 * count64_guard > 0xFFFFFFFFull)
+                return set_error(GpuError::BadInput, "varlen element count overflow");
+        }
+
+        // Per-row bounds: var_len <= stride, total preimage <= 4 MiB. Defense
+        // in depth -- the libbitcoin direct-API caller already enforces this,
+        // but this backend is also reachable directly from the C ABI, which
+        // does not repeat the per-row check.
+        for (size_t row = 0; row < count; ++row) {
+            size_t preimage_len = 0;
+            for (size_t fi = 0; fi < num_fields; ++fi) {
+                const auto& pf = plan[fi];
+                uint32_t field_len;
+                if (pf.fixed_len > 0) {
+                    field_len = pf.fixed_len;
+                } else {
+                    const uint32_t var_len = field_var_lens[pf.field_id][row];
+                    if (var_len > field_lengths[pf.field_id])
+                        return set_error(GpuError::BadInput, "var_len exceeds stride");
+                    field_len = var_len;
+                }
+                // Check-before-add, enforced per field rather than after the
+                // whole row has been accumulated. field_len alone can already
+                // exceed MAX_PREIMAGE (field_lengths/var_len are caller-
+                // controlled uint32_t, not pre-bounded to 4 MiB), so that case
+                // is rejected explicitly first -- otherwise
+                // `MAX_PREIMAGE - field_len` would underflow (both operands
+                // unsigned) and silently pass the second half of the check.
+                if (field_len > MAX_PREIMAGE || preimage_len > MAX_PREIMAGE - field_len)
+                    return set_error(GpuError::BadInput, "preimage exceeds 4 MiB");
+                preimage_len += field_len;
+            }
+        }
+
+        // ext_sighash_descriptor_ (the cl_kernel), the ext_* program/kernel
+        // members ensure_extended_kernels() lazily builds, and the queue are
+        // all backend-instance members, not thread-local -- so two threads
+        // racing into this op on a COLD (never-yet-initialized) backend
+        // instance would both enter ensure_extended_kernels() concurrently
+        // and unsynchronized, mutating the shared ext_* pointers and
+        // ext_init_attempted_ with no lock (see that function's sequential
+        // clCreateKernel/clReleaseKernel/clReleaseProgram cleanup chains).
+        // Acquiring sighash_dispatch_mtx_ here -- before the lazy init --
+        // rather than only around the pool/upload/launch span below closes
+        // that race: a pre-warmed kernel (already initialized before any
+        // concurrent caller arrives) must not be the only way this op is
+        // dispatch-safe.
+        std::lock_guard<std::mutex> sighash_lk(sighash_dispatch_mtx_);
+
+        auto err = ensure_extended_kernels();
+        if (err != GpuError::Ok) return err;
+        if (!ext_sighash_descriptor_)
+            return set_error(GpuError::Launch, "lbtc_sighash_descriptor kernel unavailable");
+
+        // Per-field metadata (col_offsets/strides/fixed_lens/varlen_offsets)
+        // is derived purely from the parsed descriptor plan -- not a copy of
+        // caller-supplied bulk data -- so building it in small host vectors
+        // here is fine; only the bulk column/var-len data below must avoid a
+        // host-side packing copy. total_col_bytes / packed_varlens_bytes are
+        // accumulated with explicit overflow checks (count and per-field
+        // stride are both attacker/caller controlled via the C ABI).
+        std::vector<uint64_t> h_col_offsets(num_fields);
+        std::vector<uint32_t> h_strides(num_fields);
+        std::vector<uint32_t> h_fixed_lens(num_fields);
+        std::vector<uint32_t> h_varlen_offsets(num_fields, 0);
+
+        uint64_t total_col_bytes = 0;
+        uint32_t num_var_fields = 0;
+        for (size_t fi = 0; fi < num_fields; ++fi) {
+            const auto& pf = plan[fi];
+            const uint32_t stride = field_lengths[pf.field_id];
+            h_strides[fi]     = stride;
+            h_fixed_lens[fi]  = pf.fixed_len;
+            h_col_offsets[fi] = total_col_bytes;
+            const uint64_t count64 = static_cast<uint64_t>(count);
+            if (stride != 0 && count64 > kU64Max / stride)
+                return set_error(GpuError::BadInput, "packed column size overflow");
+            const uint64_t field_bytes = count64 * stride;
+            if (field_bytes > kU64Max - total_col_bytes)
+                return set_error(GpuError::BadInput, "packed column size overflow");
+            total_col_bytes += field_bytes;
+            if (pf.fixed_len == 0) {
+                h_varlen_offsets[fi] = num_var_fields * static_cast<uint32_t>(count);
+                ++num_var_fields;
+            }
+        }
+        if (total_col_bytes > static_cast<uint64_t>((std::numeric_limits<size_t>::max)()))
+            return set_error(GpuError::BadInput, "packed column size overflow");
+
+        uint64_t packed_varlens_bytes = 0;
+        if (num_var_fields != 0) {
+            const uint64_t nvf64 = num_var_fields;
+            const uint64_t count64 = static_cast<uint64_t>(count);
+            if (count64 != 0 && nvf64 > kU64Max / count64)
+                return set_error(GpuError::BadInput, "packed varlens size overflow");
+            const uint64_t elems = nvf64 * count64;
+            if (elems > kU64Max / sizeof(uint32_t))
+                return set_error(GpuError::BadInput, "packed varlens size overflow");
+            packed_varlens_bytes = elems * sizeof(uint32_t);
+        }
+        if (packed_varlens_bytes > static_cast<uint64_t>((std::numeric_limits<size_t>::max)()))
+            return set_error(GpuError::BadInput, "packed varlens size overflow");
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+
+        // ext_sighash_descriptor_ (the cl_kernel) and queue are backend-
+        // instance members, not thread-local like the pool below: clSetKernelArg
+        // + clEnqueueNDRangeKernel are not atomic against each other, so two
+        // threads dispatching this op concurrently on the same backend/context
+        // could interleave clSetKernelArg calls and launch with a mix of both
+        // callers' buffer arguments -- silently wrong digests, not fail-closed.
+        // sighash_dispatch_mtx_ (acquired above, before ensure_extended_kernels)
+        // serializes the entire dispatch (lazy init, pool alloc, uploads,
+        // kernel-arg binding, launch, finish, readback) under one lock; this
+        // deliberately trades concurrency for correctness on this op.
+
+        // Reusable, grow-only device buffer pool (same thread_local strategy
+        // as g_ocl_columns_pool / ecdsa_verify_lbtc_columns above): no
+        // per-call clCreateBuffer, no CL_MEM_COPY_HOST_PTR (which is invalid
+        // with a null host pointer -- the bug this replaces, hit whenever a
+        // descriptor has zero variable-length fields, e.g. an all-fixed
+        // legacy sighash). The four metadata buffers are fixed at MAX_FIELDS;
+        // the three bulk buffers grow only when a wider descriptor/count
+        // needs more bytes than are already allocated.
+        if (!g_ocl_sighash_pool.ensure_meta(cl_ctx))
+            return set_error(GpuError::Memory, "sighash metadata device alloc");
+        const size_t packed_cols_need = static_cast<size_t>(total_col_bytes) > 0
+                                             ? static_cast<size_t>(total_col_bytes) : 1;
+        if (!OclSighashPool::ensure_bytes(g_ocl_sighash_pool.d_packed_cols, g_ocl_sighash_pool.packed_cols_cap,
+                                           packed_cols_need, cl_ctx, CL_MEM_READ_ONLY))
+            return set_error(GpuError::Memory, "sighash packed_cols device alloc");
+        const size_t packed_varlens_need = static_cast<size_t>(packed_varlens_bytes) > 0
+                                                ? static_cast<size_t>(packed_varlens_bytes) : sizeof(uint32_t);
+        if (!OclSighashPool::ensure_bytes(g_ocl_sighash_pool.d_packed_varlens, g_ocl_sighash_pool.packed_varlens_cap,
+                                           packed_varlens_need, cl_ctx, CL_MEM_READ_ONLY))
+            return set_error(GpuError::Memory, "sighash packed_varlens device alloc");
+        if (!OclSighashPool::ensure_bytes(g_ocl_sighash_pool.d_out, g_ocl_sighash_pool.out_cap,
+                                           out_bytes, cl_ctx, CL_MEM_WRITE_ONLY))
+            return set_error(GpuError::Memory, "sighash output device alloc");
+
+        cl_mem d_col_offsets    = g_ocl_sighash_pool.d_col_offsets;
+        cl_mem d_strides        = g_ocl_sighash_pool.d_strides;
+        cl_mem d_fixed_lens     = g_ocl_sighash_pool.d_fixed_lens;
+        cl_mem d_varlen_offsets = g_ocl_sighash_pool.d_varlen_offsets;
+        cl_mem d_packed_cols    = g_ocl_sighash_pool.d_packed_cols;
+        cl_mem d_packed_varlens = g_ocl_sighash_pool.d_packed_varlens;
+        cl_mem d_out            = g_ocl_sighash_pool.d_out;
+
+        // Metadata uploads: small, host-derived-from-plan arrays, one async
+        // write each into the pool's fixed-size buffers.
+        if (num_fields > 0 &&
+            (clEnqueueWriteBuffer(queue, d_col_offsets, CL_FALSE, 0,
+                 num_fields * sizeof(uint64_t), h_col_offsets.data(), 0, nullptr, nullptr) != CL_SUCCESS ||
+             clEnqueueWriteBuffer(queue, d_strides, CL_FALSE, 0,
+                 num_fields * sizeof(uint32_t), h_strides.data(), 0, nullptr, nullptr) != CL_SUCCESS ||
+             clEnqueueWriteBuffer(queue, d_fixed_lens, CL_FALSE, 0,
+                 num_fields * sizeof(uint32_t), h_fixed_lens.data(), 0, nullptr, nullptr) != CL_SUCCESS ||
+             clEnqueueWriteBuffer(queue, d_varlen_offsets, CL_FALSE, 0,
+                 num_fields * sizeof(uint32_t), h_varlen_offsets.data(), 0, nullptr, nullptr) != CL_SUCCESS))
+            return set_error(GpuError::Memory, "sighash metadata upload failed");
+
+        // Column data written directly from the caller's own field_data
+        // pointers into the persistent packed_cols buffer at each field's
+        // byte offset -- no host-side packing vector, no COPY_HOST_PTR.
+        for (size_t fi = 0; fi < num_fields; ++fi) {
+            const size_t field_bytes = static_cast<size_t>(count) * h_strides[fi];
+            if (field_bytes == 0) continue;
+            if (clEnqueueWriteBuffer(queue, d_packed_cols, CL_FALSE,
+                    static_cast<size_t>(h_col_offsets[fi]), field_bytes,
+                    field_data[plan[fi].field_id], 0, nullptr, nullptr) != CL_SUCCESS)
+                return set_error(GpuError::Memory, "sighash column upload failed");
+        }
+
+        // Var-len arrays written directly from the caller's field_var_lens
+        // pointers, same direct-write pattern (no packing vector).
+        {
+            uint32_t vfi = 0;
+            for (size_t fi = 0; fi < num_fields; ++fi) {
+                if (h_fixed_lens[fi] != 0) continue;
+                const size_t off_bytes = static_cast<size_t>(vfi) * count * sizeof(uint32_t);
+                const size_t len_bytes = count * sizeof(uint32_t);
+                if (len_bytes > 0 &&
+                    clEnqueueWriteBuffer(queue, d_packed_varlens, CL_FALSE, off_bytes, len_bytes,
+                        field_var_lens[plan[fi].field_id], 0, nullptr, nullptr) != CL_SUCCESS)
+                    return set_error(GpuError::Memory, "sighash varlens upload failed");
+                ++vfi;
+            }
+        }
+
+        cl_uint cl_num_fields = static_cast<cl_uint>(num_fields);
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        if (clSetKernelArg(ext_sighash_descriptor_, 0, sizeof(cl_mem), &d_col_offsets) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 1, sizeof(cl_mem), &d_strides) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 2, sizeof(cl_mem), &d_fixed_lens) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 3, sizeof(cl_mem), &d_varlen_offsets) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 4, sizeof(cl_uint), &cl_num_fields) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 5, sizeof(cl_mem), &d_packed_cols) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 6, sizeof(cl_mem), &d_packed_varlens) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 7, sizeof(cl_uint), &cl_count) != CL_SUCCESS ||
+            clSetKernelArg(ext_sighash_descriptor_, 8, sizeof(cl_mem), &d_out) != CL_SUCCESS)
+            return set_error(GpuError::Launch, "sighash kernel arg binding failed");
+
+        size_t global = count;
+        if (clEnqueueNDRangeKernel(queue, ext_sighash_descriptor_, 1, nullptr, &global, nullptr, 0, nullptr, nullptr) != CL_SUCCESS)
+            return set_error(GpuError::Launch, "sighash kernel launch failed");
+        if (clFinish(queue) != CL_SUCCESS)
+            return set_error(GpuError::Launch, "sighash queue finish failed");
+        if (clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, out_bytes, out32, 0, nullptr, nullptr) != CL_SUCCESS)
+            return set_error(GpuError::Memory, "sighash result read failed");
+        clear_error();
+        return GpuError::Ok;
+    }
+
     GpuError schnorr_verify_lbtc_columns(
         const uint8_t* digests32, const uint8_t* xonly32,
         const uint8_t* sigs64, size_t count,
@@ -1228,6 +2382,14 @@ public:
         auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
         auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
         cl_int clerr;
+        // Fail-closed helper for the per-chunk dispatch below -- see the
+        // identical comment on ecdsa_verify_lbtc_columns::fail_closed for the
+        // full rationale (acceptance repair for
+        // opencl-signature-chunk-cliff-fix-claude-v1).
+        auto fail_closed = [&](GpuError code, const char* msg) -> GpuError {
+            std::memset(out_results, 0, count);
+            return set_error(code, msg);
+        };
         const size_t chunk = lbtc_columns_chunk(queue, count);
         // Reusable, grow-only device + host staging (acceptance A6): persistent
         // across engine calls and chunks — no per-call/per-chunk clCreateBuffer.
@@ -1241,6 +2403,9 @@ public:
         cl_mem d_res = g_ocl_columns_pool.d_res;
         g_opencl_batch_scratch.ensure_results(chunk);
         int* const h_res = g_opencl_batch_scratch.results.data();
+        // Fixed for the whole call (depends only on kernel/device, not on the
+        // per-chunk row count n) -- see lbtc_columns_local_size doc comment.
+        const size_t local = lbtc_columns_local_size(ext_schnorr_lbtc_columns_, queue);
 
         for (size_t off = 0; off < count; off += chunk) {
             const size_t n = (count - off < chunk) ? (count - off) : chunk;
@@ -1250,24 +2415,38 @@ public:
                     const_cast<uint8_t*>(xonly32 + off * 32), 0, nullptr, nullptr) != CL_SUCCESS ||
                 clEnqueueWriteBuffer(queue, d_sig, CL_FALSE, 0, 64 * n,
                     const_cast<uint8_t*>(sigs64 + off * 64), 0, nullptr, nullptr) != CL_SUCCESS)
-                return set_error(GpuError::Memory, "schnorr columns upload failed");
+                return fail_closed(GpuError::Memory, "schnorr columns upload failed");
 
             cl_uint cl_count = static_cast<cl_uint>(n);
-            clSetKernelArg(ext_schnorr_lbtc_columns_, 0, sizeof(cl_mem), &d_dig);
-            clSetKernelArg(ext_schnorr_lbtc_columns_, 1, sizeof(cl_mem), &d_xon);
-            clSetKernelArg(ext_schnorr_lbtc_columns_, 2, sizeof(cl_mem), &d_sig);
-            clSetKernelArg(ext_schnorr_lbtc_columns_, 3, sizeof(cl_mem), &d_res);
-            clSetKernelArg(ext_schnorr_lbtc_columns_, 4, sizeof(cl_uint), &cl_count);
+            // Every clSetKernelArg return code is checked -- see the identical
+            // comment on ecdsa_verify_lbtc_columns for why arg 4 (the fresh
+            // per-chunk row count) is the one that matters most here.
+            cl_int argerr = CL_SUCCESS;
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_columns_, 0, sizeof(cl_mem), &d_dig);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_columns_, 1, sizeof(cl_mem), &d_xon);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_columns_, 2, sizeof(cl_mem), &d_sig);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_columns_, 3, sizeof(cl_mem), &d_res);
+            argerr |= clSetKernelArg(ext_schnorr_lbtc_columns_, 4, sizeof(cl_uint), &cl_count);
+            if (argerr != CL_SUCCESS)
+                return fail_closed(GpuError::Launch, "schnorr columns kernel arg bind failed");
 
-            size_t global = n;
+            // Explicit local size + padded global range (never nullptr local):
+            // avoids the driver's poor auto-selected local size for a global
+            // size with no small factors (e.g. a prime n) -- see
+            // lbtc_columns_local_size doc comment for the measured evidence.
+            // The kernel bounds-checks gid >= count, so the padding
+            // (global - n ghost work-items) is a correctness no-op.
+            size_t global = lbtc_columns_padded_global(n, local);
             clerr = clEnqueueNDRangeKernel(queue, ext_schnorr_lbtc_columns_, 1, nullptr,
-                                           &global, nullptr, 0, nullptr, nullptr);
+                                           &global, &local, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
-                return set_error(GpuError::Launch, "schnorr columns kernel launch failed");
-            clFinish(queue);
+                return fail_closed(GpuError::Launch, "schnorr columns kernel launch failed");
+            clerr = clFinish(queue);
+            if (clerr != CL_SUCCESS)
+                return fail_closed(GpuError::Launch, "schnorr columns queue finish failed");
             clerr = clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0, sizeof(int) * n, h_res, 0, nullptr, nullptr);
             if (clerr != CL_SUCCESS)
-                return set_error(GpuError::Memory, "schnorr columns result read failed");
+                return fail_closed(GpuError::Memory, "schnorr columns result read failed");
             for (size_t i = 0; i < n; ++i)
                 out_results[off + i] = h_res[i] ? 1 : 0;
         }
@@ -2637,23 +3816,60 @@ static void bip352_glv_wnaf5(const uint8_t* scalar_be32, int8_t wnaf[130]) {
     }
 }
 
-    GpuError bip352_scan_batch(
+    GpuError bip352_scan_batch_multispend(
         const uint8_t  scan_privkey32[32],
-        const uint8_t  spend_pubkey33[33],
+        const uint8_t* spend_pubkeys33,
+        size_t n_spend,
         const uint8_t* tweak_pubkeys33,
         size_t n_tweaks,
         uint64_t* prefix64_out) override
     {
         if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
-        if (n_tweaks == 0) { clear_error(); return GpuError::Ok; }
-        if (!scan_privkey32 || !spend_pubkey33 || !tweak_pubkeys33 || !prefix64_out)
+        if (n_tweaks == 0 || n_spend == 0) { clear_error(); return GpuError::Ok; }
+        if (!scan_privkey32 || !spend_pubkeys33 || !tweak_pubkeys33 || !prefix64_out)
             return set_error(GpuError::NullArg, "NULL buffer");
 #if !SECP256K1_GPU_HAS_BIP352
         return set_error(GpuError::Unsupported, "GPU BIP-352 module disabled at build time");
 #endif
+        // Repair (issue #335 acceptance repair): n_tweaks/n_spend/their
+        // product ARE bounds-checked at the ABI layer
+        // (ufsecp_gpu_bip352_scan_batch_multispend, kMaxGpuBatchN /
+        // kMaxBip352Spend, src/cpu/src/ufsecp_gpu_impl.cpp) -- but this is
+        // the only OpenCL op in this file whose buffer sizes and cl_uint
+        // kernel-arg casts are a PRODUCT of two independently-bounded
+        // counts, and GpuBackend virtuals are also called directly by
+        // non-ABI consumers in this codebase (they are not private to the C
+        // ABI wrapper). Re-validate locally as defense-in-depth so this
+        // method is safe even when called directly, bypassing the ABI. The
+        // caps mirror ufsecp_gpu_impl.cpp's kMaxGpuBatchN (2^26) and
+        // kMaxBip352Spend (2^16) -- duplicated rather than shared because
+        // that constant lives in a different translation unit with no
+        // common header for GPU batch-size limits.
+        static constexpr size_t kLocalMaxGpuBatchN   = size_t{1} << 26; // 64M
+        static constexpr size_t kLocalMaxBip352Spend = size_t{1} << 16; // 65536
+        if (n_spend > kLocalMaxBip352Spend)
+            return set_error(GpuError::BadInput, "n_spend too large");
+        if (n_tweaks > kLocalMaxGpuBatchN)
+            return set_error(GpuError::BadInput, "n_tweaks too large");
+        if (n_spend != 0 && n_tweaks > std::numeric_limits<size_t>::max() / n_spend)
+            return set_error(GpuError::BadInput, "n_tweaks * n_spend overflow");
+        const size_t n_rows = n_tweaks * n_spend;
+        if (n_rows > kLocalMaxGpuBatchN)
+            return set_error(GpuError::BadInput, "n_tweaks * n_spend too large");
+
+        // Fail-closed helper: from this point on, n_rows (and therefore
+        // prefix64_out's caller-visible byte size) is known and validated,
+        // so every subsequent failure return zeroes the FULL output buffer
+        // before returning non-Ok -- a direct GpuBackend caller (bypassing
+        // the ABI wrapper's own pre-zero + to_abi_error_clear_on_fail) must
+        // never observe partial or stale prefix64_out contents on error.
+        auto fail = [&](GpuError e, const char* msg) -> GpuError {
+            std::memset(prefix64_out, 0, sizeof(uint64_t) * n_rows);
+            return set_error(e, msg);
+        };
 
         auto err = ensure_bip352_kernel();
-        if (err != GpuError::Ok) return err;
+        if (err != GpuError::Ok) return fail(err, "bip352 kernel init failed");
 
         auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
         auto* queue   = static_cast<cl_command_queue>(ctx_->native_queue());
@@ -2684,7 +3900,7 @@ static void bip352_glv_wnaf5(const uint8_t* scalar_be32, int8_t wnaf[130]) {
             // from_bytes() silently reduces mod n (n+1 -> 1, n -> 0) — a Rule 11 violation.
             Scalar k;
             if (!Scalar::parse_bytes_strict_nonzero(scan_privkey32, k))
-                return set_error(GpuError::BadKey, "invalid scan key (zero or >= group order)");
+                return fail(GpuError::BadKey, "invalid scan key (zero or >= group order)");
 
             auto decomp       = glv_decompose(k);
             auto k1_bytes     = decomp.k1.to_bytes();
@@ -2708,7 +3924,7 @@ static void bip352_glv_wnaf5(const uint8_t* scalar_be32, int8_t wnaf[130]) {
         /* -- 3. Upload buffers to device -- */
         cl_mem d_plan = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                                        sizeof(Bip352ScanPlan), &plan, &clerr);
-        if (clerr != CL_SUCCESS) return set_error(GpuError::Memory, "scan plan alloc");
+        if (clerr != CL_SUCCESS) return fail(GpuError::Memory, "scan plan alloc");
         struct DevicePlanGuard {
             cl_command_queue queue;
             cl_mem mem;
@@ -2724,70 +3940,174 @@ static void bip352_glv_wnaf5(const uint8_t* scalar_be32, int8_t wnaf[130]) {
             }
         } d_plan_guard{queue, d_plan, sizeof(Bip352ScanPlan)};
 
-        cl_mem d_spend = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                        33, const_cast<uint8_t*>(spend_pubkey33), &clerr);
-        if (clerr != CL_SUCCESS) {
-            return set_error(GpuError::Memory, "spend point alloc");
-        }
+        // Simple scope-exit releaser for the public-data buffers below (no
+        // secret material -- unlike d_plan these don't need zero-fill).
+        struct MemGuard {
+            cl_mem mem = nullptr;
+            ~MemGuard() { if (mem) clReleaseMemObject(mem); }
+        };
+
+        cl_mem d_spend33 = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                          33 * n_spend, const_cast<uint8_t*>(spend_pubkeys33), &clerr);
+        if (clerr != CL_SUCCESS) return fail(GpuError::Memory, "spend pubkeys alloc");
+        MemGuard d_spend33_guard{d_spend33};
+
+        // AffinePoint = 2 x FieldElement = 2 x 4 x 8 bytes = 64 bytes (secp256k1_field.cl).
+        constexpr size_t kAffinePointBytes = 64;
+        cl_mem d_spend_points = clCreateBuffer(cl_ctx, CL_MEM_READ_WRITE,
+                                               kAffinePointBytes * n_spend, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) return fail(GpuError::Memory, "spend points alloc");
+        MemGuard d_spend_points_guard{d_spend_points};
+
+        cl_mem d_spend_valid = clCreateBuffer(cl_ctx, CL_MEM_READ_WRITE, n_spend, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) return fail(GpuError::Memory, "spend valid flags alloc");
+        MemGuard d_spend_valid_guard{d_spend_valid};
 
         cl_mem d_tweaks = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                                          33 * n_tweaks, const_cast<uint8_t*>(tweak_pubkeys33), &clerr);
-        if (clerr != CL_SUCCESS) {
-            clReleaseMemObject(d_spend);
-            return set_error(GpuError::Memory, "tweak buffer alloc");
-        }
+        if (clerr != CL_SUCCESS) return fail(GpuError::Memory, "tweak buffer alloc");
+        MemGuard d_tweaks_guard{d_tweaks};
 
         cl_mem d_prefixes = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
-                                           sizeof(uint64_t) * n_tweaks, nullptr, &clerr);
-        if (clerr != CL_SUCCESS) {
-            clReleaseMemObject(d_tweaks);
-            clReleaseMemObject(d_spend);
-            return set_error(GpuError::Memory, "prefix output alloc");
-        }
-
-        /* -- 5. Set kernel args and launch -- */
-        cl_uint cl_count = static_cast<cl_uint>(n_tweaks);
-        clSetKernelArg(bip352_scan_compressed_kernel_, 0, sizeof(cl_mem),  &d_tweaks);
-        clSetKernelArg(bip352_scan_compressed_kernel_, 1, sizeof(cl_mem),  &d_plan);
-        clSetKernelArg(bip352_scan_compressed_kernel_, 2, sizeof(cl_mem),  &d_spend);
-        clSetKernelArg(bip352_scan_compressed_kernel_, 3, sizeof(cl_mem),  &d_prefixes);
-        clSetKernelArg(bip352_scan_compressed_kernel_, 4, sizeof(cl_uint), &cl_count);
+                                           sizeof(uint64_t) * n_rows, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) return fail(GpuError::Memory, "prefix output alloc");
+        MemGuard d_prefixes_guard{d_prefixes};
 
         // Query device for preferred work-group size multiple to maximize occupancy.
         // Different GPUs have different optimal local sizes (AMD: 64, NVIDIA: 32/64,
-        // Intel: 16/32). Fallback to 128 if query fails.
-        size_t local = 128;
+        // Intel: 16/32).
+        //
+        // Repair (issue #335 acceptance repair, round 3): clGetCommandQueueInfo
+        // and clGetKernelWorkGroupInfo were previously allowed to fail silently
+        // here, falling back to a default local size of 128 and still returning
+        // Ok on the overall call -- review flagged this as a fail-closed
+        // contract violation: this function's contract is that ANY OpenCL
+        // control-call failure on the dispatch path rejects the call (via
+        // fail(), zeroing the full output buffer), not that some calls degrade
+        // to a "best effort" default while others fail closed. Both queries are
+        // now fail-closed: any non-CL_SUCCESS result (real or injected) aborts
+        // the call, exactly like every other OpenCL call in this function.
+        cl_device_id dev = nullptr;
         {
-            cl_device_id dev = nullptr;
-            if (clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE,
-                                      sizeof(dev), &dev, nullptr) == CL_SUCCESS && dev) {
-                size_t pref = 0;
-                if (clGetKernelWorkGroupInfo(bip352_scan_compressed_kernel_, dev,
-                        CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
-                        sizeof(pref), &pref, nullptr) == CL_SUCCESS && pref > 0) {
-                    local = std::max(pref, (size_t)32);
-                    local = std::min(local, (size_t)256);
-                }
+            using namespace bip352_fault_injection;
+            cl_int qi_err = fi_call(SITE_QUEUE_INFO, [&] {
+                return clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(dev), &dev, nullptr);
+            });
+            if (qi_err != CL_SUCCESS || !dev)
+                return fail(GpuError::Launch,
+                            "bip352 multispend: clGetCommandQueueInfo failed (fail-closed)");
+        }
+        // Returns false (leaving *out_local untouched) on any control-call
+        // failure -- callers MUST fail-closed rather than substitute a default
+        // local size, matching the SITE_QUEUE_INFO fix above.
+        auto preferred_local = [&](cl_kernel k, bip352_fault_injection::Site site, size_t* out_local) -> bool {
+            using namespace bip352_fault_injection;
+            size_t pref = 0;
+            cl_int wg_err = fi_call(site, [&] {
+                return clGetKernelWorkGroupInfo(k, dev, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+                    sizeof(pref), &pref, nullptr);
+            });
+            if (wg_err != CL_SUCCESS) return false;
+            size_t local = 128;
+            if (pref > 0) {
+                local = std::max(pref, (size_t)32);
+                local = std::min(local, (size_t)256);
             }
+            *out_local = local;
+            return true;
+        };
+
+        /* -- 4. Decompress the n_spend spend-key candidates ONCE, independent
+         *      of n_tweaks (issue #335 Blocker 1). --
+         * Repair (issue #335 acceptance repair): every clSetKernelArg call
+         * below is now checked. bip352_decompress_kernel_ and
+         * bip352_scan_compressed_multispend_kernel_ are PERSISTENT class
+         * members reused across calls (see ensure_bip352_kernel()) rather
+         * than recreated per-call -- an unchecked clSetKernelArg failure
+         * here would not just be silently ignored on this call, it could
+         * leave a STALE argument bound from a previous invocation, so this
+         * kernel-object-reuse pattern makes checking these calls more
+         * important than for a typical one-shot kernel. */
+        {
+            using namespace bip352_fault_injection;
+            cl_int a0 = fi_call(SITE_DECOMPRESS_ARG0, [&] {
+                return clSetKernelArg(bip352_decompress_kernel_, 0, sizeof(cl_mem), &d_spend33); });
+            cl_int a1 = fi_call(SITE_DECOMPRESS_ARG1, [&] {
+                return clSetKernelArg(bip352_decompress_kernel_, 1, sizeof(cl_mem), &d_spend_points); });
+            cl_int a2 = fi_call(SITE_DECOMPRESS_ARG2, [&] {
+                return clSetKernelArg(bip352_decompress_kernel_, 2, sizeof(cl_mem), &d_spend_valid); });
+            cl_uint cl_n_spend = static_cast<cl_uint>(n_spend);
+            cl_int a3 = fi_call(SITE_DECOMPRESS_ARG3, [&] {
+                return clSetKernelArg(bip352_decompress_kernel_, 3, sizeof(cl_uint), &cl_n_spend); });
+            if (a0 != CL_SUCCESS || a1 != CL_SUCCESS || a2 != CL_SUCCESS || a3 != CL_SUCCESS)
+                return fail(GpuError::Launch, "bip352_decompress_points_kernel: clSetKernelArg failed");
+            size_t local = 0;
+            if (!preferred_local(bip352_decompress_kernel_, SITE_WG_INFO_DECOMPRESS, &local))
+                return fail(GpuError::Launch,
+                            "bip352_decompress_points_kernel: clGetKernelWorkGroupInfo failed (fail-closed)");
+            size_t global = ((n_spend + local - 1) / local) * local;
+            clerr = fi_call(SITE_DECOMPRESS_LAUNCH, [&] {
+                return clEnqueueNDRangeKernel(queue, bip352_decompress_kernel_, 1, nullptr,
+                                              &global, &local, 0, nullptr, nullptr); });
+            if (clerr != CL_SUCCESS)
+                return fail(GpuError::Launch, "bip352_decompress_points_kernel launch failed");
         }
+
+        /* -- 5. Main scan kernel: 1 work-item per tweak; ECDH/tagged-hash/
+         *      hash×G computed once per work-item, then n_spend mixed adds. -- */
+        cl_uint cl_n_spend = static_cast<cl_uint>(n_spend);
+        cl_uint cl_count   = static_cast<cl_uint>(n_tweaks);
+        cl_int s0, s1, s2, s3, s4, s5, s6;
+        {
+            using namespace bip352_fault_injection;
+            s0 = fi_call(SITE_MAIN_ARG0, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 0, sizeof(cl_mem),  &d_tweaks); });
+            s1 = fi_call(SITE_MAIN_ARG1, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 1, sizeof(cl_mem),  &d_plan); });
+            s2 = fi_call(SITE_MAIN_ARG2, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 2, sizeof(cl_mem),  &d_spend_points); });
+            s3 = fi_call(SITE_MAIN_ARG3, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 3, sizeof(cl_mem),  &d_spend_valid); });
+            s4 = fi_call(SITE_MAIN_ARG4, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 4, sizeof(cl_uint), &cl_n_spend); });
+            s5 = fi_call(SITE_MAIN_ARG5, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 5, sizeof(cl_mem),  &d_prefixes); });
+            s6 = fi_call(SITE_MAIN_ARG6, [&] { return clSetKernelArg(bip352_scan_compressed_multispend_kernel_, 6, sizeof(cl_uint), &cl_count); });
+        }
+        if (s0 != CL_SUCCESS || s1 != CL_SUCCESS || s2 != CL_SUCCESS || s3 != CL_SUCCESS ||
+            s4 != CL_SUCCESS || s5 != CL_SUCCESS || s6 != CL_SUCCESS)
+            return fail(GpuError::Launch, "bip352_pipeline_kernel_compressed_multispend: clSetKernelArg failed");
+
+        size_t local = 0;
+        if (!preferred_local(bip352_scan_compressed_multispend_kernel_,
+                             bip352_fault_injection::SITE_WG_INFO_MAIN, &local))
+            return fail(GpuError::Launch,
+                        "bip352_pipeline_kernel_compressed_multispend: clGetKernelWorkGroupInfo failed (fail-closed)");
         size_t global = ((n_tweaks + local - 1) / local) * local;
-        clerr = clEnqueueNDRangeKernel(queue, bip352_scan_compressed_kernel_, 1, nullptr,
-                                       &global, &local, 0, nullptr, nullptr);
-        if (clerr != CL_SUCCESS) {
-            clReleaseMemObject(d_prefixes);
-            clReleaseMemObject(d_tweaks);
-            clReleaseMemObject(d_spend);
-            return set_error(GpuError::Launch, "bip352_pipeline_kernel_compressed launch failed");
-        }
-        clFinish(queue);
+        clerr = bip352_fault_injection::fi_call(bip352_fault_injection::SITE_MAIN_LAUNCH, [&] {
+            return clEnqueueNDRangeKernel(queue, bip352_scan_compressed_multispend_kernel_, 1, nullptr,
+                                          &global, &local, 0, nullptr, nullptr); });
+        if (clerr != CL_SUCCESS)
+            return fail(GpuError::Launch, "bip352_pipeline_kernel_compressed_multispend launch failed");
+
+        // Repair (issue #335 acceptance repair): clFinish and
+        // clEnqueueReadBuffer were both previously UNCHECKED here, with the
+        // function unconditionally returning GpuError::Ok immediately
+        // afterward -- i.e. a GPU fault surfacing at clFinish (this exact
+        // failure mode is documented for this kernel family in
+        // audit_bip352_no_crash(), src/opencl_audit_runner.cpp) or a
+        // failed/partial readback would previously be reported as SUCCESS
+        // with corrupted/stale prefix64_out contents. Never return Ok after
+        // either of these fails. Both calls are now also fault-injectable
+        // (SITE_FINISH / SITE_READBACK) -- see
+        // audit/test_exploit_opencl_bip352_control_call_failclosed.cpp for the
+        // runtime fault-injection tests exercising these exact call sites.
+        clerr = bip352_fault_injection::fi_call(bip352_fault_injection::SITE_FINISH, [&] {
+            return clFinish(queue); });
+        if (clerr != CL_SUCCESS)
+            return fail(GpuError::Launch, "bip352 multispend clFinish failed (possible GPU fault)");
 
         /* -- 6. Read back prefixes -- */
-        clEnqueueReadBuffer(queue, d_prefixes, CL_TRUE, 0,
-                            sizeof(uint64_t) * n_tweaks, prefix64_out, 0, nullptr, nullptr);
+        clerr = bip352_fault_injection::fi_call(bip352_fault_injection::SITE_READBACK, [&] {
+            return clEnqueueReadBuffer(queue, d_prefixes, CL_TRUE, 0,
+                                sizeof(uint64_t) * n_rows, prefix64_out, 0, nullptr, nullptr); });
+        if (clerr != CL_SUCCESS)
+            return fail(GpuError::Memory, "bip352 multispend prefix readback failed");
 
-        clReleaseMemObject(d_prefixes);
-        clReleaseMemObject(d_tweaks);
-        clReleaseMemObject(d_spend);
         clear_error();
         return GpuError::Ok;
     }
@@ -2814,6 +4134,17 @@ private:
     cl_kernel  ext_tagged_hash_var_        = nullptr;
     cl_kernel  ext_hash256_                = nullptr;
     cl_kernel  ext_hash256_var_            = nullptr;
+    cl_kernel  ext_merkle_pair_            = nullptr;
+    cl_kernel  ext_sighash_descriptor_     = nullptr;
+    /* ext_sighash_descriptor_ + the queue are backend-instance members (NOT
+     * thread-local like g_ocl_sighash_pool): clSetKernelArg + clEnqueueND-
+     * RangeKernel are not atomic against each other, so two threads calling
+     * sighash_descriptor_hash() concurrently on the same backend instance
+     * could interleave clSetKernelArg calls and launch with a mix of both
+     * callers' buffer arguments. This mutex serializes the whole dispatch
+     * (pool alloc -> uploads -> kernel args -> launch -> readback) per
+     * backend/context -- correctness over concurrency for this op. */
+    std::mutex sighash_dispatch_mtx_;
     cl_kernel  ext_schnorr_verify_         = nullptr;
     cl_kernel  ext_ecrecover_       = nullptr;
     cl_kernel  ext_ecdsa_snark_            = nullptr;
@@ -2849,6 +4180,11 @@ private:
     cl_program bip352_program_              = nullptr;
     cl_kernel  bip352_scan_kernel_          = nullptr;
     cl_kernel  bip352_scan_compressed_kernel_ = nullptr;
+    /* Multi-spend-key variants (issue #335): decompress n_spend candidate
+     * spend pubkeys once, then the main kernel does one mixed-add per
+     * (tweak, spend) pair reusing the once-per-tweak ECDH/hash/hash×G. */
+    cl_kernel  bip352_decompress_kernel_    = nullptr;
+    cl_kernel  bip352_scan_compressed_multispend_kernel_ = nullptr;
     bool       bip352_init_attempted_ = false;
 
     /* MSM persistent buffer pool (shared across msm() calls) */
@@ -2888,6 +4224,7 @@ private:
             ext_ecdh_scalar_mul_compressed_ && ext_schnorr_snark_ &&
             ext_xonly_validate_ && ext_pubkey_validate_ && ext_commitment_verify_ &&
             ext_tagged_hash_ && ext_tagged_hash_var_ && ext_hash256_ && ext_hash256_var_ &&
+            ext_merkle_pair_ && ext_sighash_descriptor_ &&
             ext_ecdsa_lbtc_collect_ && ext_schnorr_lbtc_collect_)
             return GpuError::Ok;
         if (ext_init_attempted_)
@@ -2902,28 +4239,16 @@ private:
         if (!device)
             return set_error(GpuError::Launch, "no OpenCL device found in context");
 
-        /* Search for secp256k1_extended.cl */
-        const char* search_paths[] = {
-            "../../opencl/kernels/secp256k1_extended.cl",
-            "../opencl/kernels/secp256k1_extended.cl",
-            "../../../opencl/kernels/secp256k1_extended.cl",
-            "opencl/kernels/secp256k1_extended.cl",
-            "kernels/secp256k1_extended.cl",
-            "../kernels/secp256k1_extended.cl",
-        };
-
-        std::string src;
-        std::string kernel_dir;
-        for (auto* p : search_paths) {
-            src = load_file_to_string(p);
-            if (!src.empty()) {
-                std::filesystem::path fp(p);
-                kernel_dir = fp.parent_path().string();
-                break;
-            }
+        /* Search for secp256k1_extended.cl using multi-strategy resolver */
+        auto resolved = resolve_opencl_kernel("secp256k1_extended.cl");
+        std::string src       = std::move(resolved.source);
+        std::string kernel_dir = std::move(resolved.kernel_dir);
+        if (src.empty()) {
+            std::string msg = "secp256k1_extended.cl not found. Searched:\n    ";
+            msg += resolved.candidates_searched;
+            msg += "\n  Set UFSECP_OPENCL_KERNEL_DIR to the directory containing secp256k1_extended.cl.";
+            return set_error(GpuError::Launch, msg.c_str());
         }
-        if (src.empty())
-            return set_error(GpuError::Launch, "secp256k1_extended.cl not found");
 
         /* Compile */
         const char* src_ptr = src.c_str();
@@ -3072,6 +4397,8 @@ private:
         // (each handle is nullptr until created) make one shared cleanup safe
         // regardless of which clCreateKernel failed — no double-release.
         auto release_all_extended = [&]() {
+            if (ext_sighash_descriptor_)   { clReleaseKernel(ext_sighash_descriptor_);   ext_sighash_descriptor_   = nullptr; }
+            if (ext_merkle_pair_)          { clReleaseKernel(ext_merkle_pair_);          ext_merkle_pair_          = nullptr; }
             if (ext_hash256_var_)          { clReleaseKernel(ext_hash256_var_);          ext_hash256_var_          = nullptr; }
             if (ext_hash256_)              { clReleaseKernel(ext_hash256_);              ext_hash256_              = nullptr; }
             if (ext_tagged_hash_var_)      { clReleaseKernel(ext_tagged_hash_var_);      ext_tagged_hash_var_      = nullptr; }
@@ -3109,6 +4436,10 @@ private:
         if (err != CL_SUCCESS) { release_all_extended(); return set_error(GpuError::Launch, "lbtc_hash256 kernel not found"); }
         ext_hash256_var_ = clCreateKernel(ext_program_, "lbtc_hash256_var", &err);
         if (err != CL_SUCCESS) { release_all_extended(); return set_error(GpuError::Launch, "lbtc_hash256_var kernel not found"); }
+        ext_merkle_pair_ = clCreateKernel(ext_program_, "lbtc_merkle_pair", &err);
+        if (err != CL_SUCCESS) { release_all_extended(); return set_error(GpuError::Launch, "lbtc_merkle_pair kernel not found"); }
+        ext_sighash_descriptor_ = clCreateKernel(ext_program_, "lbtc_sighash_descriptor", &err);
+        if (err != CL_SUCCESS) { release_all_extended(); return set_error(GpuError::Launch, "lbtc_sighash_descriptor kernel not found"); }
 
         // libbitcoin COLLECT verify kernels (native OpenCL). Same device parse/
         // verify as the column kernels; only the output convention differs.
@@ -3133,27 +4464,24 @@ private:
         if (!device)
             return set_error(GpuError::Launch, "no OpenCL device found in context");
 
-        const char* search_paths[] = {
-            "../../opencl/kernels/secp256k1_frost.cl",
-            "../opencl/kernels/secp256k1_frost.cl",
-            "../../../opencl/kernels/secp256k1_frost.cl",
-            "opencl/kernels/secp256k1_frost.cl",
-            "kernels/secp256k1_frost.cl",
-            "../kernels/secp256k1_frost.cl",
-        };
-
-        std::string src;
-        std::string kernel_dir;
-        for (auto* p : search_paths) {
-            src = load_file_to_string(p);
-            if (!src.empty()) {
-                std::filesystem::path fp(p);
-                kernel_dir = fp.parent_path().string();
-                break;
-            }
+        // Repair (issue #335 acceptance repair, round 3): this loader used to
+        // carry its own CWD-relative-only search_paths[] list (never resolved
+        // when invoked from an unrelated CWD or an installed layout -- the
+        // same systemic defect independently found and fixed for BIP-352
+        // below). ensure_extended_kernels() already uses the shared, robust
+        // resolve_opencl_kernel() (env var override, executable-relative
+        // paths, walk-up-from-exe-dir source-tree search, then legacy
+        // CWD-relative fallback) -- reuse it here instead of duplicating a
+        // weaker resolver.
+        auto resolved = resolve_opencl_kernel("secp256k1_frost.cl");
+        std::string src       = std::move(resolved.source);
+        std::string kernel_dir = std::move(resolved.kernel_dir);
+        if (src.empty()) {
+            std::string msg = "secp256k1_frost.cl not found. Searched:\n    ";
+            msg += resolved.candidates_searched;
+            msg += "\n  Set UFSECP_OPENCL_KERNEL_DIR to the directory containing secp256k1_frost.cl.";
+            return set_error(GpuError::Launch, msg.c_str());
         }
-        if (src.empty())
-            return set_error(GpuError::Launch, "secp256k1_frost.cl not found");
 
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
@@ -3199,27 +4527,17 @@ private:
         if (!device)
             return set_error(GpuError::Launch, "no OpenCL device found in context");
 
-        const char* search_paths[] = {
-            "../../opencl/kernels/secp256k1_hash160.cl",
-            "../opencl/kernels/secp256k1_hash160.cl",
-            "../../../opencl/kernels/secp256k1_hash160.cl",
-            "opencl/kernels/secp256k1_hash160.cl",
-            "kernels/secp256k1_hash160.cl",
-            "../kernels/secp256k1_hash160.cl",
-        };
-
-        std::string src;
-        std::string kernel_dir;
-        for (auto* p : search_paths) {
-            src = load_file_to_string(p);
-            if (!src.empty()) {
-                std::filesystem::path fp(p);
-                kernel_dir = fp.parent_path().string();
-                break;
-            }
+        // Repair (issue #335 acceptance repair, round 3): see ensure_frost_kernel()
+        // above -- same systemic CWD-relative-only resolver defect, same fix.
+        auto resolved = resolve_opencl_kernel("secp256k1_hash160.cl");
+        std::string src       = std::move(resolved.source);
+        std::string kernel_dir = std::move(resolved.kernel_dir);
+        if (src.empty()) {
+            std::string msg = "secp256k1_hash160.cl not found. Searched:\n    ";
+            msg += resolved.candidates_searched;
+            msg += "\n  Set UFSECP_OPENCL_KERNEL_DIR to the directory containing secp256k1_hash160.cl.";
+            return set_error(GpuError::Launch, msg.c_str());
         }
-        if (src.empty())
-            return set_error(GpuError::Launch, "secp256k1_hash160.cl not found");
 
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
@@ -3376,26 +4694,17 @@ private:
         if (!device)
             return set_error(GpuError::Launch, "no OpenCL device found in context");
 
-        const char* search_paths[] = {
-            "../../opencl/kernels/secp256k1_zk.cl",
-            "../opencl/kernels/secp256k1_zk.cl",
-            "../../../opencl/kernels/secp256k1_zk.cl",
-            "opencl/kernels/secp256k1_zk.cl",
-            "kernels/secp256k1_zk.cl",
-            "../kernels/secp256k1_zk.cl",
-        };
-
-        std::string src, kernel_dir;
-        for (auto* p : search_paths) {
-            src = load_file_to_string(p);
-            if (!src.empty()) {
-                std::filesystem::path fp(p);
-                kernel_dir = fp.parent_path().string();
-                break;
-            }
+        // Repair (issue #335 acceptance repair, round 3): see ensure_frost_kernel()
+        // above -- same systemic CWD-relative-only resolver defect, same fix.
+        auto resolved = resolve_opencl_kernel("secp256k1_zk.cl");
+        std::string src       = std::move(resolved.source);
+        std::string kernel_dir = std::move(resolved.kernel_dir);
+        if (src.empty()) {
+            std::string msg = "secp256k1_zk.cl not found. Searched:\n    ";
+            msg += resolved.candidates_searched;
+            msg += "\n  Set UFSECP_OPENCL_KERNEL_DIR to the directory containing secp256k1_zk.cl.";
+            return set_error(GpuError::Launch, msg.c_str());
         }
-        if (src.empty())
-            return set_error(GpuError::Launch, "secp256k1_zk.cl not found");
 
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
@@ -3455,26 +4764,17 @@ private:
         if (!device)
             return set_error(GpuError::Launch, "no OpenCL device found in context");
 
-        const char* search_paths[] = {
-            "../../opencl/kernels/secp256k1_bip324.cl",
-            "../opencl/kernels/secp256k1_bip324.cl",
-            "../../../opencl/kernels/secp256k1_bip324.cl",
-            "opencl/kernels/secp256k1_bip324.cl",
-            "kernels/secp256k1_bip324.cl",
-            "../kernels/secp256k1_bip324.cl",
-        };
-
-        std::string src, kernel_dir;
-        for (auto* p : search_paths) {
-            src = load_file_to_string(p);
-            if (!src.empty()) {
-                std::filesystem::path fp(p);
-                kernel_dir = fp.parent_path().string();
-                break;
-            }
+        // Repair (issue #335 acceptance repair, round 3): see ensure_frost_kernel()
+        // above -- same systemic CWD-relative-only resolver defect, same fix.
+        auto resolved = resolve_opencl_kernel("secp256k1_bip324.cl");
+        std::string src       = std::move(resolved.source);
+        std::string kernel_dir = std::move(resolved.kernel_dir);
+        if (src.empty()) {
+            std::string msg = "secp256k1_bip324.cl not found. Searched:\n    ";
+            msg += resolved.candidates_searched;
+            msg += "\n  Set UFSECP_OPENCL_KERNEL_DIR to the directory containing secp256k1_bip324.cl.";
+            return set_error(GpuError::Launch, msg.c_str());
         }
-        if (src.empty())
-            return set_error(GpuError::Launch, "secp256k1_bip324.cl not found");
 
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
@@ -3526,28 +4826,32 @@ private:
         if (!device)
             return set_error(GpuError::Launch, "no OpenCL device found in context");
 
-        const char* search_paths[] = {
-            "../../opencl/kernels/secp256k1_bip352.cl",
-            "../opencl/kernels/secp256k1_bip352.cl",
-            "../../../opencl/kernels/secp256k1_bip352.cl",
-            "opencl/kernels/secp256k1_bip352.cl",
-            "kernels/secp256k1_bip352.cl",
-            "../kernels/secp256k1_bip352.cl",
-        };
-
+        // Repair (issue #335 acceptance repair, round 3): this loader's round-2
+        // fix only patched the symptom (prepended one more hand-written
+        // "src/opencl/kernels/..." candidate) without fixing the underlying
+        // systemic defect: this whole search_paths[] pattern is CWD-relative
+        // ONLY, with no executable-relative or installed-layout fallback --
+        // the exact same defect independently present (and now fixed the same
+        // way) in ensure_frost_kernel(), ensure_hash160_kernel(),
+        // ensure_zk_kernels(), and ensure_bip324_kernels() above.
+        // ensure_extended_kernels() already uses the shared resolve_opencl_kernel()
+        // helper (env var override -> executable-relative candidates ->
+        // walk-up-from-exe-dir source-tree search -> legacy CWD-relative
+        // fallback, in that order) which is unrelated-CWD- and
+        // installed-layout-safe; this loader now reuses it instead of a
+        // second, weaker, hand-maintained resolver.
+        //
         /* The BIP-352 kernel includes other .cl files via #include.
          * We must expand those includes before creating the program. */
-        std::string src, kernel_dir;
-        for (auto* p : search_paths) {
-            src = load_file_to_string(p);
-            if (!src.empty()) {
-                std::filesystem::path fp(p);
-                kernel_dir = fp.parent_path().string();
-                break;
-            }
+        auto resolved = resolve_opencl_kernel("secp256k1_bip352.cl");
+        std::string src       = std::move(resolved.source);
+        std::string kernel_dir = std::move(resolved.kernel_dir);
+        if (src.empty()) {
+            std::string msg = "secp256k1_bip352.cl not found. Searched:\n    ";
+            msg += resolved.candidates_searched;
+            msg += "\n  Set UFSECP_OPENCL_KERNEL_DIR to the directory containing secp256k1_bip352.cl.";
+            return set_error(GpuError::Launch, msg.c_str());
         }
-        if (src.empty())
-            return set_error(GpuError::Launch, "secp256k1_bip352.cl not found");
 
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
@@ -3581,6 +4885,25 @@ private:
             clReleaseKernel(bip352_scan_kernel_); bip352_scan_kernel_ = nullptr;
             clReleaseProgram(bip352_program_); bip352_program_ = nullptr;
             return set_error(GpuError::Launch, "bip352_pipeline_kernel_compressed not found");
+        }
+
+        // Multi-spend-key kernels (issue #335).
+        bip352_decompress_kernel_ = clCreateKernel(bip352_program_, "bip352_decompress_points_kernel", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseKernel(bip352_scan_compressed_kernel_); bip352_scan_compressed_kernel_ = nullptr;
+            clReleaseKernel(bip352_scan_kernel_); bip352_scan_kernel_ = nullptr;
+            clReleaseProgram(bip352_program_); bip352_program_ = nullptr;
+            return set_error(GpuError::Launch, "bip352_decompress_points_kernel not found");
+        }
+
+        bip352_scan_compressed_multispend_kernel_ = clCreateKernel(
+            bip352_program_, "bip352_pipeline_kernel_compressed_multispend", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseKernel(bip352_decompress_kernel_); bip352_decompress_kernel_ = nullptr;
+            clReleaseKernel(bip352_scan_compressed_kernel_); bip352_scan_compressed_kernel_ = nullptr;
+            clReleaseKernel(bip352_scan_kernel_); bip352_scan_kernel_ = nullptr;
+            clReleaseProgram(bip352_program_); bip352_program_ = nullptr;
+            return set_error(GpuError::Launch, "bip352_pipeline_kernel_compressed_multispend not found");
         }
 
         return GpuError::Ok;

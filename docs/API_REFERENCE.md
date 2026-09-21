@@ -559,6 +559,57 @@ Build with `-DSECP256K1_BUILD_LIBBITCOIN=ON` (optionally `-DSECP256K1_BUILD_LIBB
 
 **Threading:** `max_threads == 0` = auto, `max_threads == 1` = serial bounded chunks, `N` = cap.
 
+**Main Operations:**
+
+```cpp
+// ── ECDSA ───────────────────────────────────────────────────────────
+bool ecdsa_verify(pub33, hash32, sig64);            // VT (public data)
+bool ecdsa_sign(hash32, sk32, sig64_out);            // CT (sk, nonce)
+bool ecdsa_sign_hedged(hash32, sk32, aux32, sig64);  // CT, RFC6979-S3.6
+bool ecdsa_sign_recoverable(hash32, sk32, sig65);    // CT, returns [header|r|s]
+bool ecdsa_sign_hedged_recoverable(hash32, sk32, aux32, sig65); // CT hedged
+bool ecdsa_recover(hash32, sig64, recid, pub33_out); // VT (public data)
+bool ecdsa_signature_normalize(sig64);               // VT, high-S→low-S
+void ecdsa_signature_serialize_compact(sig64, out64);// opaque LE→BE
+bool ecdsa_signature_parse_compact(in64, out64);     // BE→opaque LE, strict
+bool ecdsa_signature_serialize_der(sig64, out, len); // opaque LE→DER
+void recoverable_to_compact(sig64, recid, out65);    // →65-byte compact
+bool recoverable_from_compact(in65, sig64, recid);   // ←65-byte compact
+
+// ── Schnorr / Taproot ───────────────────────────────────────────────
+bool schnorr_verify(xonly32, msg32, sig64);          // VT (public data)
+bool schnorr_keypair_create(sk32, xonly_out);         // CT (sk)
+bool schnorr_sign(xonly32, sk32, msg32, aux32, sig64);// CT (sk, nonce)
+bool schnorr_xonly_pubkey_parse(xonly32);             // VT (public data)
+bool taproot_tweak_add_check(out_xonly, parity, internal_xonly,
+                             merkle_root, merkle_root_len); // VT
+
+// ── Public Key ─────────────────────────────────────────────────────
+bool pubkey_create(sk32, pub33_out);                  // CT (sk)
+bool pubkey_create_uncompressed(sk32, pub65_out);     // CT (sk)
+bool pubkey_parse(pub33);                             // VT, validate compressed
+bool pubkey_parse_uncompressed(pub65);                // VT, validate uncompressed
+void pubkey_serialize(pub33, out33);                  // copy-through
+bool pubkey_compress(pub65, pub33_out);               // VT, 65→33
+bool pubkey_decompress(pub33, pub65_out);             // VT, 33→65
+bool pubkey_combine(pub33s[], count, out33);          // VT, point sum
+bool pubkey_negate(pub33);                            // VT, (x,-y)
+bool pubkey_tweak_add(pub33, tweak32);                // VT, P+t*G
+bool pubkey_tweak_mul(pub33, tweak32);                // VT, P*t
+
+// ── Secret Key ─────────────────────────────────────────────────────
+bool seckey_verify(sk32);                             // strict 0<sk<n
+bool seckey_negate(sk32);                             // CT, sk=n-sk
+bool seckey_tweak_add(sk32, tweak32);                 // CT, sk+tweak
+bool seckey_tweak_mul(sk32, tweak32);                 // CT, sk*tweak
+
+// ── Context (no-op — engine is contextless) ────────────────────────
+int  context_create();
+void context_destroy();
+int  context_randomize(seed32);
+```
+
+
 **Batch APIs:**
 - `ecdsa_verify_batch` / `ecdsa_verify_columns` — rows `[hash32|pub33|sig64]` @ stride, or parallel spans
 - `schnorr_verify_batch` / `schnorr_verify_columns` — rows `[msg32|xonly32|sig64]` @ stride, or parallel spans
@@ -617,7 +668,7 @@ parity with the other batch ops but is currently unused by the CPU fallback
 (single-pass per-row hashing; the GPU hook, when installed, does its own
 internal parallelism) — reserved for a future threaded CPU fallback.
 
-Fail-closed contract — **validate ops**: `count==0`→`true` (out untouched); null ptr or `count×elem` overflow → zero `out_results` (if non-null) and `false`; operational GPU failure declines → CPU overwrites every row (never all-zero). **Hash ops** never pre-zero `out32` (zero = wrong/consensus-invalid hash): `count==0`→`true`; null ptr, `msg_len/input_len==0`, `stride < msg_lens[i]`, or overflow → `false` **without touching** `out32`; operational GPU failure declines → CPU writes the correct hash for every row. **`hash256_var_batch`** additionally rejects any individual `input_lens[i]==0` or `input_lens[i]>stride` (per-row bounds check, not just a scalar `stride` check) before touching `out32` or dispatching to GPU.
+Fail-closed contract — **validate ops**: `count==0`→`true` (out untouched); null ptr or `count×elem` overflow → zero `out_results` (if non-null) and `false`; operational GPU failure declines → CPU overwrites every row (never all-zero). **Hash ops** never pre-zero `out32` (zero = wrong/consensus-invalid hash): `count==0`→`true`; null ptr, `msg_len/input_len==0`, `stride < msg_lens[i]` (variable-length), **`stride < fixed_len` (fixed-length fields in sighash)**, or overflow → `false` **without touching** `out32`; operational GPU failure declines → CPU writes the correct hash for every row. **`hash256_var_batch`** additionally rejects any individual `input_lens[i]==0` or `input_lens[i]>stride` (per-row bounds check, not just a scalar `stride` check) before touching `out32` or dispatching to GPU.
 
 **Consumer CMake example:**
 ```cmake
@@ -2283,6 +2334,9 @@ apply low-S normalization, and then verify, matching libsecp256k1's
 | `ufsecp_addr_p2pkh` | `(ctx, pubkey33, network, addr_out, addr_len*) -> error_t` | P2PKH (Base58) |
 | `ufsecp_addr_p2wpkh` | `(ctx, pubkey33, network, addr_out, addr_len*) -> error_t` | P2WPKH (Bech32, SegWit v0) |
 | `ufsecp_addr_p2tr` | `(ctx, internal_key_x[32], network, addr_out, addr_len*) -> error_t` | P2TR (Bech32m, Taproot) |
+| `ufsecp_addr_p2sh` | `(redeem_script, redeem_script_len, network, addr_out, addr_len*) -> error_t` | P2SH (Base58); legacy stateless ABI retained for binary compatibility |
+| `ufsecp_addr_p2sh_with_ctx` | `(ctx, redeem_script, redeem_script_len, network, addr_out, addr_len*) -> error_t` | Context-aware P2SH with `last_error` diagnostics; preferred for new code |
+| `ufsecp_addr_p2sh_p2wpkh` | `(ctx, pubkey33, network, addr_out, addr_len*) -> error_t` | Wrapped SegWit P2SH-P2WPKH |
 | `ufsecp_wif_encode` | `(ctx, privkey, compressed, network, wif_out, wif_len*) -> error_t` | Private key to WIF |
 | `ufsecp_wif_decode` | `(ctx, wif, privkey32_out, compressed_out*, network_out*) -> error_t` | WIF to private key |
 
@@ -2531,6 +2585,12 @@ Current GPU C ABI failure semantics:
 - `ufsecp_bip352_prepare_scan_plan` and `ufsecp_gpu_bip352_scan_batch` reject
   `scan_privkey32 == 0` and `scan_privkey32 >= n`; rejected scan keys leave
   `plan264_out` / `prefix64_out` zeroed
+- `ufsecp_gpu_bip352_scan_batch` and `_multispend` reject dangerous
+  pointer-range overlap between `prefix64_out` and any of
+  `scan_privkey32`/`spend_pubkeys33`/`tweak_pubkeys33` with
+  `UFSECP_ERR_BAD_INPUT`, before any output clearing or GPU dispatch
+  (overflow-safe range check; zero-count calls remain a true no-op even with
+  a degenerate/aliased pointer) — added 2026-07-15, issue #335 acceptance repair
 - secret-bearing GPU backends erase uploaded ECDH, BIP-352, and BIP-324 key
   buffers before releasing host/shared/device storage
 - `ufsecp_gpu_*_verify_collect` is excluded from output pre-clearing because
@@ -2574,6 +2634,7 @@ Current GPU C ABI failure semantics:
 | `ufsecp_gpu_tagged_hash_var` | `(ctx, tag_hash32, msgs, msg_lens[], stride, n, out32) -> error_t` | BIP-340 tagged hash over per-item variable-length messages (TapLeaf scripts); each `msg_lens[i]` must be in `[1,256]` |
 | `ufsecp_gpu_hash256` | `(ctx, inputs, input_len, n, out32) -> error_t` | Batch Bitcoin HASH256 (double SHA-256) of fixed-length inputs; `input_len` must be in `[1,320]` |
 | `ufsecp_gpu_hash256_var` | `(ctx, inputs, input_lens[], stride, n, out32) -> error_t` | Batch Bitcoin HASH256 (double SHA-256) over per-item variable-length inputs; row `i` = `inputs[i*stride .. i*stride+input_lens[i])`, bytes beyond `input_lens[i]` up to `stride` are ignored padding. No tag prefix, no transaction parsing — GPU treats each row as an opaque byte string; rows up to `stride <= 4 MiB` (`kMaxHash256VarStride`). PUBLIC-DATA / variable-time |
+| `ufsecp_gpu_merkle_pair_hash` | `(ctx, left32, right32, n, out32) -> error_t` | Batch Merkle pair HASH256: `out32[i] = SHA256(SHA256(left32[i*32..+32] \|\| right32[i*32..+32]))` over two separate 32-byte column spans (Structure-of-Arrays). Fixed 64-byte combined input per row — no `input_len` parameter. `n==0` is a no-op (`out32` untouched); null `left32`/`right32`/`out32` -> `UFSECP_ERR_NULL_ARG`; `n` over `kMaxGpuBatchN` -> `UFSECP_ERR_BAD_INPUT`; non-OK leaves `out32` cleared. PUBLIC-DATA / variable-time |
 | `ufsecp_gpu_msm` | `(ctx, scalars32[], points33[], n, result33_out) -> error_t` | Multi-scalar multiplication |
 | `ufsecp_gpu_frost_verify_partial_batch` | `(ctx, z_i32[], D_i33[], E_i33[], Y_i33[], rho_i32[], lambda_ie32[], negate_R[], negate_key[], n, results_out[]) -> error_t` | Batch FROST partial verification |
 | `ufsecp_gpu_ecrecover_batch` | `(ctx, msgs32[], sigs64[], recids[], n, pubkeys33_out[], valid_out[]) -> error_t` | Batch public-key recovery from recoverable ECDSA signatures |
@@ -2584,13 +2645,15 @@ Current GPU C ABI failure semantics:
 | `ufsecp_gpu_bip324_aead_decrypt_batch` | `(ctx, keys32[], nonces12[], wire[], sizes[], max_payload, n, plain_out[], valid[]) -> error_t` | Batch BIP-324 ChaCha20-Poly1305 AEAD decrypt (SECRET) |
 | `ufsecp_gpu_zk_ecdsa_snark_witness_batch` | `(ctx, msgs32[], pubs33[], sigs64[], n, witnesses760_out[]) -> error_t` | Batch ECDSA SNARK witness generation — eprint 2025/695 (PUBLIC inputs) |
 | `ufsecp_gpu_zk_schnorr_snark_witness_batch` | `(ctx, msgs32[], pubkeys_x32[], sigs64[], n, witnesses472_out[]) -> error_t` | Batch BIP-340 Schnorr SNARK witness generation (PUBLIC inputs). GPU kernels pending — CPU fallback returns `Unsupported` via virtual dispatch. |
-| `ufsecp_gpu_bip352_scan_batch` | `(ctx, scan_privkey32, spend_pubkey33, tweaks33[], n, prefix64_out[]) -> error_t` | BIP-352 Silent Payment batch scan — returns upper-64-bit x-coordinate prefix per tweak (SECRET-BEARING: scan key sent to GPU) |
+| `ufsecp_gpu_bip352_scan_batch` | `(ctx, scan_privkey32, spend_pubkey33, tweaks33[], n, prefix64_out[]) -> error_t` | BIP-352 Silent Payment batch scan (single spend key) — returns upper-64-bit x-coordinate prefix per tweak (SECRET-BEARING: scan key sent to GPU). Thin wrapper delegating to `ufsecp_gpu_bip352_scan_batch_multispend` with `n_spend=1`; unchanged output/error semantics. |
+| `ufsecp_gpu_bip352_scan_batch_multispend` | `(ctx, scan_privkey32, spend_pubkeys33[], n_spend, tweaks33[], n_tweaks, prefix64_out[]) -> error_t` | BIP-352 batch scan across `n_spend` candidate spend keys (issue #335, e.g. base + change-label spend keys). ECDH/tagged-hash/hash×G run once per tweak; one mixed point add per `(tweak, spend)` cell. Row-major `prefix64_out[tweak*n_spend+spend]`; native CUDA/OpenCL/Metal (SECRET-BEARING) |
+| `ufsecp_gpu_set_metal_shader_path` | `(absolute_dir) -> error_t` | Install an explicit, validated, absolute directory to locate the Metal shader library, for loadable-library consumers whose process CWD is unreliable (issue #335). Precedence: this call > `UFSECP_METAL_SHADER_PATH` env var > legacy CWD-relative search. Path-traversal rejection is component-based (a literal `..` path segment), not a raw substring match, so a directory name merely containing two dots (e.g. `v2..final`) is accepted. Behavior is IDENTICAL on Metal and non-Metal builds (validation/storage always run); on a build with no Metal backend the stored value is simply never consulted. |
 
 #### BIP-352 CPU utility
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `ufsecp_bip352_prepare_scan_plan` | `(scan_privkey32, plan264_out) -> error_t` | Precompute 264-byte BIP-352 GLV wNAF scan plan for repeated GPU batch scans; rejects zero/order-or-larger scan keys and zeroes the plan on error |
+| `ufsecp_bip352_prepare_scan_plan` | `(scan_privkey32, plan264_out) -> error_t` | Precompute the 264-byte BIP-352 GLV wNAF plan layout. CPU-only diagnostic utility: no `bip352_scan_batch*` function currently accepts a plan parameter, so this has no effect on GPU scan cost (see `docs/BACKEND_ASSURANCE_MATRIX.md`) |
 
 ---
 
@@ -2671,6 +2734,204 @@ Semantics:
   validation, not a GPU error).
 - **Default is pure CPU.** The hook is null unless the libbitcoin-GPU build
   installs one, so the default direct build is CPU-only until that enablement lands.
+
+---
+
+## libbitcoin-direct public-data hashing batch ops (C++ engine surface)
+
+Header: `<ufsecp/libbitcoin.hpp>`, namespace `ufsecp::lbtc`. These are
+bridge-free, header-only batch primitives for Bitcoin/libbitcoin hashing
+patterns and share the same one-surface contract as the column-verify
+functions above: one `bool`-returning inline call, internal GPU acceleration
+via a `GpuBackend` virtual + installable hook, deterministic CPU fallback, no
+CPU/GPU split visible to the caller. All three are **PUBLIC-DATA /
+variable-time** — no secret material, no CT requirement.
+
+`txid_hash_batch` and `wtxid_hash_batch` are semantic aliases over the
+existing `hash256_var_batch` primitive (added 2026-07-06 alongside the C ABI
+`ufsecp_gpu_hash256_var` documented above; the `hash256_var_batch` C++ entry
+point itself has no dedicated row in this reference yet — pre-existing gap,
+not introduced by this change) with zero new backend work — GPU performs no
+transaction parsing; callers pre-serialize the transaction on the CPU (see
+`legacy_serialize`/`witness_serialize` in `src/cpu/src/bip144.cpp`).
+`merkle_pair_hash_batch` is not an alias: it is backed by its own
+`GpuBackend::merkle_pair_hash` virtual and C ABI `ufsecp_gpu_merkle_pair_hash`
+(see GPU Operations above).
+
+```cpp
+namespace ufsecp::lbtc {
+
+// txid = SHA256(SHA256(serialized_tx_without_witness)). Identical to
+// hash256_var_batch -- alias exists solely for libbitcoin readability.
+[[nodiscard]] bool txid_hash_batch(
+    const std::uint8_t* serialized_txs, const std::uint32_t* tx_lens,
+    std::size_t stride, std::size_t count,
+    std::uint8_t* out_txids32, std::size_t max_threads = 0) noexcept;
+
+// wtxid = SHA256(SHA256(serialized_tx_with_witness)). Identical to
+// hash256_var_batch -- alias exists solely for libbitcoin readability.
+[[nodiscard]] bool wtxid_hash_batch(
+    const std::uint8_t* serialized_wtxs, const std::uint32_t* wtx_lens,
+    std::size_t stride, std::size_t count,
+    std::uint8_t* out_wtxids32, std::size_t max_threads = 0) noexcept;
+
+// Merkle pair hashing: parent = SHA256(SHA256(left32 || right32)), over two
+// separate 32-byte column spans (Structure-of-Arrays), fixed 64-byte
+// combined input per row (no input_len parameter).
+[[nodiscard]] bool merkle_pair_hash_batch(
+    const std::uint8_t* left32, const std::uint8_t* right32,
+    std::size_t count, std::uint8_t* out32,
+    std::size_t max_threads = 0) noexcept;
+
+// merkle_level_reduce_batch — semantic alias over merkle_pair_hash_batch.
+// ZERO new backend work.  Given pair_count pairs of (left32, right32) in
+// SoA layout, computes pair_count parent hashes via HASH256(left||right).
+// The name reflects Bitcoin merkle-tree vocabulary: "level reduce" =
+// compute the parent level from the child level.
+[[nodiscard]] bool merkle_level_reduce_batch(
+    const std::uint8_t* left32, const std::uint8_t* right32,
+    std::size_t pair_count, std::uint8_t* out32,
+    std::size_t max_threads = 0) noexcept;
+
+// merkle_root_from_leaves — Bitcoin merkle root from leaves using
+// caller-provided scratch (no heap allocation).  Composes
+// merkle_level_reduce_batch -> merkle_pair_hash_batch internally.
+// ZERO new GpuBackend virtuals, kernels, or C ABI.
+//
+// Scratch contract: scratch must be >= leaf_count * 64 bytes.
+// Internal layout: left32 column, right32 column, output (SoA).
+// Leaves MUST NOT overlap scratch or out_root32.
+//
+// Bitcoin semantics: odd-level last hash is duplicated for the final pair.
+// leaf_count == 0 -> false, out_root32 zeroed.
+// leaf_count == 1 -> copies single leaf as root.
+// All size multiplications overflow-checked.
+[[nodiscard]] bool merkle_root_from_leaves(
+    const std::uint8_t* leaves32, std::size_t leaf_count,
+    std::uint8_t* scratch, std::size_t scratch_size,
+    std::uint8_t out_root32[32],
+    std::size_t max_threads = 0) noexcept;
+
+} // namespace ufsecp::lbtc
+```
+
+Failure semantics (HASH op — output is never pre-zeroed and never touched on
+a rejected call):
+
+| Function | `count==0` | Bad input (null column / bad length / layout overflow) |
+|---|---|---|
+| `txid_hash_batch` / `wtxid_hash_batch` | returns `true`, output untouched | returns `false`, output untouched — per-row `tx_lens[i]`/`wtx_lens[i]` must be in `(0, stride]` |
+| `merkle_pair_hash_batch` | returns `true`, output untouched | returns `false`, output untouched — `left32`/`right32`/`out32 == nullptr` or `count*32` layout overflow |
+| `merkle_level_reduce_batch` | returns `true`, output untouched | returns `false`, output untouched — identical to `merkle_pair_hash_batch` (semantic alias) |
+| `merkle_root_from_leaves` | returns `false`, `out_root32` zeroed (must have >= 1 leaf) | returns `false`; `out_root32` is zeroed when non-null — `leaves32`/`scratch`/`out_root32 == nullptr`, `scratch_size < leaf_count*64`, or layout overflow |
+
+### sighash_descriptor_hash_batch — HASH256 of descriptor-shaped sighash preimage
+
+Computes `SHA256(SHA256(preimage))` for N transaction inputs where the preimage
+is assembled from column-major field data according to a compact descriptor
+bytecode. No bridge, no shim, no C ABI dependency in the canonical libbitcoin
+C++ path.
+
+**GPU acceleration (Phase 3b):** The production path transparently attempts a
+GPU hook (`g_lbtc_sighash_hook` → `GpuBackend::sighash_descriptor_hash`). Hook
+return `0` = handled (out32 fully written); `-1` = operational decline →
+deterministic CPU fallback (the existing per-row streaming loop). CUDA, OpenCL,
+and Metal all provide native kernels. The GPU path streams referenced field
+columns directly through SHA-256 — no per-row preimage buffer is materialised
+on the CPU or GPU.
+
+**This computes HASH256 for legacy/BIP143-style sighash preimages only.
+It is NOT BIP341 TapSighash.** Taproot-only field IDs `0x0C`..`0x0F` are
+reserved and rejected by all backends until a separately reviewed tagged-hash
+mode exists.
+
+**Descriptor format (v2, LE):** sequence of 2-byte little-endian `field_ref`
+entries terminated by a single `0xFF` byte.
+
+```
+Each field_ref (2 bytes LE):
+  byte0 = low byte of field_id  (bits [0..7])
+  byte1 = (flags_nibble << 4) | (field_id >> 8)
+  flags_nibble:
+    bit0 = HAS_LENGTH  — field has per-item variable length
+    bit1 = ZERO_PAD    — column storage is zero-padded to stride
+    bit2-3 = RESERVED  — must be 0
+Terminator: 0xFF at descriptor[descriptor_len-1]
+Max 64 field refs → max descriptor_len = 129.
+```
+
+**Field data layout (SoA):**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `descriptor` | `const uint8_t*` | Descriptor bytecode |
+| `descriptor_len` | `size_t` | Descriptor length (1..129, must be odd) |
+| `field_data[f]` | `const uint8_t*` | Column-major byte span for field_id f |
+| `field_lengths[f]` | `uint32_t` | Fixed byte length or stride for variable fields |
+| `field_var_lens[f]` | `const uint32_t*` | Per-item length array (non-null iff HAS_LENGTH) |
+| `count` | `size_t` | Number of sighash preimages to compute |
+| `out32` | `uint8_t*` | Output: `count * 32` bytes of HASH256 digests |
+
+**Supported field IDs:**
+
+| ID | Name | Length | Type |
+|----|------|--------|------|
+| `0x00` | nVersion | 4 | fixed |
+| `0x01` | hashPrevouts | 32 | fixed |
+| `0x02` | hashSequence | 32 | fixed |
+| `0x03` | outpoint | 36 | fixed |
+| `0x04` | scriptCode | — | variable (HAS_LENGTH) |
+| `0x05` | value | 8 | fixed |
+| `0x06` | nSequence | 4 | fixed |
+| `0x07` | hashOutputs | 32 | fixed |
+| `0x08` | nLocktime | 4 | fixed |
+| `0x09` | nHashType | 4 | fixed |
+| `0x0A` | prevout_individual | 36 | fixed |
+| `0x0B` | nInputIndex | 4 | fixed |
+| `0x0C` | annex | — | variable (HAS_LENGTH) |
+| `0x0D` | tapleaf_hash | 32 | fixed |
+| `0x0E` | key_version | 4 | fixed |
+| `0x0F` | codesep_pos | 4 | fixed |
+| `0xF0` | raw_literal | — | variable (HAS_LENGTH) |
+
+All other field_ids → rejected (reserved/unsupported). `field_id & 0xFF == 0xFF` permanently reserved.
+
+```cpp
+// HASH256 of descriptor-shaped sighash preimage for N transaction inputs.
+// Transparently attempts GPU hook; falls back to deterministic CPU on decline.
+[[nodiscard]] bool sighash_descriptor_hash_batch(
+    const uint8_t* descriptor, size_t descriptor_len,
+    const uint8_t* const* field_data, const uint32_t* field_lengths,
+    const uint32_t* const* field_var_lens, size_t count,
+    uint8_t* out32, size_t max_threads = 0) noexcept;
+```
+
+**Descriptor parsing rules (fail-closed):**
+
+| Check | Condition | Action |
+|---|---|---|
+| descriptor_len | `1 <= len <= 129`, odd | Reject malformed |
+| Terminator | `descriptor[descriptor_len-1] == 0xFF` | Reject missing |
+| Mid-stream 0xFF | No `0xFF` at even indices before terminator | Reject collision |
+| Reserved flags | Bits 14-15 (flags nibble bits 2-3) must be 0 | Reject reserved |
+| Reserved field_id | `(field_id & 0xFF) != 0xFF` | Reject permanently |
+| Duplicate field | No field_id appears twice | Reject ambiguous |
+| HAS_LENGTH flag | Set iff field is variable-length | Reject mismatch |
+| nHashType | Field `0x09` must be present | Reject missing |
+| field_data[f] | Non-null for every referenced field | Reject null |
+| field_var_lens | Non-null when descriptor references any variable field | Reject null |
+| Bounded scan | Loop bound by `descriptor + descriptor_len` | Reject overrun |
+| Preimage size | ≤ 4 MiB per row | Reject overflow |
+| var_len ≤ stride | `field_var_lens[f][i] <= field_lengths[f]` | Reject OOB |
+
+**Failure semantics (HASH op — out32 untouched on bad input):**
+`count==0` → `true` (no-op). Null descriptor/field_data/field_lengths/out32 → `false`.
+Null `field_var_lens` with any variable field → `false`. Malformed descriptor,
+missing nHashType, duplicate/unsupported field, overflow → `false`.
+All failures leave `out32` untouched; no partial writes.
+
+**PUBLIC DATA only — variable-time, no secret material.**
+
 
 ---
 
@@ -2858,6 +3119,6 @@ void secp256k1_musig_keyagg_cache_clear(secp256k1_musig_keyagg_cache *keyagg_cac
 
 ## Version
 
-UltrafastSecp256k1 v4.5.0
+UltrafastSecp256k1 v4.6.0
 
 For more information, see the [README](../README.md) or [GitHub repository](https://github.com/shrec/UltrafastSecp256k1).

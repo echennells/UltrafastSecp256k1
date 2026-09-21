@@ -1,6 +1,6 @@
 # Supported Guarantees -- `ufsecp` C ABI
 
-> **Version**: 4.5.0 (ABI 1)
+> **Version**: 4.6.0 (ABI 4)
 > **Date**: 2026-03-23
 
 This document defines what the `ufsecp_*` C ABI promises and where the
@@ -27,7 +27,7 @@ a new `UFSECP_ABI_VERSION`.
 | **ECDH** | Three modes: compressed-hash, x-only-hash, raw x-coordinate. |
 | **BIP-32** | Full HD derivation: master from seed, normal/hardened child, full path string. |
 | **Taproot** | BIP-341 output key, key-path tweak, commitment verification. |
-| **Addresses** | P2PKH, P2WPKH (Bech32), P2TR (Bech32m). |
+| **Addresses** | P2PKH, P2WPKH (Bech32), P2TR (Bech32m), P2SH, and P2SH-P2WPKH. Context-aware P2SH diagnostics are available through `ufsecp_addr_p2sh_with_ctx`; the legacy stateless symbol remains ABI-stable. |
 | **WIF** | Encode/decode, mainnet/testnet, compressed/uncompressed. |
 | **GPU C ABI** | `ufsecp_gpu.h` is a stable opaque-handle C ABI. Backend availability is runtime-discovered and unsupported operations must return `UFSECP_ERR_GPU_UNSUPPORTED`. |
 

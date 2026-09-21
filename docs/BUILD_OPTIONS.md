@@ -4,7 +4,7 @@
 >
 > Defaults below are the **CMake declaration defaults**. Named build profiles (see [CMakePresets.json](../CMakePresets.json) and [BUILDING.md](BUILDING.md)) override many of them for a minimal footprint per coin / use case. A `cmake_dependent_option` is only honoured when its guard condition holds (otherwise it is forced off).
 
-**82 options** across 8 scope(s). Set any flag at configure time with `-D<FLAG>=ON|OFF`.
+**84 options** across 8 scope(s). Set any flag at configure time with `-D<FLAG>=ON|OFF`.
 
 ```bash
 # Example: CPU build with the shim + MuSig2, no ZK/FROST
@@ -22,7 +22,7 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 | `SECP256K1_BUILD_BENCH` | `ON` | Build benchmarks |
 | `SECP256K1_BUILD_CABI` | `ON` | Build optional libufsecp C ABI package (ufsecp_* FFI/bridge surface; native engine consumers link secp256k1::fast) |
 | `SECP256K1_BUILD_CPU` | `ON` | Build CPU implementation |
-| `SECP256K1_BUILD_CUDA` | `OFF` | Build CUDA GPU support |
+| `SECP256K1_BUILD_CUDA` | `OFF` | Build CUDA GPU support (requires explicit -DCMAKE_CUDA_ARCHITECTURES, CUDAARCHS, or -DSECP256K1_CUDA_ARCH_PROFILE=local-native\|ci-bounded-recent\|legacy-compat\|redistributable -- see cmake/CUDA_ARCHITECTURE_POLICY.md) |
 | `SECP256K1_BUILD_ETHEREUM` | `ON` | Build Ethereum module (Keccak, EIP-55/155/191, ecrecover) |
 | `SECP256K1_BUILD_EXAMPLES` | `ON` | Build example programs |
 | `SECP256K1_BUILD_JAVA` | `ON` | Build Java JNI bindings |
@@ -39,6 +39,7 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 | `SECP256K1_BUILD_SHARED` | `OFF` | Build shared library |
 | `SECP256K1_BUILD_TESTS` | `ON` | Build test suite |
 | `SECP256K1_CORE_BACKEND_MODE` | `OFF` | Bitcoin Core alternative backend: CT enforced, strict ABI, RFC 6979 deterministic signing |
+| `SECP256K1_FIXED_BASE_DISK_CACHE` | `ON` | Build the fixed-base precompute table once and reuse it from the per-user cache directory |
 | `SECP256K1_GPU_BUILD_BIP324` | `ON` | GPU BIP-324 AEAD encrypt/decrypt ops |
 | `SECP256K1_GPU_BUILD_BIP352` | `ON` | GPU BIP-352 silent-payment scan op |
 | `SECP256K1_GPU_BUILD_ECDH` | `ON` | GPU ECDH batch op (secret-bearing) |
@@ -70,6 +71,7 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 | `SECP256K1_BUILD_BIP352` | `ON` | BIP-352 Silent Payments (scan key ECDH + output derivation) |
 | `SECP256K1_BUILD_ECIES` | `ON` | ECIES authenticated encryption (AES-256-CTR + HMAC-SHA256) |
 | `SECP256K1_BUILD_FROST` | `ON` | FROST threshold signatures (t-of-n) |
+| `SECP256K1_BUILD_GH336_TEST_VARIANT` | `ON` | Build the private issue-336 instrumented regression object |
 | `SECP256K1_BUILD_LTC_SP` | `ON` | Litecoin Silent Payments (LTC-SP, ltcsp1... paycodes, ltc1p... outputs) |
 | `SECP256K1_BUILD_MUSIG2` | `ON` | MuSig2 multi-signatures (BIP-327) |
 | `SECP256K1_BUILD_PIPPENGER` | `ON` | Pippenger MSM + comb generator mul + batch affine (large MSM algorithms) |
@@ -82,7 +84,7 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 | `SECP256K1_UNITY_BUILD` | `OFF` | Compile core as single TU (matches libsecp256k1 model) |
 | `SECP256K1_USE_ASM` | `ON` | Enable inline assembly optimizations (x64/RISC-V, 2-5x speedup) |
 | `SECP256K1_USE_FAST_REDUCTION` | `ON` | Use fast modular reduction (RISC-V asm, x64 BMI2) |
-| `SECP256K1_USE_LTO` | `ON` | Enable Link Time Optimization (LTO) for C++ code |
+| `SECP256K1_USE_LTO` | `ON, or OFF when CMAKE_BUILD_TYPE=Debug` | Enable Link Time Optimization (LTO) for C++ code |
 | `SECP256K1_USE_PGO_GEN` | `OFF` | Enable Profile-Guided Optimization - Generate profile |
 | `SECP256K1_USE_PGO_USE` | `OFF` | Enable Profile-Guided Optimization - Use profile |
 | `SECP256K1_USE_RISCV_FE52_ASM` | `OFF` | Use hand-written RISC-V assembly for 5x52 field multiply/square (slower on in-order cores like U74) |
@@ -137,4 +139,4 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 
 ---
 
-_Generated from:_ `CMakeLists.txt`, `audit/CMakeLists.txt`, `bindings/android/CMakeLists.txt`, `bindings/android/example/src/main/cpp/CMakeLists.txt`, `bindings/c_api/CMakeLists.txt`, `bindings/java/CMakeLists.txt`, `bindings/wasm/CMakeLists.txt`, `compat/libbitcoin_bridge/CMakeLists.txt`, `compat/libbitcoin_direct/CMakeLists.txt`, `compat/libsecp256k1_bchn_shim/CMakeLists.txt`, `compat/libsecp256k1_shim/CMakeLists.txt`, `compat/litecoin_shim/CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/esp32_bench_hornet/CMakeLists.txt`, `examples/esp32_bench_hornet/main/CMakeLists.txt`, `examples/esp32_test/CMakeLists.txt`, `examples/esp32_test/main/CMakeLists.txt`, `examples/esp32c6_bench_hornet/CMakeLists.txt`, `examples/esp32c6_bench_hornet/main/CMakeLists.txt`, `examples/esp32p4_bench_hornet/CMakeLists.txt`, `examples/esp32p4_bench_hornet/main/CMakeLists.txt`, `examples/stm32_test/CMakeLists.txt`, `include/ufsecp/CMakeLists.txt`, `src/bch/CMakeLists.txt`, `src/cpu/CMakeLists.txt`, `src/cuda/CMakeLists.txt`, `src/gpu/CMakeLists.txt`, `src/ltc/cuda/CMakeLists.txt`, `src/metal/CMakeLists.txt`, `src/opencl/CMakeLists.txt`, `tests/esp32_audit/CMakeLists.txt`, `tests/esp32_audit/main/CMakeLists.txt`, `tests/esp32c6_audit/CMakeLists.txt`, `tests/esp32c6_audit/main/CMakeLists.txt`, `tests/esp32p4_audit/CMakeLists.txt`, `tests/esp32p4_audit/main/CMakeLists.txt`
+_Generated from:_ `CMakeLists.txt`, `audit/CMakeLists.txt`, `bindings/android/CMakeLists.txt`, `bindings/android/example/src/main/cpp/CMakeLists.txt`, `bindings/c_api/CMakeLists.txt`, `bindings/java/CMakeLists.txt`, `bindings/wasm/CMakeLists.txt`, `ci/fixtures/pr353_msvc_link_retention/CMakeLists.txt`, `compat/libbitcoin_bridge/CMakeLists.txt`, `compat/libbitcoin_direct/CMakeLists.txt`, `compat/libsecp256k1_bchn_shim/CMakeLists.txt`, `compat/libsecp256k1_shim/CMakeLists.txt`, `compat/litecoin_shim/CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/esp32_bench_hornet/CMakeLists.txt`, `examples/esp32_bench_hornet/main/CMakeLists.txt`, `examples/esp32_test/CMakeLists.txt`, `examples/esp32_test/main/CMakeLists.txt`, `examples/esp32c6_bench_hornet/CMakeLists.txt`, `examples/esp32c6_bench_hornet/main/CMakeLists.txt`, `examples/esp32p4_bench_hornet/CMakeLists.txt`, `examples/esp32p4_bench_hornet/main/CMakeLists.txt`, `examples/stm32_test/CMakeLists.txt`, `include/ufsecp/CMakeLists.txt`, `src/bch/CMakeLists.txt`, `src/cpu/CMakeLists.txt`, `src/cuda/CMakeLists.txt`, `src/gpu/CMakeLists.txt`, `src/ltc/cuda/CMakeLists.txt`, `src/metal/CMakeLists.txt`, `src/opencl/CMakeLists.txt`, `tests/esp32_audit/CMakeLists.txt`, `tests/esp32_audit/main/CMakeLists.txt`, `tests/esp32c6_audit/CMakeLists.txt`, `tests/esp32c6_audit/main/CMakeLists.txt`, `tests/esp32p4_audit/CMakeLists.txt`, `tests/esp32p4_audit/main/CMakeLists.txt`

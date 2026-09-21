@@ -4,7 +4,7 @@
 > or prove we missed something — start here. We want you to find real bugs more
 > than we want to look clean.
 
-**Current assurance state**: 270 exploit PoCs modules + 166 non-exploit modules = 436 total
+**Current assurance state**: 276 exploit PoCs modules + 202 non-exploit modules = 478 total
 (via `audit/unified_audit_runner`), 11 fuzzer harnesses, dudect
 + Valgrind CT evidence, full Wycheproof vector coverage. None of this means the library is bug-free.
 It means we tried hard. Now you try.
@@ -275,6 +275,144 @@ Attack scenarios:
 - A participant submits a partial signature for the wrong challenge — is the
   identification step robust?
 - Threshold = 1 with n = 1 — does the library degenerate gracefully to single-sig?
+
+---
+
+### Attack 11 — GPU BIP-352 Multi-Spend Scan: Limb Reversal, ABI Overlap, Fail-Open (GitHub issue #335)
+
+**Target**: `src/cuda/include/ct/ct_point.cuh`, `src/gpu/src/gpu_backend_cuda.cu`,
+`src/gpu/src/gpu_backend_opencl.cpp`, `src/cpu/src/ufsecp_gpu_impl.cpp`
+**Entry**: `ufsecp_gpu_bip352_scan_batch`, `ufsecp_gpu_bip352_scan_batch_multispend`
+
+Three distinct attack/failure classes were found and fixed in the same
+repair, all specific to the GPU-accelerated BIP-352 Silent Payment scan path:
+
+1. **Limb-order scalar corruption (P0, found by this task's own mandated
+   cross-oracle testing):** `ct_scalar_mul_varbase`'s bit-to-limb-index
+   mapping assumed the wrong significance order for `Scalar::limbs[4]`. The
+   scan private key was silently consumed with its four 64-bit limbs
+   reversed — a deterministic, non-crashing, non-zero WRONG result for
+   essentially every real scan key. **This class of bug is invisible to any
+   check that only verifies "output is non-zero and deterministic"** — a
+   reversed scalar multiplication is still a valid, deterministic
+   multiplication of *some* 256-bit value. The only way to catch it is an
+   independent re-implementation of the same computation compared
+   byte-for-byte (see `audit/test_regression_bip352_ct_varbase.cpp` and
+   `audit/test_exploit_gpu_bip352_scalar_limb_order.cpp`). **Lesson for
+   future GPU kernel ports**: any time a scalar/field-element representation
+   crosses a host↔device or CPU↔GPU-language boundary (BE bytes → LE limbs,
+   different limb-count conventions, etc.), write the cross-implementation
+   oracle test FIRST, before trusting "it runs and returns something."
+2. **ABI output/input pointer-range aliasing:** `prefix64_out` was never
+   checked for overlap against `scan_privkey32`/`spend_pubkeys33`/
+   `tweak_pubkeys33`. The ABI wrapper zeroes `prefix64_out` before dispatch
+   — if a caller (accidentally or adversarially) aliased the output buffer
+   onto an input range, that zeroing corrupts input data the backend reads
+   immediately afterward, producing a wrong result from a corrupted read
+   rather than a clean, diagnosable rejection. Any multi-buffer C ABI
+   function taking both raw input and output pointers should reject
+   dangerous aliasing with an overflow-safe range check before touching
+   either buffer.
+3. **Fail-open GPU error paths:** the OpenCL backend override left
+   `clFinish`/`clEnqueueReadBuffer` unchecked and returned `GpuError::Ok`
+   unconditionally afterward — a GPU fault or partial readback was reported
+   as success with corrupted/stale output. **General lesson**: in any GPU
+   backend, a `return Ok` that is not preceded by a checked return code for
+   every driver/runtime call in between is a potential fail-open path,
+   regardless of how unlikely the specific failure seems.
+
+See `audit/test_regression_bip352_ct_varbase.cpp` (CRIT-02),
+`audit/test_exploit_gpu_bip352_scalar_limb_order.cpp`, and
+`audit/test_exploit_gpu_bip352_multispend_failclosed.cpp` for the full PoC
+and regression coverage added for this attack class.
+
+**Round 3 addendum (2026-07-16, OpenCL track):** a review of round 2's
+OpenCL fix found that "checked return code for every driver/runtime call"
+still had two gaps specific to OpenCL: (a) `clGetCommandQueueInfo` and both
+`clGetKernelWorkGroupInfo` queries tolerated failure with a silent
+local-size fallback and could still return `Ok`; (b) the only real
+end-to-end fault-injection evidence covered exactly ONE of the 18 documented
+OpenCL control-call sites (`clFinish`) — every other site was only exercised
+via a generic fault-injector probe call, not a real dispatch through the
+public ABI, which does not prove the *production dispatch path* actually
+observes and propagates that site's failure. Both gaps are fixed (every
+query is now fail-closed; a new file,
+`audit/test_exploit_opencl_bip352_control_call_failclosed.cpp`, arms and
+verifies each of the 18 sites individually through a real
+`ufsecp_gpu_bip352_scan_batch_multispend` call) and were run for real on
+this machine's GPU: `Result: 37 passed, 0 failed, 0 inconclusive/advisory-skip`.
+**General lesson (extends the one above):** "every call is checked" and
+"every call's checked-ness is actually exercised by a test that goes through
+the real dispatch path" are different claims — a generic probe of the fault
+injector alone proves the injector works, not that the code path under test
+propagates the failure the way production traffic would reach it.
+
+---
+
+### Attack 12 — Batch Verification Randomiser: Weight/Seed Binding (GitHub issue #400)
+
+**Target**: `src/cpu/src/batch_verify.cpp`, `src/cpu/include/secp256k1/sha256.hpp`
+**Entry**: `schnorr_batch_verify` (both the `SchnorrBatchEntry` and
+`SchnorrBatchCachedEntry` overloads), batch sizes `n > 96`
+
+Randomised batch verification replaces N individual checks with one aggregate:
+
+    sum_i a_i * ( s_i*G - R_i - e_i*P_i )  ==  O
+
+Write `D_i = s_i*G - R_i - e_i*P_i` for entry i's error; `D_i = O` exactly when
+entry i is valid. The Bellare–Garay–Rabin small-exponents proof requires the
+weights `a_i` to be drawn **after, and independently of, the signatures**. The
+moment an attacker learns the `a_i` before choosing the entries, the check is
+defeated by linear algebra, not cryptanalysis: pick any `t_0 != 0`, set
+`t_1 = -(a_0/a_1)·t_0`, and offset `s_0 += t_0`, `s_1 += t_1`. Then
+`D_0 = t_0*G`, `D_1 = t_1*G`, and `a_0*D_0 + a_1*D_1 = O`. The batch passes
+with two signatures that both fail individual verification. Cost: one modular
+inversion. No key, no grinding, no discrete log.
+
+**How this engine lost that property.** Weights are derived as
+`a_i = SHA256(batch_seed || i_le32)`, where `batch_seed` binds every signature
+in the batch and is XORed with 32 fresh CSPRNG bytes per call — exactly to keep
+the `a_i` unpredictable. A performance change (`ca0dde78`) replaced the
+per-weight SHA-256 context copy with a captured `SHA256::Midstate`. A midstate
+carries only `state_` and `total_`, so it is well defined **only on a 64-byte
+block boundary**. The seed is 32 bytes: nothing had been compressed and all 32
+bytes were still in `buf_`. The capture dropped them while `total_` kept
+counting them, and every weight collapsed to a constant of the index alone —
+the same values in every batch on every machine. The CSPRNG XOR was still
+computed, and then thrown away.
+
+**What to try on any batch-verification implementation:**
+
+1. **Does a weight actually depend on the seed?** Hash the same index under two
+   different seeds and compare. This is one line and it is the whole bug.
+2. **Are weights stable across runs?** Run the same batch twice in one process
+   and once in a fresh process. A randomiser worth its name gives different
+   weights every call; identical weights mean the CSPRNG never reached them.
+3. **Build the cross-cancellation pair.** If step 1 or 2 shows fixed weights,
+   compute `t_1 = -(a_0/a_1)·t_0` and submit the batch. Acceptance is the
+   proof.
+4. **Check the batch-size threshold.** This engine runs individual verification
+   for `n <= kSchnorrBatchIndividualCutoff` (96) and only then switches to the
+   randomised MSM. A PoC below the cutoff proves nothing — it never derives a
+   weight. Any batch implementation with a small-N fast path has the same blind
+   spot, and it is where a test suite is most likely to be looking.
+5. **Audit every incremental-hash shortcut for its block-boundary
+   precondition.** Midstate/`memcpy`-of-context/`clone()` optimisations are
+   correct only where the absorbed length is a multiple of the block size.
+   Off-boundary, they silently hash different data — no crash, no wrong length,
+   just a different and now attacker-predictable digest.
+
+**General lesson — and the one that matters most here.** The module that was
+supposed to cover this, `audit/test_batch_randomness.cpp`, passed unchanged
+throughout. It *reimplements* the weight function instead of calling it, so it
+was testing its own model, not the engine; and every batch it builds is far
+below the 96-entry cutoff, so it never reaches the code it claims to audit. A
+mirror test cannot detect divergence from the thing it mirrors. Where a
+security property is observable through the public API — and "does the batch
+reject this forgery?" is — assert it **through the public API**.
+
+See `audit/test_exploit_batch_weight_seed_binding.cpp` for the full PoC; it is
+verified to fail against pre-fix code (6/8) and pass after (8/8).
 
 ---
 

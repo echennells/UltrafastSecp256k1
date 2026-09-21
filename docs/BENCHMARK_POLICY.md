@@ -73,6 +73,86 @@ python3 ci/preflight.py --gpu-evidence
 python3 ci/validate_assurance.py
 ```
 
+### Libbitcoin GPU workload evidence gate
+
+`ci/check_libbitcoin_perf_matrix.py` only checks that `evidence_paths` files
+listed in `docs/LIBBITCOIN_PERF_MATRIX_STATUS.json` *exist* on disk — it does
+not open or validate the benchmark JSON content itself. That gap is closed for
+libbitcoin-shaped benchmark artifacts by `ci/check_lbtc_gpu_workload_evidence.py`,
+which parses `results[]` rows and rejects corrupt or overclaiming evidence:
+zero/negative timing, `ns_per_row`/`count`/`best_seconds` arithmetic
+inconsistency, missing/mistyped fields, backend/device/driver_version
+contradictions, GPU claims without `provider_linked`+`hook_installed`,
+CPU-only rows relabeled `gpu_acceleration`, non-`matched_reference`
+validation status, one-sided `speedup_vs_cpu_forced` claims, and (a dedicated
+group check) any `gpu_acceleration` row that does not simultaneously satisfy
+backend/device/provider_linked/hook_installed/validation/positive-timing. It
+covers both the current `bench_lbtc_public_ops` artifact schema
+(`ufsecp-lbtc-public-ops-benchmark-v1`, see
+`docs/LIBBITCOIN_PUBLIC_OPS_BENCHMARKS.md`) and the phase-aware libbitcoin
+GPU workload schema (`ufsecp-lbtc-gpu-workload-benchmark-v1`, defined in
+`workingdocs/libbitcoin_gpu_workloads/evidence_matrix_claude.json`, for
+txid/wtxid/sighash/merkle-shaped workloads).
+
+`bench_lbtc_workloads` (`compat/libbitcoin_direct/bench/bench_workloads.cpp`)
+produces the v2 schema for `txid_batch`/`wtxid_batch`/`merkle_pair_batch`/
+`merkle_root_batch` (`sighash_batch` remains unimplemented — descriptor
+contract not accepted). Every artifact's first row is always CPU-forced
+`evidence_class: api_correctness`. A second, paired `evidence_class:
+gpu_acceleration` row is emitted only when a real GPU backend is linked,
+initialized, ready, and the direct workload hook independently accepts and
+handles the batch on this host — identified via the
+`ufsecp::lbtc::gpu_hook::g_lbtc_gpu_telemetry_hook` telemetry extension
+(`compat/libbitcoin_direct/include/ufsecp/lbtc_gpu_ops.hpp`,
+`src/gpu/src/gpu_engine_hook.cpp`), which reports backend name/id/device
+straight from the already-existing `GpuBackend::backend_id()`/
+`backend_name()`/`device_info()` — no new backend method, no
+`gpu_backend.hpp`/`*_cuda.cu`/`*_opencl.cpp`/`*_metal.mm` edit, no C ABI or
+bridge dependency, and this telemetry is never called from any
+production/hot-path code (benchmark-only). `driver_version` stays `null` on
+every row (`DeviceInfo` has no driver field: an honest gap, not a fabricated
+value — see the gate's module docstring "Honest gaps"). If no GPU backend is
+linked/ready, or if the direct hook declines the exact benchmark shape, only
+the CPU `api_correctness` row is emitted — absence of handled GPU evidence is
+reported honestly, never papered over. `bench_public_ops.cpp` uses the same
+telemetry only after an independent direct-hook probe succeeds; otherwise its
+`direct-production` rows keep `backend="cpu"`/`device="n/a"` while still
+keeping `evidence_class: api_correctness` unconditionally under schema v1 (no
+phase-split instrumentation exists there yet). See
+`docs/LIBBITCOIN_PUBLIC_OPS_BENCHMARKS.md` "Workload benchmark harness" for
+the independent-oracle validation strategy and exact CPU-only vs
+GPU-linked reproduce commands.
+
+```bash
+python3 ci/check_lbtc_gpu_workload_evidence.py <benchmark_artifact.json>
+python3 ci/test_lbtc_gpu_workload_evidence.py   # gate unit tests
+```
+
+**Decline diagnostics.** When a hook-active row does not independently
+reproduce (`bench_public_ops.cpp` "did not independently handle the batch"
+or `bench_workloads.cpp` "GPU hook declined"), both harnesses now also print
+a bounded, best-effort reason line to stderr:
+`<op> decline reason: gpu_error_code=<N> msg=<...>`. This is sourced from
+the already-existing `GpuBackend::last_error()`/`last_error_msg()` virtuals
+via a new benchmark-only `g_lbtc_gpu_last_error_hook`
+(`compat/libbitcoin_direct/include/ufsecp/lbtc_gpu_ops.hpp`,
+`src/gpu/src/gpu_engine_hook.cpp`) — no new backend method, no
+`gpu_backend.hpp`/`*_cuda.cu`/`*_opencl.cpp`/`*_metal.mm` edit, never
+written into the JSON artifact (stderr-only, does not change
+`backend`/`evidence_class`/any gated field). Because every op hook shares
+one backend instance and one last-error slot per process, this message
+reflects the shared backend's most recent operational failure, not
+necessarily a fresh error for that specific op — see
+`workingdocs/libbitcoin_gpu_workloads/hook_decline_diagnostics_claude.md`
+for the known root cause this surfaced on 2026-07-09 (`OpenCLBackend::
+ensure_extended_kernels()`'s kernel-source search path is resolved relative
+to the process's current working directory, not the executable location;
+when none of its hardcoded candidates resolve from the invoking CWD,
+`secp256k1_extended.cl` is reported "not found" and — because that failure
+is cached for the lifetime of the process — every extended-kernel lbtc op,
+not only the newly-added `merkle_pair`/`merkle_root` ones, declines for the
+rest of that run).
+
 ---
 
 ## Execution Profile

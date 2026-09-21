@@ -178,12 +178,18 @@ fast::Scalar rfc6979_nonce_hedged(const fast::Scalar& private_key,
                                    const std::array<std::uint8_t, 32>& aux_rand);
 
 // RFC 6979 with libsecp256k1-compatible keydata structure.
-// Produces byte-identical nonces to upstream secp256k1_nonce_function_rfc6979
-// including the "ECDSA\0..." algo16 tag. Used by SECP256K1_SHIM_RFC6979_COMPAT.
+// Produces byte-identical nonces to upstream secp256k1_nonce_function_rfc6979,
+// algo16 tag included. Used by SECP256K1_SHIM_RFC6979_COMPAT.
 // ndata32: nullptr = no extra entropy; non-nullptr = 32-byte ndata.
+// algo16:  nullptr = "ECDSA\0..." , libsecp256k1's ECDSA tag. Pass an explicit
+//          16-byte tag for a scheme that uses a different one -- the Bitcoin
+//          Cash 2019 Schnorr spec requires "Schnorr+SHA256  " (padded to 16
+//          bytes with two ASCII spaces), and a nonce generated without it is
+//          valid but not the nonce BCHN or Libauth would have produced.
 fast::Scalar rfc6979_nonce_libsecp_compat(const fast::Scalar& private_key,
                                           const std::array<std::uint8_t, 32>& msg_hash,
-                                          const std::uint8_t* ndata32);
+                                          const std::uint8_t* ndata32,
+                                          const std::uint8_t* algo16 = nullptr);
 
 } // namespace secp256k1
 

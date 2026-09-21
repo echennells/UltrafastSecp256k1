@@ -52,16 +52,28 @@ if(SECP256K1_BUILD_LIBBITCOIN_GPU)
         # never installs — "transparent GPU column verify" then silently stays CPU-only
         # (verified: nm shows the installer absent from the executable without this).
         #
-        # Retention is done by declaring the provider's exported anchor symbol as UNDEFINED
-        # at the executable link, so the linker pulls exactly that one archive member (and its
-        # genuine transitive deps). A blanket $<LINK_LIBRARY:WHOLE_ARCHIVE,secp256k1_gpu_host>
-        # is deliberately NOT used: it would also drag in gpu_backend_fallback.o, whose
-        # snark-witness CPU fallback references secp256k1::zk::* symbols that are not part of
-        # the minimal libbitcoin engine, breaking the link. Targeted -u retention pulls only
-        # the hook. (The ufsecp C ABI path retains the same object via a source-level anchor
+        # Retention is done by a platform-specific targeted linker option that forces the
+        # provider's exported anchor symbol to stay resolved at the executable link, so the
+        # linker pulls exactly that one archive member (and its genuine transitive deps):
+        # --undefined=<anchor> on GNU-like linkers (gcc/clang driving ld/lld/gold),
+        # /INCLUDE:<anchor> on MSVC link.exe (link.exe has no --undefined flag; a
+        # silently-ignored --undefined there leaves the hook dead-stripped — CPU-only, no
+        # build error, no diagnostic — see docs/WINDOWS_CUDA_BUILD_CONTRACT.md, PR #353 /
+        # Eric Voskuil). A blanket $<LINK_LIBRARY:WHOLE_ARCHIVE,secp256k1_gpu_host>
+        # is deliberately NOT used on either platform: it would also drag in
+        # gpu_backend_fallback.o, whose snark-witness CPU fallback references
+        # secp256k1::zk::* symbols that are not part of the minimal libbitcoin engine,
+        # breaking the link. Targeted retention (--undefined / /INCLUDE) pulls only the
+        # hook. (The ufsecp C ABI path retains the same object via a source-level anchor
         # reference in ufsecp_gpu_impl.cpp — see src/gpu/src/gpu_engine_hook.cpp and
         # src/gpu/CMakeLists.txt "LBTC-GPU-SELFINSTALL-DROP".)
-        set(_lbtc_gpu_retain "LINKER:--undefined=secp256k1_gpu_columns_provider_anchor")
+        if(MSVC)
+            set(_lbtc_gpu_retain "LINKER:/INCLUDE:secp256k1_gpu_columns_provider_anchor")
+            set(_lbtc_gpu_retain_desc "/INCLUDE (MSVC)")
+        else()
+            set(_lbtc_gpu_retain "LINKER:--undefined=secp256k1_gpu_columns_provider_anchor")
+            set(_lbtc_gpu_retain_desc "--undefined (GNU-like)")
+        endif()
         # Enable the seven libbitcoin public-data batch-op GPU trampolines in
         # gpu_engine_hook.cpp (guarded by SECP256K1_LBTC_GPU_OPS) and give that TU
         # the include path for <ufsecp/lbtc_gpu_ops.hpp>. Both are target-level
@@ -73,7 +85,7 @@ if(SECP256K1_BUILD_LIBBITCOIN_GPU)
         # EngineLbtcOpsInstaller rides the same TU/anchor as the column provider.
         target_include_directories(secp256k1_gpu_host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_compile_definitions(secp256k1_gpu_host PRIVATE SECP256K1_LBTC_GPU_OPS)
-        message(STATUS "  libbitcoin direct GPU: ON (SECP256K1_BUILD_LIBBITCOIN_GPU=ON; secp256k1_gpu_host linked, hook retained via -u anchor — transparent GPU column verify + public-data batch ops)")
+        message(STATUS "  libbitcoin direct GPU: ON (SECP256K1_BUILD_LIBBITCOIN_GPU=ON; secp256k1_gpu_host linked, hook retained via targeted linker anchor retention [${_lbtc_gpu_retain_desc}] — transparent GPU column verify + public-data batch ops)")
     else()
         set(_lbtc_gpu_host "")
         set(_lbtc_gpu_retain "")
@@ -191,7 +203,49 @@ if(SECP256K1_BUILD_LIBBITCOIN_BENCH)
     if(TARGET Threads::Threads)
         target_link_libraries(bench_lbtc_public_ops PRIVATE Threads::Threads)
     endif()
-    message(STATUS "  libbitcoin direct bench: ON (bench_lbtc_direct_batch, bench_lbtc_hash256_var, bench_lbtc_public_ops, no C ABI/shim/bridge)")
+
+    add_executable(bench_lbtc_workloads bench/bench_workloads.cpp)
+    target_link_libraries(bench_lbtc_workloads PRIVATE
+        fastsecp256k1_libbitcoin
+        ${_lbtc_gpu_host}
+        ${_lbtc_engine})
+    if(_lbtc_gpu_retain)
+        target_link_options(bench_lbtc_workloads PRIVATE ${_lbtc_gpu_retain})
+    endif()
+    if(TARGET Threads::Threads)
+        target_link_libraries(bench_lbtc_workloads PRIVATE Threads::Threads)
+    endif()
+
+    # Stage secp256k1_extended.cl and its transitive #includes next to the two
+    # GPU-facing bench binaries. OpenCLBackend::resolve_opencl_kernel() (see
+    # src/gpu/src/gpu_backend_opencl.cpp) already walks up from the executable's
+    # own directory looking for src/opencl/kernels/, which finds this repo's
+    # kernels for any build directory nested under libs/UltrafastSecp256k1/
+    # with no copy needed. This POST_BUILD step is a harmless fallback for
+    # build layouts that resolver strategy can't reach - out-of-tree builds, or
+    # a packaged binary directory with the source tree stripped - matching the
+    # legacy CWD-relative "kernels/" lookup the resolver also tries. Only
+    # staged when the libbitcoin GPU bench links a real OpenCL backend;
+    # CPU-only, CUDA-only, and Metal-only builds have no use for OpenCL source.
+    if(_lbtc_gpu_host AND SECP256K1_BUILD_OPENCL)
+        set(_lbtc_opencl_kernel_dir ${CMAKE_CURRENT_SOURCE_DIR}/../../src/opencl/kernels)
+        foreach(_lbtc_bench_target bench_lbtc_public_ops bench_lbtc_workloads)
+            add_custom_command(TARGET ${_lbtc_bench_target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${_lbtc_bench_target}>/kernels
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_extended.cl
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_point.cl
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_field.cl
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_ct_ops.cl
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_ct_field.cl
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_ct_scalar.cl
+                    ${_lbtc_opencl_kernel_dir}/secp256k1_ct_point.cl
+                    $<TARGET_FILE_DIR:${_lbtc_bench_target}>/kernels/
+                COMMENT "Copying secp256k1_extended.cl + includes for ${_lbtc_bench_target}"
+            )
+        endforeach()
+    endif()
+    message(STATUS "  libbitcoin direct bench: ON (bench_lbtc_direct_batch, bench_lbtc_hash256_var, bench_lbtc_public_ops, bench_lbtc_workloads, no C ABI/shim/bridge)")
 endif()
 
 # Canonical direct C++ examples. Kept behind a libbitcoin-specific flag because

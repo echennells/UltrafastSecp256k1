@@ -22,9 +22,19 @@ if(_GPU_LANG STREQUAL "CUDA")
             "CUDA runtime linkage (Static by default so engine binaries do not depend on libcudart.so/cudart64*.dll)"
             FORCE)
     endif()
-    # Set CUDA architecture if not already set by parent (fallback to 89 = Ada Lovelace)
+    # CMAKE_CUDA_ARCHITECTURES is set by the parent CMakeLists.txt before this
+    # subdirectory is entered (explicit caller value, CUDAARCHS, or a named
+    # SECP256K1_CUDA_ARCH_PROFILE -- see cmake/CudaArchPolicy.cmake). There is
+    # intentionally no local fallback here: a fallback at this scope would be
+    # a second, redundant place that could silently pick an architecture list,
+    # defeating the fail-fast policy enforced at the parent scope.
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "" OR CMAKE_CUDA_ARCHITECTURES STREQUAL "OFF")
-        set(CMAKE_CUDA_ARCHITECTURES 89)
+        message(FATAL_ERROR
+            "src/cuda/CMakeLists.txt: CMAKE_CUDA_ARCHITECTURES is unset. This "
+            "subdirectory must only be reached after the parent CMakeLists.txt "
+            "has resolved an explicit value, a CUDAARCHS env value, or a named "
+            "SECP256K1_CUDA_ARCH_PROFILE. This is a build-graph invariant "
+            "violation, not a normal user-facing configuration error.")
     endif()
     # Required for device-code linking when secp256k1_cuda_lib uses separable
     # compilation. Without this, executables that link the static lib get
@@ -61,9 +71,43 @@ else()
         POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_include_directories(secp256k1_cuda_lib PUBLIC
+# Issue #335 acceptance repair (round 11): these were PUBLIC, unwrapped
+# paths ("include" relative, and an absolute parent path) -- CMake refuses
+# to export a target whose PUBLIC/INTERFACE include dirs are not
+# BUILD_INTERFACE/INSTALL_INTERFACE-wrapped, which blocked
+# SECP256K1_INSTALL_CABI=ON + SECP256K1_BUILD_CUDA=ON from configuring at
+# all (secp256k1_gpu_host PRIVATE-links this target; ufsecp_static
+# PRIVATE-links secp256k1_gpu_host; CMake's install(EXPORT ufsecpTargets ...)
+# requires the whole chain to be exportable). Demoted to PRIVATE after
+# confirming no consumer needs the PUBLIC propagation:
+#   - the sibling test/bench executables defined later in THIS file
+#     (secp256k1_cuda_test, gpu_audit_runner, bench_compare, etc.) already
+#     get both paths from the directory-scoped `include_directories(include
+#     ${CMAKE_CURRENT_SOURCE_DIR}/../../include)` call above (a legacy,
+#     non-target-specific command that applies regardless of this target's
+#     own PUBLIC/PRIVATE keyword), so nothing in this file depends on the
+#     propagation;
+#   - src/gpu/CMakeLists.txt (the one out-of-file consumer that PRIVATE-links
+#     secp256k1_cuda_lib) already explicitly adds
+#     "${CMAKE_CURRENT_SOURCE_DIR}/../cuda/include" itself, PRIVATE, one
+#     level up ("CUDA-specific settings" block) -- this PUBLIC copy was
+#     redundant for it too.
+# PRIVATE also avoids installing ~600KB of internal .cuh device-implementation
+# headers (secp256k1.cuh, zk.cuh, etc.) into the public package tree for no
+# real consumer -- the stable public GPU surface is ufsecp_gpu.h, installed
+# separately by the root CMakeLists.txt `if(TARGET secp256k1_gpu_host)`.
+target_include_directories(secp256k1_cuda_lib PRIVATE
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+# Join the ufsecp C ABI package's export set (see src/gpu/CMakeLists.txt for
+# the full issue #335 round-11 rationale). ARCHIVE-only: this is always a
+# STATIC library (HIP and CUDA branches above both add_library(... STATIC)).
+include(GNUInstallDirs)
+install(TARGETS secp256k1_cuda_lib
+    EXPORT ufsecpTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 if(SECP256K1_CUDA_USE_MONTGOMERY)
@@ -81,6 +125,25 @@ if(_GPU_LANG STREQUAL "HIP")
 endif()
 add_executable(secp256k1_cuda_test ${_TEST_SOURCES})
 target_link_libraries(secp256k1_cuda_test PRIVATE secp256k1_cuda_lib)
+
+# Issue #335 acceptance repair (round 11 coordinator follow-up): every
+# executable named bench_*/secp256k1_cuda_bench below is now gated behind
+# SECP256K1_BUILD_BENCH, matching src/opencl/CMakeLists.txt's own existing
+# convention (its benchmark executables are already wrapped the same way).
+# Previously these built UNCONDITIONALLY whenever CUDA was enabled at all --
+# CMake's generated "install" target depends on "all" by default, so ANY
+# broken CUDA benchmark (e.g. bench_decompress_ab's pre-existing undefined
+# reference to secp256k1::cuda::ecdsa_verify_batch_kernel -- a separate,
+# unrelated bug, NOT fixed here, out of this round's scope) blocked
+# `cmake --build --target install` even when the caller never asked for
+# benchmarks (SECP256K1_BUILD_BENCH=OFF, e.g.
+# ci/check_release_package_contents.py --gpu-export-closure's cuda/
+# opencl_cuda combos). Test/audit/probe targets in this file
+# (secp256k1_cuda_test, test_bip324_kat, gpu_audit_runner, test_ct_smoke,
+# gpu_ct_leakage_probe) are deliberately left unconditional, mirroring
+# src/opencl/CMakeLists.txt leaving opencl_test/opencl_audit_runner
+# unconditional too.
+if(SECP256K1_BUILD_BENCH)
 
 # Benchmark executable
 set(_BENCH_SOURCES src/bench_cuda.cu)
@@ -102,6 +165,8 @@ else()
 endif()
 target_link_libraries(secp256k1_cuda_bench PRIVATE secp256k1_cuda_lib)
 
+endif() # SECP256K1_BUILD_BENCH
+
 # CTest integration
 enable_testing()
 add_test(NAME cuda_selftest COMMAND secp256k1_cuda_test)
@@ -122,6 +187,20 @@ add_test(NAME bip324_kat_cuda COMMAND test_bip324_kat)
 set_tests_properties(bip324_kat_cuda PROPERTIES
     TIMEOUT 60
     LABELS "gpu;cuda;kat;bip324;chacha20;rfc8439")
+
+# ===== Windows macro compatibility compile fixture =====
+# Deterministic regression for the rpcndr.h `small` macro collision: compiles
+# secp256k1.cuh with the macro pre-defined (see test_windows_macro_compat.cu).
+# The compile itself is the test; the executable is a trivial exit.
+add_executable(test_windows_macro_compat src/test_windows_macro_compat.cu)
+target_include_directories(test_windows_macro_compat PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+add_test(NAME cuda_windows_macro_compat COMMAND test_windows_macro_compat)
+set_tests_properties(cuda_windows_macro_compat PROPERTIES
+    TIMEOUT 60
+    LABELS "gpu;cuda;compat;windows")
 
 # ===== GPU Unified Audit Runner =====
 set(_AUDIT_SOURCES src/gpu_audit_runner.cu)
@@ -167,6 +246,11 @@ if(TARGET fastsecp256k1)
     target_link_options(gpu_audit_runner PRIVATE -fno-lto)
 endif()
 add_test(NAME gpu_audit COMMAND gpu_audit_runner --json-only)
+
+# Issue #335 acceptance repair (round 11 coordinator follow-up): gated
+# behind SECP256K1_BUILD_BENCH -- see the comment ahead of
+# secp256k1_cuda_bench above for the full rationale.
+if(SECP256K1_BUILD_BENCH)
 
 # ===== GPU Unified Benchmark =====
 set(_BENCH_UNIFIED_SOURCES src/gpu_bench_unified.cu)
@@ -361,6 +445,8 @@ set_target_properties(bench_snark_witness PROPERTIES
 )
 target_link_options(bench_snark_witness PRIVATE -fno-lto)
 
+endif() # SECP256K1_BUILD_BENCH
+
 # ===== GPU CT Layer Smoke Test =====
 set(_CT_TEST_SOURCES src/test_ct_smoke.cu)
 if(_GPU_LANG STREQUAL "HIP")
@@ -402,6 +488,14 @@ else()
 endif()
 target_link_libraries(gpu_ct_leakage_probe PRIVATE secp256k1_cuda_lib)
 add_test(NAME gpu_ct_leakage_probe COMMAND gpu_ct_leakage_probe --json-only)
+
+# Issue #335 acceptance repair (round 11 coordinator follow-up): gated
+# behind SECP256K1_BUILD_BENCH -- see the comment ahead of
+# secp256k1_cuda_bench above for the full rationale. This block in
+# particular contains bench_decompress_ab, the target with the pre-existing
+# undefined-reference link bug that used to block
+# `cmake --build --target install` unconditionally.
+if(SECP256K1_BUILD_BENCH)
 
 # ===== GPU ZK Benchmark =====
 set(_BENCH_ZK_SOURCES src/bench_zk.cu)
@@ -467,6 +561,12 @@ target_link_libraries(bench_raw_entry PRIVATE secp256k1_cuda_lib)
 set_target_properties(bench_raw_entry PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON)
 
+endif() # SECP256K1_BUILD_BENCH
+
+# Applies to every target in this directory regardless of
+# SECP256K1_BUILD_BENCH -- deliberately left outside the gate above so
+# secp256k1_cuda_lib and the always-on test/audit targets still get the
+# correct CUDA_RUNTIME_LIBRARY when benchmarks are OFF.
 if(_GPU_LANG STREQUAL "CUDA")
     get_property(_secp256k1_cuda_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
     foreach(_secp256k1_cuda_target IN LISTS _secp256k1_cuda_targets)

@@ -90,9 +90,9 @@ class Secp256k1:
         self._lib = ctypes.CDLL(path)
         self._setup_prototypes()
 
-        rc = self._lib.secp256k1_init()
+        rc = self._lib.ultrafast_secp256k1_init()
         if rc != 0:
-            raise RuntimeError("secp256k1_init() failed: library selftest failure")
+            raise RuntimeError("ultrafast_secp256k1_init() failed: library selftest failure")
 
     # -- Key Operations ----------------------------------------------------
 
@@ -100,7 +100,7 @@ class Secp256k1:
         """Compute compressed public key (33 bytes) from private key (32 bytes)."""
         self._check_bytes(privkey, 32, "privkey")
         out = ctypes.create_string_buffer(33)
-        rc = self._lib.secp256k1_ec_pubkey_create(privkey, out)
+        rc = self._lib.ultrafast_secp256k1_ec_pubkey_create(privkey, out)
         if rc != 0:
             raise ValueError("Invalid private key")
         return out.raw
@@ -109,7 +109,7 @@ class Secp256k1:
         """Compute uncompressed public key (65 bytes) from private key (32 bytes)."""
         self._check_bytes(privkey, 32, "privkey")
         out = ctypes.create_string_buffer(65)
-        rc = self._lib.secp256k1_ec_pubkey_create_uncompressed(privkey, out)
+        rc = self._lib.ultrafast_secp256k1_ec_pubkey_create_uncompressed(privkey, out)
         if rc != 0:
             raise ValueError("Invalid private key")
         return out.raw
@@ -119,7 +119,7 @@ class Secp256k1:
         if len(pubkey) not in (33, 65):
             raise ValueError(f"pubkey must be 33 or 65 bytes, got {len(pubkey)}")
         out = ctypes.create_string_buffer(33)
-        rc = self._lib.secp256k1_ec_pubkey_parse(pubkey, len(pubkey), out)
+        rc = self._lib.ultrafast_secp256k1_ec_pubkey_parse(pubkey, len(pubkey), out)
         if rc != 0:
             raise ValueError("Invalid public key")
         return out.raw
@@ -127,13 +127,13 @@ class Secp256k1:
     def ec_seckey_verify(self, privkey: bytes) -> bool:
         """Check if a private key is valid."""
         self._check_bytes(privkey, 32, "privkey")
-        return self._lib.secp256k1_ec_seckey_verify(privkey) == 1
+        return self._lib.ultrafast_secp256k1_ec_seckey_verify(privkey) == 1
 
     def ec_privkey_negate(self, privkey: bytes) -> bytes:
         """Negate a private key (mod n). Returns new key."""
         self._check_bytes(privkey, 32, "privkey")
         buf = ctypes.create_string_buffer(privkey)
-        rc = self._lib.secp256k1_ec_privkey_negate(buf)
+        rc = self._lib.ultrafast_secp256k1_ec_privkey_negate(buf)
         if rc != 0:
             raise ValueError("ec_privkey_negate failed: invalid (zero) key")
         return buf.raw
@@ -143,7 +143,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         self._check_bytes(tweak, 32, "tweak")
         buf = ctypes.create_string_buffer(privkey)
-        rc = self._lib.secp256k1_ec_privkey_tweak_add(buf, tweak)
+        rc = self._lib.ultrafast_secp256k1_ec_privkey_tweak_add(buf, tweak)
         if rc != 0:
             raise ValueError("Tweak add resulted in invalid key")
         return buf.raw
@@ -153,7 +153,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         self._check_bytes(tweak, 32, "tweak")
         buf = ctypes.create_string_buffer(privkey)
-        rc = self._lib.secp256k1_ec_privkey_tweak_mul(buf, tweak)
+        rc = self._lib.ultrafast_secp256k1_ec_privkey_tweak_mul(buf, tweak)
         if rc != 0:
             raise ValueError("Tweak mul resulted in invalid key")
         return buf.raw
@@ -165,7 +165,7 @@ class Secp256k1:
         self._check_bytes(msg_hash, 32, "msg_hash")
         self._check_bytes(privkey, 32, "privkey")
         sig = ctypes.create_string_buffer(64)
-        rc = self._lib.secp256k1_ecdsa_sign(msg_hash, privkey, sig)
+        rc = self._lib.ultrafast_secp256k1_ecdsa_sign(msg_hash, privkey, sig)
         if rc != 0:
             raise ValueError("Signing failed")
         return sig.raw
@@ -175,14 +175,14 @@ class Secp256k1:
         self._check_bytes(msg_hash, 32, "msg_hash")
         self._check_bytes(sig, 64, "sig")
         self._check_bytes(pubkey, 33, "pubkey")
-        return self._lib.secp256k1_ecdsa_verify(msg_hash, sig, pubkey) == 1
+        return self._lib.ultrafast_secp256k1_ecdsa_verify(msg_hash, sig, pubkey) == 1
 
     def ecdsa_signature_serialize_der(self, sig: bytes) -> bytes:
         """Encode compact signature to DER format."""
         self._check_bytes(sig, 64, "sig")
         der = ctypes.create_string_buffer(72)
         der_len = ctypes.c_size_t(72)
-        rc = self._lib.secp256k1_ecdsa_signature_serialize_der(
+        rc = self._lib.ultrafast_secp256k1_ecdsa_signature_serialize_der(
             sig, der, ctypes.byref(der_len)
         )
         if rc != 0:
@@ -197,7 +197,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         sig = ctypes.create_string_buffer(64)
         recid = ctypes.c_int(0)
-        rc = self._lib.secp256k1_ecdsa_sign_recoverable(
+        rc = self._lib.ultrafast_secp256k1_ecdsa_sign_recoverable(
             msg_hash, privkey, sig, ctypes.byref(recid)
         )
         if rc != 0:
@@ -209,7 +209,7 @@ class Secp256k1:
         self._check_bytes(msg_hash, 32, "msg_hash")
         self._check_bytes(sig, 64, "sig")
         pubkey = ctypes.create_string_buffer(33)
-        rc = self._lib.secp256k1_ecdsa_recover(msg_hash, sig, recid, pubkey)
+        rc = self._lib.ultrafast_secp256k1_ecdsa_recover(msg_hash, sig, recid, pubkey)
         if rc != 0:
             raise ValueError("Recovery failed")
         return pubkey.raw
@@ -222,7 +222,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         self._check_bytes(aux_rand, 32, "aux_rand")
         sig = ctypes.create_string_buffer(64)
-        rc = self._lib.secp256k1_schnorr_sign(msg, privkey, aux_rand, sig)
+        rc = self._lib.ultrafast_secp256k1_schnorr_sign(msg, privkey, aux_rand, sig)
         if rc != 0:
             raise ValueError("Schnorr signing failed")
         return sig.raw
@@ -232,13 +232,13 @@ class Secp256k1:
         self._check_bytes(msg, 32, "msg")
         self._check_bytes(sig, 64, "sig")
         self._check_bytes(pubkey_x, 32, "pubkey_x")
-        return self._lib.secp256k1_schnorr_verify(msg, sig, pubkey_x) == 1
+        return self._lib.ultrafast_secp256k1_schnorr_verify(msg, sig, pubkey_x) == 1
 
     def schnorr_pubkey(self, privkey: bytes) -> bytes:
         """Get x-only public key (32 bytes) for Schnorr."""
         self._check_bytes(privkey, 32, "privkey")
         out = ctypes.create_string_buffer(32)
-        rc = self._lib.secp256k1_schnorr_pubkey(privkey, out)
+        rc = self._lib.ultrafast_secp256k1_schnorr_pubkey(privkey, out)
         if rc != 0:
             raise ValueError("Invalid private key")
         return out.raw
@@ -250,7 +250,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         self._check_bytes(pubkey, 33, "pubkey")
         out = ctypes.create_string_buffer(32)
-        rc = self._lib.secp256k1_ecdh(privkey, pubkey, out)
+        rc = self._lib.ultrafast_secp256k1_ecdh(privkey, pubkey, out)
         if rc != 0:
             raise ValueError("ECDH failed")
         return out.raw
@@ -260,7 +260,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         self._check_bytes(pubkey, 33, "pubkey")
         out = ctypes.create_string_buffer(32)
-        rc = self._lib.secp256k1_ecdh_xonly(privkey, pubkey, out)
+        rc = self._lib.ultrafast_secp256k1_ecdh_xonly(privkey, pubkey, out)
         if rc != 0:
             raise ValueError("ECDH xonly failed")
         return out.raw
@@ -270,7 +270,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         self._check_bytes(pubkey, 33, "pubkey")
         out = ctypes.create_string_buffer(32)
-        rc = self._lib.secp256k1_ecdh_raw(privkey, pubkey, out)
+        rc = self._lib.ultrafast_secp256k1_ecdh_raw(privkey, pubkey, out)
         if rc != 0:
             raise ValueError("ECDH raw failed")
         return out.raw
@@ -280,20 +280,20 @@ class Secp256k1:
     def sha256(self, data: bytes) -> bytes:
         """SHA-256 hash. Returns 32 bytes."""
         out = ctypes.create_string_buffer(32)
-        self._lib.secp256k1_sha256(data, len(data), out)
+        self._lib.ultrafast_secp256k1_sha256(data, len(data), out)
         return out.raw
 
     def hash160(self, data: bytes) -> bytes:
         """HASH160: RIPEMD160(SHA256(data)). Returns 20 bytes."""
         out = ctypes.create_string_buffer(20)
-        self._lib.secp256k1_hash160(data, len(data), out)
+        self._lib.ultrafast_secp256k1_hash160(data, len(data), out)
         return out.raw
 
     def tagged_hash(self, tag: str, data: bytes) -> bytes:
         """BIP-340 tagged hash. Returns 32 bytes."""
         tag_bytes = tag.encode("utf-8")
         out = ctypes.create_string_buffer(32)
-        self._lib.secp256k1_tagged_hash(tag_bytes, data, len(data), out)
+        self._lib.ultrafast_secp256k1_tagged_hash(tag_bytes, data, len(data), out)
         return out.raw
 
     # -- Bitcoin Addresses -------------------------------------------------
@@ -303,7 +303,7 @@ class Secp256k1:
         self._check_bytes(pubkey, 33, "pubkey")
         buf = ctypes.create_string_buffer(128)
         buf_len = ctypes.c_size_t(128)
-        rc = self._lib.secp256k1_address_p2pkh(pubkey, network, buf, ctypes.byref(buf_len))
+        rc = self._lib.ultrafast_secp256k1_address_p2pkh(pubkey, network, buf, ctypes.byref(buf_len))
         if rc != 0:
             raise ValueError("P2PKH address generation failed")
         return buf.value.decode("ascii")
@@ -313,7 +313,7 @@ class Secp256k1:
         self._check_bytes(pubkey, 33, "pubkey")
         buf = ctypes.create_string_buffer(128)
         buf_len = ctypes.c_size_t(128)
-        rc = self._lib.secp256k1_address_p2wpkh(pubkey, network, buf, ctypes.byref(buf_len))
+        rc = self._lib.ultrafast_secp256k1_address_p2wpkh(pubkey, network, buf, ctypes.byref(buf_len))
         if rc != 0:
             raise ValueError("P2WPKH address generation failed")
         return buf.value.decode("ascii")
@@ -323,7 +323,7 @@ class Secp256k1:
         self._check_bytes(internal_key_x, 32, "internal_key_x")
         buf = ctypes.create_string_buffer(128)
         buf_len = ctypes.c_size_t(128)
-        rc = self._lib.secp256k1_address_p2tr(internal_key_x, network, buf, ctypes.byref(buf_len))
+        rc = self._lib.ultrafast_secp256k1_address_p2tr(internal_key_x, network, buf, ctypes.byref(buf_len))
         if rc != 0:
             raise ValueError("P2TR address generation failed")
         return buf.value.decode("ascii")
@@ -336,7 +336,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         buf = ctypes.create_string_buffer(128)
         buf_len = ctypes.c_size_t(128)
-        rc = self._lib.secp256k1_wif_encode(
+        rc = self._lib.ultrafast_secp256k1_wif_encode(
             privkey, 1 if compressed else 0, network, buf, ctypes.byref(buf_len)
         )
         if rc != 0:
@@ -349,7 +349,7 @@ class Secp256k1:
         privkey = ctypes.create_string_buffer(32)
         compressed = ctypes.c_int(0)
         network = ctypes.c_int(0)
-        rc = self._lib.secp256k1_wif_decode(
+        rc = self._lib.ultrafast_secp256k1_wif_decode(
             wif_bytes, privkey, ctypes.byref(compressed), ctypes.byref(network)
         )
         if rc != 0:
@@ -363,7 +363,7 @@ class Secp256k1:
         if not (16 <= len(seed) <= 64):
             raise ValueError("Seed must be 16-64 bytes")
         key = ctypes.create_string_buffer(79)  # 78 + 1 (is_private)
-        rc = self._lib.secp256k1_bip32_master_key(seed, len(seed), key)
+        rc = self._lib.ultrafast_secp256k1_bip32_master_key(seed, len(seed), key)
         if rc != 0:
             raise ValueError("Master key generation failed")
         return key.raw
@@ -372,7 +372,7 @@ class Secp256k1:
         """Derive key from path string. Returns opaque 79-byte key."""
         self._check_bytes(master_key, 79, "master_key")
         child = ctypes.create_string_buffer(79)
-        rc = self._lib.secp256k1_bip32_derive_path(master_key, path.encode("ascii"), child)
+        rc = self._lib.ultrafast_secp256k1_bip32_derive_path(master_key, path.encode("ascii"), child)
         if rc != 0:
             raise ValueError(f"Path derivation failed: {path}")
         return child.raw
@@ -381,7 +381,7 @@ class Secp256k1:
         """Get private key bytes from extended key."""
         self._check_bytes(key, 79, "key")
         privkey = ctypes.create_string_buffer(32)
-        rc = self._lib.secp256k1_bip32_get_privkey(key, privkey)
+        rc = self._lib.ultrafast_secp256k1_bip32_get_privkey(key, privkey)
         if rc != 0:
             raise ValueError("Key is not a private key")
         return privkey.raw
@@ -390,7 +390,7 @@ class Secp256k1:
         """Get compressed public key from extended key."""
         self._check_bytes(key, 79, "key")
         pubkey = ctypes.create_string_buffer(33)
-        rc = self._lib.secp256k1_bip32_get_pubkey(key, pubkey)
+        rc = self._lib.ultrafast_secp256k1_bip32_get_pubkey(key, pubkey)
         if rc != 0:
             raise ValueError("Public key extraction failed")
         return pubkey.raw
@@ -404,7 +404,7 @@ class Secp256k1:
         out = ctypes.create_string_buffer(32)
         parity = ctypes.c_int(0)
         mr = merkle_root if merkle_root else None
-        rc = self._lib.secp256k1_taproot_output_key(
+        rc = self._lib.ultrafast_secp256k1_taproot_output_key(
             internal_key_x, mr, out, ctypes.byref(parity)
         )
         if rc != 0:
@@ -417,7 +417,7 @@ class Secp256k1:
         self._check_bytes(privkey, 32, "privkey")
         out = ctypes.create_string_buffer(32)
         mr = merkle_root if merkle_root else None
-        rc = self._lib.secp256k1_taproot_tweak_privkey(privkey, mr, out)
+        rc = self._lib.ultrafast_secp256k1_taproot_tweak_privkey(privkey, mr, out)
         if rc != 0:
             raise ValueError("Taproot privkey tweaking failed")
         return out.raw
@@ -432,127 +432,127 @@ class Secp256k1:
         i = ctypes.c_int
 
         # version
-        lib.secp256k1_version.restype = ctypes.c_char_p
-        lib.secp256k1_version.argtypes = []
+        lib.ultrafast_secp256k1_version.restype = ctypes.c_char_p
+        lib.ultrafast_secp256k1_version.argtypes = []
 
         # init
-        lib.secp256k1_init.restype = i
-        lib.secp256k1_init.argtypes = []
+        lib.ultrafast_secp256k1_init.restype = i
+        lib.ultrafast_secp256k1_init.argtypes = []
 
         # key ops
-        lib.secp256k1_ec_pubkey_create.restype = i
-        lib.secp256k1_ec_pubkey_create.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_ec_pubkey_create.restype = i
+        lib.ultrafast_secp256k1_ec_pubkey_create.argtypes = [u8p, u8p]
 
-        lib.secp256k1_ec_pubkey_create_uncompressed.restype = i
-        lib.secp256k1_ec_pubkey_create_uncompressed.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_ec_pubkey_create_uncompressed.restype = i
+        lib.ultrafast_secp256k1_ec_pubkey_create_uncompressed.argtypes = [u8p, u8p]
 
-        lib.secp256k1_ec_pubkey_parse.restype = i
-        lib.secp256k1_ec_pubkey_parse.argtypes = [u8p, sz, u8p]
+        lib.ultrafast_secp256k1_ec_pubkey_parse.restype = i
+        lib.ultrafast_secp256k1_ec_pubkey_parse.argtypes = [u8p, sz, u8p]
 
-        lib.secp256k1_ec_seckey_verify.restype = i
-        lib.secp256k1_ec_seckey_verify.argtypes = [u8p]
+        lib.ultrafast_secp256k1_ec_seckey_verify.restype = i
+        lib.ultrafast_secp256k1_ec_seckey_verify.argtypes = [u8p]
 
-        lib.secp256k1_ec_privkey_negate.restype = i
-        lib.secp256k1_ec_privkey_negate.argtypes = [u8p]
+        lib.ultrafast_secp256k1_ec_privkey_negate.restype = i
+        lib.ultrafast_secp256k1_ec_privkey_negate.argtypes = [u8p]
 
-        lib.secp256k1_ec_privkey_tweak_add.restype = i
-        lib.secp256k1_ec_privkey_tweak_add.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_ec_privkey_tweak_add.restype = i
+        lib.ultrafast_secp256k1_ec_privkey_tweak_add.argtypes = [u8p, u8p]
 
-        lib.secp256k1_ec_privkey_tweak_mul.restype = i
-        lib.secp256k1_ec_privkey_tweak_mul.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_ec_privkey_tweak_mul.restype = i
+        lib.ultrafast_secp256k1_ec_privkey_tweak_mul.argtypes = [u8p, u8p]
 
         # ECDSA
-        lib.secp256k1_ecdsa_sign.restype = i
-        lib.secp256k1_ecdsa_sign.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_ecdsa_sign.restype = i
+        lib.ultrafast_secp256k1_ecdsa_sign.argtypes = [u8p, u8p, u8p]
 
-        lib.secp256k1_ecdsa_verify.restype = i
-        lib.secp256k1_ecdsa_verify.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_ecdsa_verify.restype = i
+        lib.ultrafast_secp256k1_ecdsa_verify.argtypes = [u8p, u8p, u8p]
 
-        lib.secp256k1_ecdsa_signature_serialize_der.restype = i
-        lib.secp256k1_ecdsa_signature_serialize_der.argtypes = [
+        lib.ultrafast_secp256k1_ecdsa_signature_serialize_der.restype = i
+        lib.ultrafast_secp256k1_ecdsa_signature_serialize_der.argtypes = [
             u8p, u8p, ctypes.POINTER(sz)
         ]
 
         # Recovery
-        lib.secp256k1_ecdsa_sign_recoverable.restype = i
-        lib.secp256k1_ecdsa_sign_recoverable.argtypes = [
+        lib.ultrafast_secp256k1_ecdsa_sign_recoverable.restype = i
+        lib.ultrafast_secp256k1_ecdsa_sign_recoverable.argtypes = [
             u8p, u8p, u8p, ctypes.POINTER(i)
         ]
 
-        lib.secp256k1_ecdsa_recover.restype = i
-        lib.secp256k1_ecdsa_recover.argtypes = [u8p, u8p, i, u8p]
+        lib.ultrafast_secp256k1_ecdsa_recover.restype = i
+        lib.ultrafast_secp256k1_ecdsa_recover.argtypes = [u8p, u8p, i, u8p]
 
         # Schnorr
-        lib.secp256k1_schnorr_sign.restype = i
-        lib.secp256k1_schnorr_sign.argtypes = [u8p, u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_schnorr_sign.restype = i
+        lib.ultrafast_secp256k1_schnorr_sign.argtypes = [u8p, u8p, u8p, u8p]
 
-        lib.secp256k1_schnorr_verify.restype = i
-        lib.secp256k1_schnorr_verify.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_schnorr_verify.restype = i
+        lib.ultrafast_secp256k1_schnorr_verify.argtypes = [u8p, u8p, u8p]
 
-        lib.secp256k1_schnorr_pubkey.restype = i
-        lib.secp256k1_schnorr_pubkey.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_schnorr_pubkey.restype = i
+        lib.ultrafast_secp256k1_schnorr_pubkey.argtypes = [u8p, u8p]
 
         # ECDH
-        lib.secp256k1_ecdh.restype = i
-        lib.secp256k1_ecdh.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_ecdh.restype = i
+        lib.ultrafast_secp256k1_ecdh.argtypes = [u8p, u8p, u8p]
 
-        lib.secp256k1_ecdh_xonly.restype = i
-        lib.secp256k1_ecdh_xonly.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_ecdh_xonly.restype = i
+        lib.ultrafast_secp256k1_ecdh_xonly.argtypes = [u8p, u8p, u8p]
 
-        lib.secp256k1_ecdh_raw.restype = i
-        lib.secp256k1_ecdh_raw.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_ecdh_raw.restype = i
+        lib.ultrafast_secp256k1_ecdh_raw.argtypes = [u8p, u8p, u8p]
 
         # Hashing
-        lib.secp256k1_sha256.restype = None
-        lib.secp256k1_sha256.argtypes = [u8p, sz, u8p]
+        lib.ultrafast_secp256k1_sha256.restype = None
+        lib.ultrafast_secp256k1_sha256.argtypes = [u8p, sz, u8p]
 
-        lib.secp256k1_hash160.restype = None
-        lib.secp256k1_hash160.argtypes = [u8p, sz, u8p]
+        lib.ultrafast_secp256k1_hash160.restype = None
+        lib.ultrafast_secp256k1_hash160.argtypes = [u8p, sz, u8p]
 
-        lib.secp256k1_tagged_hash.restype = None
-        lib.secp256k1_tagged_hash.argtypes = [ctypes.c_char_p, u8p, sz, u8p]
+        lib.ultrafast_secp256k1_tagged_hash.restype = None
+        lib.ultrafast_secp256k1_tagged_hash.argtypes = [ctypes.c_char_p, u8p, sz, u8p]
 
         # Addresses
-        lib.secp256k1_address_p2pkh.restype = i
-        lib.secp256k1_address_p2pkh.argtypes = [u8p, i, ctypes.c_char_p, ctypes.POINTER(sz)]
+        lib.ultrafast_secp256k1_address_p2pkh.restype = i
+        lib.ultrafast_secp256k1_address_p2pkh.argtypes = [u8p, i, ctypes.c_char_p, ctypes.POINTER(sz)]
 
-        lib.secp256k1_address_p2wpkh.restype = i
-        lib.secp256k1_address_p2wpkh.argtypes = [u8p, i, ctypes.c_char_p, ctypes.POINTER(sz)]
+        lib.ultrafast_secp256k1_address_p2wpkh.restype = i
+        lib.ultrafast_secp256k1_address_p2wpkh.argtypes = [u8p, i, ctypes.c_char_p, ctypes.POINTER(sz)]
 
-        lib.secp256k1_address_p2tr.restype = i
-        lib.secp256k1_address_p2tr.argtypes = [u8p, i, ctypes.c_char_p, ctypes.POINTER(sz)]
+        lib.ultrafast_secp256k1_address_p2tr.restype = i
+        lib.ultrafast_secp256k1_address_p2tr.argtypes = [u8p, i, ctypes.c_char_p, ctypes.POINTER(sz)]
 
         # WIF
-        lib.secp256k1_wif_encode.restype = i
-        lib.secp256k1_wif_encode.argtypes = [u8p, i, i, ctypes.c_char_p, ctypes.POINTER(sz)]
+        lib.ultrafast_secp256k1_wif_encode.restype = i
+        lib.ultrafast_secp256k1_wif_encode.argtypes = [u8p, i, i, ctypes.c_char_p, ctypes.POINTER(sz)]
 
-        lib.secp256k1_wif_decode.restype = i
-        lib.secp256k1_wif_decode.argtypes = [
+        lib.ultrafast_secp256k1_wif_decode.restype = i
+        lib.ultrafast_secp256k1_wif_decode.argtypes = [
             ctypes.c_char_p, u8p, ctypes.POINTER(i), ctypes.POINTER(i)
         ]
 
         # BIP-32
-        lib.secp256k1_bip32_master_key.restype = i
-        lib.secp256k1_bip32_master_key.argtypes = [u8p, sz, u8p]
+        lib.ultrafast_secp256k1_bip32_master_key.restype = i
+        lib.ultrafast_secp256k1_bip32_master_key.argtypes = [u8p, sz, u8p]
 
-        lib.secp256k1_bip32_derive_path.restype = i
-        lib.secp256k1_bip32_derive_path.argtypes = [u8p, ctypes.c_char_p, u8p]
+        lib.ultrafast_secp256k1_bip32_derive_path.restype = i
+        lib.ultrafast_secp256k1_bip32_derive_path.argtypes = [u8p, ctypes.c_char_p, u8p]
 
-        lib.secp256k1_bip32_get_privkey.restype = i
-        lib.secp256k1_bip32_get_privkey.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_bip32_get_privkey.restype = i
+        lib.ultrafast_secp256k1_bip32_get_privkey.argtypes = [u8p, u8p]
 
-        lib.secp256k1_bip32_get_pubkey.restype = i
-        lib.secp256k1_bip32_get_pubkey.argtypes = [u8p, u8p]
+        lib.ultrafast_secp256k1_bip32_get_pubkey.restype = i
+        lib.ultrafast_secp256k1_bip32_get_pubkey.argtypes = [u8p, u8p]
 
         # Taproot
-        lib.secp256k1_taproot_output_key.restype = i
-        lib.secp256k1_taproot_output_key.argtypes = [u8p, u8p, u8p, ctypes.POINTER(i)]
+        lib.ultrafast_secp256k1_taproot_output_key.restype = i
+        lib.ultrafast_secp256k1_taproot_output_key.argtypes = [u8p, u8p, u8p, ctypes.POINTER(i)]
 
-        lib.secp256k1_taproot_tweak_privkey.restype = i
-        lib.secp256k1_taproot_tweak_privkey.argtypes = [u8p, u8p, u8p]
+        lib.ultrafast_secp256k1_taproot_tweak_privkey.restype = i
+        lib.ultrafast_secp256k1_taproot_tweak_privkey.argtypes = [u8p, u8p, u8p]
 
-        lib.secp256k1_taproot_verify_commitment.restype = i
-        lib.secp256k1_taproot_verify_commitment.argtypes = [u8p, i, u8p, u8p, sz]
+        lib.ultrafast_secp256k1_taproot_verify_commitment.restype = i
+        lib.ultrafast_secp256k1_taproot_verify_commitment.argtypes = [u8p, i, u8p, u8p, sz]
 
     @staticmethod
     def _check_bytes(data: bytes, expected_len: int, name: str):

@@ -1,10 +1,13 @@
 // ============================================================================
 // shim_schnorr_bch.cpp -- Bitcoin Cash Node legacy Schnorr (secp256k1_schnorr_*)
 // ============================================================================
-// Implements the BCHN secp256k1 Schnorr API. This is NOT BIP-340:
+// Implements the BCHN secp256k1 Schnorr API. This is NOT BIP-340. The
+// authoritative construction is the 2019-05-15 BCH upgrade specification,
+// https://upgradespecs.bitcoincashnode.org/2019-05-15-schnorr/ :
 //
-//   nonce k  = RFC6979(seckey, msg32)
+//   nonce k  = RFC6979(seckey, msg32, algo16 = "Schnorr+SHA256  ")
 //   R        = k * G                          (CT blinded generator mul)
+//   if Jacobi(R.y) != 1: k = -k               (R.x is unchanged by this)
 //   P        = seckey * G                     (CT blinded generator mul)
 //   e_bytes  = SHA256(R.x[32] || P_comp[33] || msg32[32])
 //   e        = Scalar::from_bytes(e_bytes)
@@ -13,7 +16,17 @@
 //
 // Verify:
 //   R_check  = s*G - e*P                      (fast GLV for variable-base)
+//   fail     if R_check is infinity
+//   fail     if Jacobi(R_check.y) != 1        (spec verification step 10)
 //   valid    iff R_check.x == sig.r
+//
+// The Jacobi condition and the algo16 tag are both load-bearing and both were
+// missing until 2026-09-14. Without the signer-side negation half of every
+// signature this shim produced had a non-residue R.y, which BCHN and Libauth
+// reject; without the verifier-side check this shim accepted both R and -R for
+// the same r, which they also reject. Without the tag the nonces -- and so the
+// signature bytes -- differ from BCHN and Libauth for the same key and message,
+// which is valid but not interoperable with their deterministic output.
 // ============================================================================
 
 #include "secp256k1_schnorr.h"
@@ -93,8 +106,17 @@ int secp256k1_schnorr_sign(
             return 0;
         }
 
-        // Nonce via RFC6979 (same path as ECDSA)
-        auto k = secp256k1::rfc6979_nonce(d, msg);
+        // Nonce via RFC6979 with the BCH Schnorr domain separator. The spec
+        // requires the 16-byte ASCII tag "Schnorr+SHA256  " (two trailing
+        // 0x20 spaces) in the HMAC-DRBG keydata; that is what makes a BCH
+        // Schnorr nonce a different stream from the ECDSA nonce for the same
+        // key and message, and what makes our output byte-identical to BCHN
+        // and to Libauth rather than merely valid.
+        static constexpr uint8_t kBchSchnorrAlgo16[16] = {
+            'S','c','h','n','o','r','r','+','S','H','A','2','5','6',' ',' '
+        };
+        auto k = secp256k1::rfc6979_nonce_libsecp_compat(d, msg, nullptr,
+                                                          kBchSchnorrAlgo16);
         if (k.is_zero_ct()) {
             secp256k1::detail::secure_erase(kb.data(), 32);
             secp256k1::detail::secure_erase(&d, sizeof(d));
@@ -110,6 +132,29 @@ int secp256k1_schnorr_sign(
             return 0;
         }
         auto rx = R.x().to_bytes();
+
+        // BCH 2019 requires Jacobi(R.y) == 1. The signer satisfies it by
+        // negating the nonce when R.y is not a quadratic residue: R = kG and
+        // -R = (-k)G share an X coordinate, so `rx` above is already final and
+        // only k moves.
+        //
+        // p == 3 (mod 4), so sqrt(y)^2 == y exactly when y is a residue -- the
+        // Jacobi test, using the square root the field already provides.
+        //
+        // R is public: R.x IS the signature's r, and any observer can lift_x(r)
+        // and recompute this same bit. The negation is nevertheless constant
+        // time, because k is secret and this sits in the middle of its live
+        // range; the mask is arithmetic rather than a branch for the same
+        // reason.
+        {
+            FieldElement const ry = R.y();
+            FieldElement const rt = ry.sqrt();
+            bool const y_is_qr = (rt.square() == ry);
+            // y_is_qr -> 0 (keep k); !y_is_qr -> ~0 (negate k)
+            std::uint64_t const neg_mask =
+                static_cast<std::uint64_t>(y_is_qr) - 1ULL;
+            k = secp256k1::ct::scalar_cneg(k, neg_mask);
+        }
 
         // Fix 2b: CT generator mul for P = d*G (private key is secret).
         auto P = secp256k1::ct::generator_mul_blinded(d);
@@ -183,6 +228,19 @@ int secp256k1_schnorr_verify(
         auto neg_e   = e.negate();
         auto R_check = Point::dual_scalar_mul_gen_point(s, neg_e, P);
         if (R_check.is_infinity()) return 0;
+
+        // Spec verification step 10: fail if Jacobi(R'.y) != 1. Omitting it
+        // makes the verifier accept BOTH R and -R for the same r -- half of all
+        // candidate signatures -- where BCHN and Libauth accept only one.
+        //
+        // Verify is a public-data path, so a variable-time test is correct
+        // here (CLAUDE.md CT-VERIFY). It costs one field sqrt per verify.
+        {
+            FieldElement const ry = R_check.y();
+            if (ry == FieldElement::zero()) return 0;   // Jacobi(0) == 0, never 1
+            FieldElement const rt = ry.sqrt();
+            if (!(rt.square() == ry)) return 0;
+        }
 
         // Valid iff R_check.x == rx
         auto rx_check = R_check.x().to_bytes();

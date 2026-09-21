@@ -183,18 +183,138 @@ using namespace fe52_constants;
 // Measured 2026-06-15: routing the verify table build to `_var` gives 0 speedup
 // under LTO (GCC already emits MULX/ADCX/ADOX from __int128) — kb GLV52-VAR-TABLE-001.
 //
-// Do NOT use SECP256K1_FE52_FORCE_INLINE (always_inline) here.
-// With always_inline the function is inlined into every caller and compiled
-// at the caller's optimization level, defeating the optimize("O2") attribute.
-// As a non-inlined static function compiled at O2, the __int128 arithmetic
-// produces correct results on GCC-13 and Clang in both Debug and coverage
-// builds where -O0 would otherwise cause wrong results.
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("O2"), noinline))
-static
-#else
+// SUPERSEDED as an instruction, kept for the reasoning. This block used to say
+// "Do NOT use SECP256K1_FE52_FORCE_INLINE (always_inline) here". The A/B below
+// contradicted it on x86-64 and then on arm64, and the kernels are now
+// always_inline everywhere this header compiles. Read the "Field-kernel
+// inlining policy" block further down for the current rule.
+//
+// The optimize("O2") attribute this paragraph used to explain is gone with the
+// out-of-line path: always_inline means the body is compiled at the caller's
+// optimization level, so there is no out-of-line function left for an
+// attribute to apply to.
+//
+// That attribute is GCC-only in effect. Clang does not implement optimize():
+// it emits "unknown attribute 'optimize' ignored [-Wunknown-attributes]" and
+// compiles as if only noinline were written, so on clang the Debug/coverage
+// argument above does not apply -- the kernel is simply left out of line at
+// whatever level the TU is built. Measured 2026-09-06 on this tree: clang-17
+// --target=aarch64-linux-gnu -mcpu=apple-m1 -O3 produces byte-identical
+// assembly with the clause and with plain noinline, while aarch64 gcc-13 at
+// -O0 keeps the kernel at 494 asm lines instead of the 3029 the force-inline
+// path produces. No fe52 kernel carries that clause any more -- the rule now
+// applies only to the fe26 kernels in src/cpu/src/field_26.cpp, which are still
+// out of line and therefore give clang plain noinline and keep the optimize
+// clause for GCC, a codegen no-op on both.
+// Instruction mix, disassembled from a -O3 -march=native GCC 14.2 build
+// (experiments/representation_search). 228 instructions:
+//     31  multiplies        13.6%
+//     29  carry chain       12.7%   (adcx/adox/adc/sbb)
+//     32  plain add/sub/lea 14.0%
+//     17  shifts             7.5%
+//     19  and/or/xor         8.3%
+//     98  mov/push/pop      43.0%   (mov alone is 80, plus 6 push / 6 pop)
+// 31 MULX at one per cycle is a 31-cycle floor; the measured 12.43 ns
+// throughput is about 58 cycles at 4.7 GHz, so the kernel is NOT
+// multiply-bound -- the remaining ~27 cycles are the serial carry/fold chain.
+//
+// The optimize("O2") below costs NOTHING on x86-64: rebuilt with
+// optimize("O3") the two kernels are BYTE-IDENTICAL -- same 228/164
+// instructions, same 31/21 multiplies, same 98/70 movs, same 12 spills. The
+// attribute is doing exactly what its comment says (keeping Debug and coverage
+// off O0) and is not capping Release performance. Checked so nobody re-raises
+// it; do not "fix" this without re-measuring.
+
+// ===========================================================================
+// Field-kernel inlining policy
+// ===========================================================================
+// fe52_mul_inner and fe52_sqr_inner carried __attribute__((optimize("O2"),
+// noinline)). Two separate blockers were stacked there: noinline, and the
+// optimize() attribute, which on GCC also prevents inlining into a caller
+// compiled with different options.
+//
+// libsecp256k1 v0.8.0 (PR #1859) force-inlined the equivalent routines and
+// reported 0.6-11% on GCC/MSVC. Measured here against v0.8.0 on an i5-14400F
+// (GCC 14.2, performance governor, turbo off, cpu0, nice -20, warm run vs warm
+// run, libsecp/OpenSSL rows as the control at +0.01% median drift):
+//   90 of 104 engine operations >= 500 ns improved by more than 2%, 1 regressed.
+//   ECDSA verify vs libsecp v0.8.0 went 0.92x -> 1.00x, Schnorr verify
+//   0.93x -> 1.01x, CT ECDSA sign 1.28x -> 1.35x, CT Schnorr sign 1.19x -> 1.27x.
+// The gain is not in the multiply itself -- field_mul and field_sqr are
+// unchanged to 0.00% in both libraries -- it is that removing the call boundary
+// lets the caller schedule the 64x64->128 arithmetic alongside its own work.
+//
+// The size cost is real and is stated with the ARM64 table below.
+//
+// There is no longer a macro to set. It used to be settable per build, which
+// was also an ODR hazard: FieldElement52::operator* and friends are
+// always_inline external-linkage inlines whose bodies call these kernels, so a
+// binary built half one way and half the other was a silent mismatch rather
+// than a diagnostic. One shape everywhere removes that failure mode.
+//
+// The kernels are always_inline on every target that compiles this header.
+//
+// This used to be UFSECP_FE52_FORCE_INLINE_KERNELS, on for x86-64 and off
+// everywhere else, with the note above asking for a warm-vs-warm A/B on real
+// ARM64 hardware before flipping the default. That A/B has now been run, on a
+// Rockchip RK3588 Cortex-A76 over adb, governor pinned to performance, three
+// interleaved rounds, cpu7 (big core):
+//
+//     op                 noinline            always_inline        delta
+//     fe52_sqr           72.03/72.05/72.32   66.53/66.57/66.59    -7.7%
+//     ecdsa_verify       153931/154102/...   148803/148855/...    -3.4%
+//     scalar_mul k*P     20658/20560/20550   20152/20167/20164    -2.0%
+//     ecdsa_sign         63513/63557/63569   62239/62267/62283    -2.0%
+//     fe52_mul           99.85/99.91/100.23  98.45/98.51/98.53    -1.5%
+//     generator_mul k*G  2701/2706/2699      2699/2701/2702       ~0%
+//
+// Non-overlapping ranges on the first four. Smaller than the x86-64 result (90
+// of 104 ops above 2%) but the same direction, so there is no target left where
+// the flag was measured to be worth keeping off, and the two-configuration ODR
+// hazard described above goes away with it.
+//
+// Independently confirmed on Apple silicon by the reporter of issue #336
+// (craigraw), M5 Max / Apple clang 21, BIP-352 scan over 10,356,829 rows,
+// 18 callers, non-LTO: 14.04-14.52s off -> 12.40-12.83s on, against a
+// re-measured v3.68.0 baseline of 12.3-12.7s. The kernels left the leaf table
+// exactly as the x86-64 result predicted, and the consumer-side size cost was
+// +1.2% on their linked extension.
+//
+// Re-confirmed on the SHIPPED default with no define set anywhere (dev
+// 2e9bf5ba, same protocol and machine): batch 12.53-12.65s, per-row
+// 13.12-13.38s, instructions retired 6.49T / 6.55T -- matching the
+// flag-injected legs to three digits, so the source-level always_inline and a
+// -D on the command line produce the same code on that compiler.
+//
+// RESIDUAL, recorded because it is real: the BATCH path is at parity with
+// v3.68.0 (12.53-12.65s vs 12.3-12.7s, ranges overlap; +1.1% instructions).
+// The PER-ROW path is not -- 13.12-13.38s against the same baseline, ranges
+// that do NOT overlap, so roughly 5% of user time is still unaccounted for on
+// the old API. The reporter adopted the batch path and closed the issue on
+// that basis. Anyone chasing the last 5% starts here, not from zero.
+//
+// COST: libfastsecp256k1.a grows 14.84% on x86-64 and 22.4% on arm64
+// (18.77 MB -> 22.98 MB, measured on the same NDK build). That is the trade.
+//
+// Targets without __int128 (ESP32/STM32/Emscripten, where point.hpp does not
+// include field_52.hpp) never compile this header, so they are unaffected.
+// RISC-V has not been measured, but SECP256K1_RISCV_FE52_V1 routes it to
+// hand-written assembly kernels below rather than this C++ body.
+
+// ALIASING CONTRACT: r, a and b must not alias. That is stricter than
+// libsecp256k1, which permits r == a, and it is kept deliberately: relaxing it so
+// the in-place wrappers could write through measured +1.5% on scalar_mul (k*P),
+// whose time is 39% jac52_double_coords -- a pure by-value path where the
+// RESTRICT promise is worth real scheduling freedom.
+//
+// The copy that DOES cost time is not here. `*this = *this * rhs` is free when
+// the object is a local, because SROA scalarises it into registers. It is a real
+// 40-byte round trip through memory when the object is addressable -- a comb
+// table entry, a struct member reached through a pointer. Removing four of those
+// on the constant-time path (ct_point.cpp's global-Z rescales) measured
+// -8.9% on ct::generator_mul and -6.4% on ct::ecdsa_sign. Look for the pattern
+// at the CALL SITES, not in these wrappers.
 SECP256K1_FE52_FORCE_INLINE
-#endif
 void fe52_mul_inner(std::uint64_t* SECP256K1_RESTRICT r,
                     const std::uint64_t* SECP256K1_RESTRICT a,
                     const std::uint64_t* SECP256K1_RESTRICT b) noexcept {
@@ -1396,13 +1516,11 @@ void fe52_mul_inner_var(std::uint64_t* SECP256K1_RESTRICT r,
 // Uses a[i]*a[j] == a[j]*a[i] symmetry to halve cross-product count.
 // Cross-products computed once and doubled via (a[i]*2) trick.
 
-// Same noinline + optimize("O2") guard as fe52_mul_inner (see above).
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("O2"), noinline))
-static
-#else
+// always_inline, same as fe52_mul_inner and for the same measured reason (see
+// the "Field-kernel inlining policy" block above). Disassembled at
+// -O3 -march=native: 164 instructions, 21 multiplies (12.8%), 70 mov/push/pop
+// (42.7%) -- the same data-movement-dominated shape.
 SECP256K1_FE52_FORCE_INLINE
-#endif
 void fe52_sqr_inner(std::uint64_t* SECP256K1_RESTRICT r,
                     const std::uint64_t* SECP256K1_RESTRICT a) noexcept {
 #if defined(SECP256K1_RISCV_FE52_V1)
@@ -2380,9 +2498,7 @@ FieldElement52 FieldElement52::mul_var(const FieldElement52& rhs) const noexcept
 }
 SECP256K1_FE52_FORCE_INLINE
 void FieldElement52::mul_assign_var(const FieldElement52& rhs) noexcept {
-    std::uint64_t tmp[5];
-    fe52_mul_inner_var(tmp, n, rhs.n);
-    n[0]=tmp[0]; n[1]=tmp[1]; n[2]=tmp[2]; n[3]=tmp[3]; n[4]=tmp[4];
+    *this = mul_var(rhs);
 }
 
 SECP256K1_FE52_FORCE_INLINE
@@ -2404,9 +2520,7 @@ FieldElement52 FieldElement52::square_var() const noexcept {
 }
 SECP256K1_FE52_FORCE_INLINE
 void FieldElement52::square_inplace_var() noexcept {
-    std::uint64_t tmp[5];
-    fe52_sqr_inner_var(tmp, n);
-    n[0]=tmp[0]; n[1]=tmp[1]; n[2]=tmp[2]; n[3]=tmp[3]; n[4]=tmp[4];
+    *this = square_var();
 }
 
 SECP256K1_FE52_FORCE_INLINE

@@ -387,6 +387,160 @@ def test_ci_gate_detect_hard_profile_precedence():
 
 
 # ============================================================================
+# CI-GATE-BASELINE (branch-aware-ci-badges-claude-v1 audit): push-event
+# change-impact baseline selection must use the actual before-SHA, not a
+# --base (main/dev) merge-base fallback, whenever the before-SHA is valid.
+# ============================================================================
+
+def test_ci_gate_detect_push_uses_before_sha_not_base():
+    """A push event's changed-file set must come from the real previous HEAD
+    (github.event.before), not from a --base merge-base fallback, whenever
+    before-SHA is a valid reachable commit. This is the scenario the
+    branch-aware-ci-badges audit specifically checked: a `dev` push must not
+    accidentally pick up files that only differ because `dev` long ago
+    diverged from `main` -- it must see only the files touched by the
+    current push. Built as a real git fixture (not a mock) so the two code
+    paths (get_changed_files_from_sha vs get_changed_files) are exercised
+    against actual git plumbing, proving they are not interchangeable and
+    that the before-SHA path is the one gate.yml/caas-security must use."""
+    detect_path = LIB_ROOT / "ci" / "ci_gate_detect.py"
+    mod = load_module(detect_path)
+    if mod is None or not hasattr(mod, "get_changed_files_from_sha"):
+        check(False, "CI-GATE-BASELINE-0: ci_gate_detect module loads")
+        return
+
+    _GIT_ID_ENV = {
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "test",
+    }
+
+    def run_git(cwd: str, *args: str) -> str:
+        env = dict(os.environ)
+        env.update(_GIT_ID_ENV)
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            raise RuntimeError(f"git {' '.join(args)} failed: {r.stderr}")
+        return r.stdout.strip()
+
+    def _assert_fsck(tmpdir: str) -> None:
+        """Run git fsck and return True - raises on failure."""
+        run_git(tmpdir, "fsck", "--full", "--no-dangling")
+        (Path(tmpdir) / ".git" / "fsck-ok").write_text("1\n")
+
+    files_before_sha: set = set()
+    files_base_fallback: set = set()
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # ── Portable .git bootstrap (no git-init / git-config chmod) ──
+            # git init internally runs `git config core.filemode …` which
+            # creates .git/config.lock and calls chmod(2).  Under overlayfs
+            # with Landlock the chmod fails with EACCES.  Create the minimal
+            # .git directory by hand so every subsequent plumbing command
+            # (add, commit, branch, checkout, rev-parse, fsck, …) works
+            # without touching config.lock.
+            dot_git = Path(tmpdir) / ".git"
+            for d in ("objects/info", "objects/pack", "refs/heads", "refs/tags"):
+                (dot_git / d).mkdir(parents=True, exist_ok=True)
+            (dot_git / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n"
+                "\tbare = false\n\tlogallrefupdates = true\n"
+            )
+            (dot_git / "HEAD").write_text("ref: refs/heads/main\n")
+            (dot_git / "description").write_text("caas-git-baseline-fixture\n")
+
+            # M1: shared ancestor commit (stands in for the tip of `main`).
+            (Path(tmpdir) / "common.txt").write_text("m1\n", encoding="utf-8")
+            run_git(tmpdir, "add", "common.txt")
+            run_git(tmpdir, "commit", "-q", "-m", "M1")
+            sha_m1 = run_git(tmpdir, "rev-parse", "HEAD")
+            _assert_fsck(tmpdir)
+
+            # dev diverges from main: D1 was already on dev BEFORE this push;
+            # D2 is the commit introduced by the push under test.
+            run_git(tmpdir, "checkout", "-q", "-b", "dev")
+            (Path(tmpdir) / "dev_only_old.txt").write_text("d1\n", encoding="utf-8")
+            run_git(tmpdir, "add", "dev_only_old.txt")
+            run_git(tmpdir, "commit", "-q", "-m", "D1 (already on dev before this push)")
+            sha_d1 = run_git(tmpdir, "rev-parse", "HEAD")
+            before_sha = sha_d1
+            _assert_fsck(tmpdir)
+
+            (Path(tmpdir) / "dev_new.txt").write_text("d2\n", encoding="utf-8")
+            run_git(tmpdir, "add", "dev_new.txt")
+            run_git(tmpdir, "commit", "-q", "-m", "D2 (this push)")
+            sha_d2 = run_git(tmpdir, "rev-parse", "HEAD")
+            _assert_fsck(tmpdir)
+
+            # ── Git invariant proofs (exact, not substring-only) ──
+            check(
+                run_git(tmpdir, "show-ref", "--hash", "refs/heads/main") == sha_m1,
+                "CI-GATE-BASELINE-FS-1: show-ref main == M1",
+                f"main={run_git(tmpdir, 'show-ref', '--hash', 'refs/heads/main')!r} M1={sha_m1!r}",
+            )
+            check(
+                run_git(tmpdir, "show-ref", "--hash", "refs/heads/dev") == sha_d2,
+                "CI-GATE-BASELINE-FS-2: show-ref dev == D2",
+                f"dev={run_git(tmpdir, 'show-ref', '--hash', 'refs/heads/dev')!r} D2={sha_d2!r}",
+            )
+            check(
+                run_git(tmpdir, "symbolic-ref", "HEAD") == "refs/heads/dev",
+                "CI-GATE-BASELINE-FS-3: symbolic HEAD is dev",
+                f"HEAD={run_git(tmpdir, 'symbolic-ref', 'HEAD')!r}",
+            )
+            check(
+                run_git(tmpdir, "merge-base", "main", "dev") == sha_m1,
+                "CI-GATE-BASELINE-FS-4: merge-base main dev == M1",
+                f"merge-base={run_git(tmpdir, 'merge-base', 'main', 'dev')!r} M1={sha_m1!r}",
+            )
+            revlist = run_git(tmpdir, "rev-list", "--first-parent", "dev").split()
+            check(
+                revlist == [sha_d2, sha_d1, sha_m1],
+                "CI-GATE-BASELINE-FS-5: rev-list --first-parent dev == [D2, D1, M1]",
+                f"got {revlist}",
+            )
+            check(
+                run_git(tmpdir, "status", "--porcelain") == "",
+                "CI-GATE-BASELINE-FS-6: working tree is clean",
+            )
+
+            old_root = mod.LIB_ROOT
+            mod.LIB_ROOT = Path(tmpdir)
+            try:
+                # Path actually used by gate.yml/caas-security for a normal push
+                # with a valid before-SHA (see ci_gate_detect.py main()).
+                files_before_sha = set(mod.get_changed_files_from_sha(before_sha))
+                # The --base fallback, computed here ONLY to prove what it would
+                # have produced had it been used instead of before-SHA.
+                files_base_fallback = set(mod.get_changed_files("main"))
+            finally:
+                mod.LIB_ROOT = old_root
+    except Exception as exc:
+        check(False, "CI-GATE-BASELINE-1: git fixture builds", str(exc))
+        return
+
+    check(
+        files_before_sha == {"dev_new.txt"},
+        "CI-GATE-BASELINE-1: valid before-SHA diff sees only this push's file (dev_new.txt), "
+        "not D1's already-integrated dev_only_old.txt",
+        f"got {sorted(files_before_sha)}",
+    )
+    check(
+        files_base_fallback == {"dev_only_old.txt", "dev_new.txt"},
+        "CI-GATE-BASELINE-2: the --base=main fallback (NOT used here since before-SHA is "
+        "valid) would see a wider dev-since-main diff, confirming the two paths differ",
+        f"got {sorted(files_base_fallback)}",
+    )
+    check(
+        files_before_sha != files_base_fallback and files_before_sha < files_base_fallback,
+        "CI-GATE-BASELINE-3: before-SHA result is the strict, correct subset of the "
+        "base-fallback result -- proves ci_gate_detect.py does not accidentally widen "
+        "a dev push's change-impact baseline to main when before-SHA is available",
+    )
+
+
+# ============================================================================
 # CAAS-004: committed external bundle must match current HEAD unless explicitly
 # overridden by the caller for offline third-party review.
 # ============================================================================
@@ -475,6 +629,7 @@ def main():
     test_hmac_key_env_override()
     test_evidence_governance_mixed_key_validation()
     test_ci_gate_detect_hard_profile_precedence()
+    test_ci_gate_detect_push_uses_before_sha_not_base()
     test_external_bundle_commit_mismatch_blocks()
 
     total = g_pass + g_fail

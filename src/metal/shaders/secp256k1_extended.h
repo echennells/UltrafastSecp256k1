@@ -26,6 +26,22 @@
 // These are referenced by inline ecdsa_sign / schnorr_sign / ecdsa_sign_recoverable
 // wrappers below. Their bodies live in secp256k1_ct_sign.h, which is included
 // after this header in secp256k1_kernels.metal.
+//
+// SECP256K1_METAL_SCAN_ONLY (GitHub issue #335): a loadable-library consumer
+// that embeds only this "extended" header subset (field/point/hash160 +
+// this file) to build a scan-only kernel -- e.g. a BIP-352 batch scanner --
+// never includes secp256k1_ct_sign.h and never calls ecdsa_sign/schnorr_sign/
+// ecdsa_sign_recoverable. Compiling those wrapper bodies (which reference the
+// undefined ct_*_metal symbols below) into such a TU fails at metallib link
+// time even though nothing calls them, because Metal's AIR compiler does not
+// guarantee dead-stripping of unused non-kernel functions with unresolved
+// callees. Defining SECP256K1_METAL_SCAN_ONLY before including this header
+// excludes the three forward declarations AND their wrapper definitions
+// below (ecdsa_sign, schnorr_sign, ecdsa_sign_recoverable), restoring
+// self-containment for a scan-only build. The DEFAULT build (this repo's own
+// secp256k1_kernels.metallib, which always includes secp256k1_ct_sign.h) never
+// defines this macro, so its signing kernels are unaffected either way.
+#ifndef SECP256K1_METAL_SCAN_ONLY
 inline bool ct_ecdsa_sign_metal(thread const uchar msg_hash[32],
                                 thread const Scalar256 &priv,
                                 thread Scalar256 &r_out,
@@ -41,6 +57,7 @@ inline bool ct_ecdsa_sign_recoverable_metal(thread const uchar msg_hash[32],
                                             thread Scalar256 &r_out,
                                             thread Scalar256 &s_out,
                                             thread int &recid_out);
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 // =============================================================================
 // Constants -- 8x32 little-endian
@@ -1015,15 +1032,24 @@ struct ECDSASignature {
     Scalar256 s;
 };
 
+#ifndef SECP256K1_METAL_SCAN_ONLY
 inline bool ecdsa_sign(thread const uchar msg_hash[32], thread const Scalar256 &priv,
                         thread ECDSASignature &sig) {
     if (scalar256_is_zero(priv)) return false;
     return ct_ecdsa_sign_metal(msg_hash, priv, sig.r, sig.s);
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 inline bool ecdsa_verify(thread const uchar msg_hash[32], thread const JacobianPoint &pubkey,
                           thread const ECDSASignature &sig) {
     if (scalar256_is_zero(sig.r) || scalar256_is_zero(sig.s)) return false;
+
+    // Reject out-of-range compact scalars (r >= n or s >= n) so every Metal
+    // verify route matches the strict compact-parse contract of CUDA/OpenCL
+    // (batch_compressed + lbtc collect previously reduced s+n mod n here).
+    Scalar256 order_n;
+    for (int i = 0; i < 8; i++) order_n.limbs[i] = SECP256K1_N[i];
+    if (scalar256_ge(sig.r, order_n) || scalar256_ge(sig.s, order_n)) return false;
 
     Scalar256 z = scalar_from_bytes(msg_hash);
     Scalar256 s_inv = scalar_inverse(sig.s);
@@ -1139,6 +1165,7 @@ struct SchnorrSignature {
     Scalar256 s;
 };
 
+#ifndef SECP256K1_METAL_SCAN_ONLY
 inline bool schnorr_sign(thread const Scalar256 &priv, thread const uchar msg[32],
                           thread const uchar aux_rand[32], thread SchnorrSignature &sig) {
     if (scalar256_is_zero(priv)) return false;
@@ -1148,6 +1175,7 @@ inline bool schnorr_sign(thread const Scalar256 &priv, thread const uchar msg[32
     sig.s = scalar_from_bytes(sig_bytes + 32);
     return true;
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 inline bool schnorr_verify(thread const uchar pubkey_x[32], thread const uchar msg[32],
                              thread const SchnorrSignature &sig) {
@@ -1312,11 +1340,13 @@ inline bool lift_x_field(thread const FieldElement &x_fe, int parity, thread Jac
     return true;
 }
 
+#ifndef SECP256K1_METAL_SCAN_ONLY
 inline bool ecdsa_sign_recoverable(thread const uchar msg_hash[32], thread const Scalar256 &priv,
                                      thread RecoverableSignature &rsig) {
     if (scalar256_is_zero(priv)) return false;
     return ct_ecdsa_sign_recoverable_metal(msg_hash, priv, rsig.sig.r, rsig.sig.s, rsig.recid);
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 inline bool ecdsa_recover(thread const uchar msg_hash[32], thread const ECDSASignature &sig,
                             int recid, thread JacobianPoint &Q) {
@@ -1435,6 +1465,7 @@ inline JacobianPoint msm_pippenger(thread const Scalar256* scalars, thread const
 // =============================================================================
 
 // ecdsa_sign: separated Scalar256 r/s outputs
+#ifndef SECP256K1_METAL_SCAN_ONLY
 inline bool ecdsa_sign(thread const Scalar256 &msg_scalar, thread const Scalar256 &priv,
                         thread Scalar256 &r_out, thread Scalar256 &s_out) {
     uchar msg_hash[32];
@@ -1445,6 +1476,7 @@ inline bool ecdsa_sign(thread const Scalar256 &msg_scalar, thread const Scalar25
     s_out = sig.s;
     return true;
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 // ecdsa_verify: AffinePoint pubkey + separated Scalar256 r/s
 inline bool ecdsa_verify(thread const Scalar256 &msg_scalar, thread const AffinePoint &pub,
@@ -1459,6 +1491,7 @@ inline bool ecdsa_verify(thread const Scalar256 &msg_scalar, thread const Affine
 }
 
 // schnorr_sign: Scalar256 msg + priv -> separated Scalar256 r/s
+#ifndef SECP256K1_METAL_SCAN_ONLY
 inline bool schnorr_sign(thread const Scalar256 &msg_scalar, thread const Scalar256 &priv,
                           thread Scalar256 &sig_rx, thread Scalar256 &sig_s) {
     uchar msg_hash[32], aux[32];
@@ -1472,6 +1505,7 @@ inline bool schnorr_sign(thread const Scalar256 &msg_scalar, thread const Scalar
     sig_s = sig.s;
     return true;
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 // schnorr_verify: Scalar msg + FieldElement pubkey_x + separated r/s
 inline bool schnorr_verify(thread const Scalar256 &msg_scalar, thread const FieldElement &pubkey_x,
@@ -1514,6 +1548,7 @@ inline bool ecdsa_recover(thread const Scalar256 &msg_scalar, thread const Scala
 // Metal Compute Kernels -- Extended Operations
 // =============================================================================
 
+#ifndef SECP256K1_METAL_SCAN_ONLY
 kernel void ecdsa_sign_kernel(
     device const uchar* msg_hashes       [[buffer(0)]],
     device const Scalar256* private_keys  [[buffer(1)]],
@@ -1530,6 +1565,7 @@ kernel void ecdsa_sign_kernel(
     success_flags[gid] = ecdsa_sign(msg, priv, sig) ? 1 : 0;
     signatures[gid] = sig;
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 kernel void ecdsa_verify_kernel(
     device const uchar* msg_hashes          [[buffer(0)]],
@@ -1547,6 +1583,7 @@ kernel void ecdsa_verify_kernel(
     results[gid] = ecdsa_verify(msg, pub, sig) ? 1 : 0;
 }
 
+#ifndef SECP256K1_METAL_SCAN_ONLY
 kernel void schnorr_sign_kernel(
     device const uchar* messages        [[buffer(0)]],
     device const Scalar256* private_keys [[buffer(1)]],
@@ -1564,6 +1601,7 @@ kernel void schnorr_sign_kernel(
     success_flags[gid] = schnorr_sign(priv, msg, aux, sig) ? 1 : 0;
     signatures[gid] = sig;
 }
+#endif // !SECP256K1_METAL_SCAN_ONLY
 
 kernel void schnorr_verify_kernel(
     device const uchar* pubkeys_x        [[buffer(0)]],

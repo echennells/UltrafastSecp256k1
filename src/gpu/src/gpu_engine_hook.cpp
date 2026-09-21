@@ -21,6 +21,15 @@
  * An operational backend error is ALWAYS a decline (-1), never invalid rows
  * (fatal-not-invalid). Each backend method owns memory-bounded chunking, so the
  * full count is safe to pass straight through.
+ *
+ * This TU also self-installs a second, narrower hook: GpuColumnsAvailableHook.
+ * It answers one question -- "is a working GPU device present on this process" --
+ * so a caller can skip marshalling a batch into column layout at all when the
+ * answer is no, instead of building the batch and letting the verify hook above
+ * decline it. It reuses the SAME cached backend probe as the verify hook (no
+ * extra device I/O) and carries none of the verify path's CPU/GPU-split
+ * guarantees -- it is pure discovery, consulted only by a caller that chooses
+ * to call it before batching, never by the verify entrypoints themselves.
  * ============================================================================ */
 
 #include "secp256k1/batch_verify.hpp"   /* GpuColumnsVerifyHook + installer */
@@ -45,9 +54,15 @@
  *   - the ufsecp C ABI (src/cpu/src/ufsecp_gpu_impl.cpp) references it, dragging
  *     this object into libufsecp so the ufsecp/audit path installs the hook;
  *   - the libbitcoin-direct path references no gpu_host symbol, so its executables
- *     force this object in with a linker `--undefined=secp256k1_gpu_columns_provider_anchor`
- *     at their own link (compat/libbitcoin_direct/CMakeLists.txt). Targeted -u
- *     retention is preferred over a blanket WHOLE_ARCHIVE: it pulls only this
+ *     force this object in with a platform-specific targeted linker retention
+ *     option naming this same anchor symbol at their own link
+ *     (compat/libbitcoin_direct/CMakeLists.txt): `LINKER:--undefined=secp256k1_gpu_columns_provider_anchor`
+ *     on GNU-like linkers (gcc/clang driving ld/lld/gold),
+ *     `LINKER:/INCLUDE:secp256k1_gpu_columns_provider_anchor` on MSVC link.exe (link.exe has
+ *     no --undefined; a silently-ignored --undefined there would leave the hook
+ *     dead-stripped — CPU-only, no build error). See
+ *     docs/WINDOWS_CUDA_BUILD_CONTRACT.md (PR #353, Eric Voskuil). Targeted retention
+ *     is preferred over a blanket WHOLE_ARCHIVE on either toolchain: it pulls only this
  *     provider object, not every backend TU. (WHOLE_ARCHIVE historically also broke
  *     the ZK-less link by dragging in gpu_backend_fallback.o and its undefined
  *     secp256k1::zk:: reference; that TU is now #if SECP256K1_HAS_ZK-gated and
@@ -96,12 +111,30 @@ int engine_gpu_columns_hook(int kind, const std::uint8_t* digests32,
     }
 }
 
+/* Availability query trampoline for GpuColumnsAvailableHook (see
+ * secp256k1/batch_verify.hpp). Reuses the SAME lazy-probe/cache backend as
+ * engine_gpu_columns_hook above -- this never re-probes the device, it just
+ * reports whether the earlier (or this, if first) probe found one. Advisory
+ * only: never throws, never blocks on device I/O beyond the one-time probe. */
+int engine_gpu_columns_available_hook() noexcept {
+    try {
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        return engine_gpu_backend() != nullptr ? 1 : 0;
+    } catch (...) {
+        return 0;  /* treat any probe failure as "no GPU" -- advisory, never throws */
+    }
+}
+
 /* Self-install at load time. When this TU is linked (GPU host built) the engine
  * column entrypoints acquire a non-null hook automatically; a caller may still
- * override with secp256k1::install_gpu_columns_verify_hook(). */
+ * override with secp256k1::install_gpu_columns_verify_hook(). The availability
+ * query hook installs alongside it so a caller-visible discovery check is
+ * available under the exact same enablement condition as the verify hook
+ * itself ("is this provider TU linked"). */
 struct EngineGpuColumnsInstaller {
     EngineGpuColumnsInstaller() noexcept {
         secp256k1::install_gpu_columns_verify_hook(&engine_gpu_columns_hook);
+        secp256k1::install_gpu_available_query_hook(&engine_gpu_columns_available_hook);
     }
 };
 EngineGpuColumnsInstaller g_engine_gpu_columns_installer;
@@ -125,7 +158,8 @@ EngineGpuColumnsInstaller g_engine_gpu_columns_installer;
  * secp256k1_gpu_host by compat/libbitcoin_direct/CMakeLists.txt); other GPU
  * builds leave the guard off, so this block imposes no include-path dependency.
  * Reuses engine_gpu_backend() and g_engine_gpu_backend_mtx from the unnamed
- * namespace above (same TU). Retained by the SAME existing -u
+ * namespace above (same TU). Retained by the SAME existing platform-specific
+ * anchor retention (--undefined on GNU-like linkers, /INCLUDE on MSVC) on
  * secp256k1_gpu_columns_provider_anchor — no new anchor. The four HASH
  * trampolines pre-check a length cap before dispatch: tagged_hash,
  * tagged_hash_var, and hash256 enforce the hard on-chip buffer caps of the
@@ -262,6 +296,124 @@ int engine_lbtc_hash256_var_hook(const std::uint8_t* inputs, const std::uint32_t
     }
 }
 
+int engine_lbtc_merkle_pair_hook(const std::uint8_t* left32, const std::uint8_t* right32,
+                                 std::size_t count, std::uint8_t* out32) noexcept {
+    try {
+        // Fixed 64-byte combined input — no device-cap check needed (unlike
+        // hash256's input_len<=320 or tagged_hash's msg_len<=256). The kernel
+        // always processes exactly 64 bytes per row via lbtc_sha256.
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        secp256k1::gpu::GpuBackend* b = engine_gpu_backend();
+        if (b == nullptr) return -1;
+        if (b->merkle_pair_hash(left32, right32, count, out32) != secp256k1::gpu::GpuError::Ok)
+            return -1;
+        return 0;  /* handled: every out32 row written */
+    } catch (...) {
+        return -1;
+    }
+}
+
+int engine_lbtc_sighash_hook(const std::uint8_t* descriptor, std::size_t descriptor_len,
+                              const std::uint8_t* const* field_data,
+                              const std::uint32_t* field_lengths,
+                              const std::uint32_t* const* field_var_lens,
+                              std::size_t count, std::uint8_t* out32) noexcept {
+    try {
+        // Sighash preimages may span multiple megabytes (scriptCode, annex,
+        // raw_literal); the CUDA kernel streams 64-byte blocks directly from
+        // device global memory, so no per-op device-cap check is needed here.
+        // The hook contract is: 0 = handled, -1 = decline -> CPU fallback.
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        secp256k1::gpu::GpuBackend* b = engine_gpu_backend();
+        if (b == nullptr) return -1;  /* no GPU -> CPU fallback */
+        if (b->sighash_descriptor_hash(descriptor, descriptor_len,
+                                       field_data, field_lengths,
+                                       field_var_lens, count, out32)
+                != secp256k1::gpu::GpuError::Ok)
+            return -1;  /* operational error -> decline (never invalid rows) */
+        return 0;  /* handled: every out32 row written */
+    } catch (...) {
+        return -1;
+    }
+}
+
+/* Benchmark/evidence-only telemetry trampoline (see lbtc_gpu_ops.hpp
+ * GpuTelemetry doc comment). Reuses engine_gpu_backend() -- the SAME cached
+ * probe used by every op hook above, under the SAME mutex -- so this reports
+ * exactly the backend/device that op hooks above actually dispatch to,
+ * queried through already-existing GpuBackend::backend_id() /
+ * backend_name() / device_info() virtuals only. No new backend method, no
+ * gpu_backend.hpp / *_cuda.cu / *_opencl.cpp / *_metal.mm edit.
+ * driver_version is intentionally not sourced here: DeviceInfo carries no
+ * driver field, so callers must treat it as unavailable rather than
+ * fabricate one (see docs/BENCHMARK_POLICY.md). Never called from any
+ * production/hot-path code -- only benchmark harnesses opt in. */
+bool engine_lbtc_gpu_telemetry(ufsecp::lbtc::gpu_hook::GpuTelemetry* out) noexcept {
+    if (out == nullptr) return false;
+    *out = ufsecp::lbtc::gpu_hook::GpuTelemetry{};
+    try {
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        secp256k1::gpu::GpuBackend* b = engine_gpu_backend();
+        if (b == nullptr) return false;  /* no GPU -> telemetry unavailable, never fabricated */
+
+        out->backend_id = b->backend_id();
+        if (const char* name = b->backend_name()) {
+            std::size_t i = 0;
+            for (; i + 1 < sizeof(out->backend_name) && name[i] != '\0'; ++i)
+                out->backend_name[i] = name[i];
+            out->backend_name[i] = '\0';
+        }
+
+        /* engine_gpu_backend() always init()s device_index 0 (see above), so
+         * device_info(0, ...) queries exactly the bound device. */
+        secp256k1::gpu::DeviceInfo di{};
+        if (b->device_info(0, di) == secp256k1::gpu::GpuError::Ok) {
+            std::size_t i = 0;
+            for (; i + 1 < sizeof(out->device_name) && di.name[i] != '\0'; ++i)
+                out->device_name[i] = di.name[i];
+            out->device_name[i] = '\0';
+            out->device_index = di.device_index;
+        }
+
+        out->available = true;
+        return true;
+    } catch (...) {
+        *out = ufsecp::lbtc::gpu_hook::GpuTelemetry{};
+        return false;
+    }
+}
+
+/* Decline-diagnostics trampoline (see lbtc_gpu_ops.hpp GpuLastError doc
+ * comment). Reuses engine_gpu_backend() -- the SAME cached probe and mutex
+ * used by every op hook above -- so this reports the shared backend's most
+ * recently recorded operational error via the ALREADY-EXISTING
+ * GpuBackend::last_error() / last_error_msg() virtuals. No new backend
+ * method, no gpu_backend.hpp / *_cuda.cu / *_opencl.cpp / *_metal.mm edit.
+ * Never called from any production/hot-path code -- only benchmark
+ * harnesses opt in, exactly like the telemetry trampoline above. */
+bool engine_lbtc_gpu_last_error(ufsecp::lbtc::gpu_hook::GpuLastError* out) noexcept {
+    if (out == nullptr) return false;
+    *out = ufsecp::lbtc::gpu_hook::GpuLastError{};
+    try {
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        secp256k1::gpu::GpuBackend* b = engine_gpu_backend();
+        if (b == nullptr) return false;  /* no GPU -> diagnostics unavailable, never fabricated */
+
+        out->code = static_cast<int>(b->last_error());
+        if (const char* msg = b->last_error_msg()) {
+            std::size_t i = 0;
+            for (; i + 1 < sizeof(out->message) && msg[i] != '\0'; ++i)
+                out->message[i] = msg[i];
+            out->message[i] = '\0';
+        }
+        out->available = true;
+        return true;
+    } catch (...) {
+        *out = ufsecp::lbtc::gpu_hook::GpuLastError{};
+        return false;
+    }
+}
+
 /* Self-install at load time. Runs when this TU is retained (the direct-GPU
  * profile forces it via the shared -u secp256k1_gpu_columns_provider_anchor). */
 struct EngineLbtcOpsInstaller {
@@ -273,6 +425,10 @@ struct EngineLbtcOpsInstaller {
         ufsecp::lbtc::gpu_hook::install_lbtc_tagged_hash_var_hook(&engine_lbtc_tagged_hash_var_hook);
         ufsecp::lbtc::gpu_hook::install_lbtc_hash256_hook(&engine_lbtc_hash256_hook);
         ufsecp::lbtc::gpu_hook::install_lbtc_hash256_var_hook(&engine_lbtc_hash256_var_hook);
+        ufsecp::lbtc::gpu_hook::install_lbtc_merkle_pair_hook(&engine_lbtc_merkle_pair_hook);
+        ufsecp::lbtc::gpu_hook::install_lbtc_sighash_hook(&engine_lbtc_sighash_hook);
+        ufsecp::lbtc::gpu_hook::install_lbtc_gpu_telemetry_hook(&engine_lbtc_gpu_telemetry);
+        ufsecp::lbtc::gpu_hook::install_lbtc_gpu_last_error_hook(&engine_lbtc_gpu_last_error);
     }
 };
 EngineLbtcOpsInstaller g_engine_lbtc_ops_installer;

@@ -7,6 +7,553 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.0] - 2026-09-21
+
+> **A security and correctness release, with a namespace break in the legacy C
+> API.** 195 commits since v4.5.0. The `ufsecp_*` C ABI is untouched --
+> `UFSECP_ABI_VERSION` stays 4 -- but the 36 functions in `bindings/c_api` are
+> renamed out of libsecp256k1's `secp256k1_*` namespace, which they had no
+> business occupying and which made linking both surfaces a duplicate-symbol
+> error.
+>
+> **Upgrade if you use any of:** Schnorr batch verification (a P0 -- the batch
+> randomiser's weights were a public constant of the index, so defeating the
+> soundness check cost one modular inversion), field arithmetic outside the
+> BIP-340 hot paths (`reduce()` returned a wrong result for a legal input, and
+> `FieldElement::sqrt()` returned a non-root for ~18% of inputs), the Bitcoin
+> Cash 2019 Schnorr shim (it shared its nonce with ECDSA, making the private key
+> recoverable from one key signing one message under both schemes), GPU
+> verification (out-of-range compact ECDSA scalars were reduced instead of
+> rejected, and Metal Schnorr batch verify rejected every valid signature),
+> Metal at all (the runtime-shader fallback had never worked and the prebuilt
+> metallib was unreachable from the audit binaries), or Android arm64 (executables
+> linking the library could not start).
+>
+> It also stops the library littering `cache_w18.bin` in callers' working
+> directories, closes the remaining CPU deficits against libsecp256k1 v0.8.0,
+> and fixes a second embed-closure regression -- this time in OpenCL -- gated
+> against recurrence.
+
+### Added
+
+- **The fixed-base precompute table is built once, kept, and loaded thereafter.**
+  The disk cache is the default, and it now lives in the per-user cache directory
+  the platform reserves for it rather than in the caller's working directory (see
+  *Fixed* for what that replaced). A caller-supplied `cache_dir` is honoured on
+  the first write, not only on read, and a build-time mode is available for
+  consumers that want no cache file written at all. Re-applying an identical
+  `FixedBaseConfig` keeps the built context instead of recomputing the ~250 MB
+  table; a real change still invalidates it.
+
+- **A written-down, measured magnitude model for the 5x52 field representation**
+  ([#396](https://github.com/shrec/UltrafastSecp256k1/issues/396)). The bounds
+  the FE52 kernels rely on are documented in the header and checked rather than
+  assumed, so a magnitude annotation that understates or overstates the real
+  margin is caught instead of being carried forward by the next reader.
+
+- **libbitcoin GPU workload surface.** Merkle pair and merkle root GPU workloads,
+  a workload benchmark harness, GPU evidence telemetry, sighash surface
+  diagnostics, and direct GPU sighash descriptor hashing -- all on the
+  bridge-free `compat/libbitcoin_direct` path, so a libbitcoin consumer reaches
+  them without the C bridge or shim marshalling.
+
+- **BIP-352 gaps closed and the assurance gates hardened** around them.
+
+- Added the ABI-compatible `ufsecp_addr_p2sh_with_ctx` entry point for P2SH
+  generation with `ufsecp_last_error()` / `ufsecp_last_error_msg()` diagnostics.
+  The existing stateless `ufsecp_addr_p2sh` symbol remains available and
+  produces byte-identical addresses.
+- Completed the clang `-Wunknown-attributes` cleanup for the field kernels:
+  the two `fe26` inner functions (`fe26_mul_inner` / `fe26_sqr_inner`) still
+  spelled the GCC-only `optimize("O2")` attribute under a `__GNUC__ ||
+  __clang__` guard. They now follow the same policy as the `fe52` kernels
+  (see the "Field-kernel inlining policy" block in `field_52_impl.hpp`):
+  `optimize("O2") + noinline` on GCC, plain `noinline` on clang, which drops
+  the remaining two spurious warnings per translation unit on clang builds.
+- Added an exact-limb regression audit for the `fe26` field path
+  (`test_regression_field_26_exact_limb.cpp`), the fe26 equivalent of the
+  FE64 reduce-carry guard added in 1548d44. It pins the trigger family
+  (`2^256-2^33-1`, `2^255-1`, `p-1`, `p`, `2^256-1`) plus 200,000 randomized
+  mul/sqr/add rows against Python big-int ground truth at exact 32-byte
+  granularity — never through normalized `operator==` — so an equivalent
+  carry loss in `fe26` (the production field on ARM64 and 32-bit targets)
+  is caught by this module before any downstream module. Registered in the
+  unified audit runner under `math_invariants`.
+- Enforced a uniform strict compact-ECDSA scalar contract on every GPU verify
+  path. Previously the device-side `ecdsa_verify()` in the CUDA, Metal and
+  OpenCL backends only rejected zero scalars and silently reduced any `r`/`s`
+  limb value `>= n` modulo the group order: the CUDA `ecdsa_verify_collect`
+  kernel and the Metal `ecdsa_verify_batch_compressed` / `lbtc_ecdsa_verify_collect`
+  shaders therefore accepted the `s+n` congruent-malleation encoding that the
+  CUDA batch kernel, OpenCL and the CPU strict parse all reject — violating the
+  documented "collect verdict is bit-identical to verify_batch" invariant. Each
+  backend's `ecdsa_verify` now rejects `r >= n` or `s >= n` up front (single
+  choke point shared by single/batch/collect and sign-and-verify), and a
+  regression audit (`test_gpu_ecdsa_compact_range.cpp`) pins it with
+  an always-run CPU source gate (failed against the pre-fix sources) plus an
+  on-device `{0, n-1, n, 2^256-1, s+n}` boundary-scalar differential that
+  self-skips without a GPU.
+
+### Changed
+
+- **BREAKING (legacy C API):** the 36 functions in `bindings/c_api` are
+  `ultrafast_secp256k1_*` now, not `secp256k1_*`. That prefix is libsecp256k1's C
+  namespace and this library had no business occupying it. Eleven of the 36 were
+  defined by **both** this surface and the bundled libsecp256k1 shim, with
+  incompatible signatures:
+
+      ultrafast_secp256k1_ecdsa_sign(msg_hash, privkey, sig_out)     <- ours
+      secp256k1_ecdsa_sign(ctx, sig, msg32, seckey, noncefp, ndata)  <- libsecp
+
+  `secp256k1_ec_pubkey_create`, `_ec_pubkey_parse`, `_ec_seckey_verify`, `_ecdh`,
+  `_ecdsa_recover`, `_ecdsa_sign`, `_ecdsa_sign_recoverable`,
+  `_ecdsa_signature_serialize_der`, `_ecdsa_verify`, `_schnorr_sign` and
+  `_schnorr_verify` were the eleven. Linking both objects was a duplicate-symbol
+  error; a dynamic resolution landing on the wrong one would have read a context
+  pointer as a private key. `exports.map` made it worse by exporting
+  `secp256k1_*` wholesale from the shared library.
+
+  The shared library now exports 36 `ultrafast_secp256k1_*` symbols and **zero**
+  `secp256k1_*` symbols (`nm -D --defined-only`). All eleven language bindings --
+  Python, Ruby, C#, Node, PHP, Swift, Rust (sys + safe), Dart, Go, Java JNI and
+  React Native -- were updated in the same commit and re-verified symbol by symbol
+  against the built library: every name each binding looks up exists, and no old
+  name remains. The export macro is `ULTRAFAST_SECP256K1_API`.
+
+  Migration is a mechanical rename, `secp256k1_foo` -> `ultrafast_secp256k1_foo`.
+  No compatibility aliases: an alias would reintroduce the collision it exists to
+  remove, and a header `#define` of `secp256k1_ecdsa_sign` in a translation unit
+  that also includes real libsecp256k1 would be worse than the original defect.
+
+  The immediate payoff is that `regression_bch_schnorr_spec` -- which could not be
+  linked into `unified_audit_runner` yesterday because of this exact collision --
+  is now a blocking module there, so the advisory ceiling returns 62 -> 61 and
+  Standard Test Vectors goes 10/10 -> 11/11.
+
+### Fixed
+
+- **P0 -- `schnorr_batch_verify` accepted batches containing individually
+  invalid signatures.** Reproduced end to end: a batch of 97 signatures, two of
+  which fail `schnorr_verify` on their own, returned `true` -- on both the
+  `SchnorrBatchEntry` and `SchnorrBatchCachedEntry` overloads.
+
+  Root cause: `batch_weight()` derived `a_i = SHA256(batch_seed || i)` from a
+  captured `SHA256::Midstate`. A midstate carries `state_` and `total_` and
+  nothing else -- not `buf_`, not `buf_len_` -- so it is well defined only where
+  the absorbed length is a multiple of 64. `batch_seed` is 32 bytes: nothing had
+  been compressed and all 32 bytes were still in `buf_`. The capture discarded
+  them while `total_` kept counting them, so every weight collapsed to SHA-256 of
+  the four index bytes under a forged 36-byte length field -- **a public constant
+  of the index alone, identical in every batch on every machine**. The 32 CSPRNG
+  bytes XORed into the seed (added precisely to make the weights unpredictable)
+  were computed and then thrown away.
+
+  Impact: the batch checks `sum_i a_i * D_i == O`, and the small-exponents
+  soundness proof needs the `a_i` drawn after, and independently of, the
+  signatures. With them fixed and public, defeating the check costs **one modular
+  inversion** -- offset `s_0` by any `t_0` and `s_1` by `t_1 = -(a_0/a_1)*t_0`.
+  No key, no grinding, no discrete log, and the offsets are reusable against
+  every victim. Reachable only for `n > kSchnorrBatchIndividualCutoff` (96); at
+  or below the cutoff the implementation verifies one at a time and derives no
+  weight.
+
+- **The OpenCL scan-only kernel embed was no longer self-contained**
+  ([#415](https://github.com/shrec/UltrafastSecp256k1/issues/415)). A consumer
+  that wants only the scan half of the OpenCL kernels embeds six files --
+  `secp256k1_field.cl`, `secp256k1_point.cl`, `secp256k1_gen_table_w8.cl`,
+  `secp256k1_extended.cl`, `secp256k1_affine.cl`, `secp256k1_bip352.cl` --
+  concatenates them, strips every `#include` line (`clCreateProgramWithSource`
+  has no include path) and compiles the result at runtime. At v4.5.0 that
+  worked. Since then `secp256k1_extended.cl` gained four
+  `#include "secp256k1_ct_*.cl"` lines and sign paths that call into them, so
+  with the includes stripped the NVIDIA compiler reported `unknown type name
+  'CTJacobianPoint'` plus implicit declarations of `ct_generator_mul_impl`,
+  `ct_point_to_jacobian`, `ct_scalar_inverse_impl` and `ct_jacobian_to_affine`.
+  Nothing calls those wrappers -- OpenCL, like Metal's AIR, does not dead-strip
+  a function whose callees are unresolved, so they broke the compile anyway.
+
+  This is [#335](https://github.com/shrec/UltrafastSecp256k1/issues/335)
+  reproduced in a second backend and takes the same remedy.
+  `SECP256K1_OPENCL_SCAN_ONLY` now excludes the four includes and everything
+  that reaches them: `ecdsa_sign_impl`, `schnorr_sign_impl`, the whole ECDH
+  block, `ecdsa_sign_recoverable_impl`, and the `ecdsa_sign` / `schnorr_sign`
+  kernels. Following the chain up to the kernel entry points is the part that
+  matters -- guarding only the callee moves the error onto the wrapper. The
+  `SchnorrSignature` and `RecoverableSignature` typedefs stay outside the guard,
+  since `schnorr_verify_impl` needs the first and neither references anything
+  undefined. **The repo's own build never defines the macro, so the default
+  kernels are unchanged** -- verified rather than asserted: preprocessing
+  `secp256k1_extended.cl` with no macro defined, before and after the guard,
+  yields 2169 identical lines and an empty diff. Measured on the embed itself:
+  6 surviving `ct_*` / `CT*` references without the macro, 0 with it. The other
+  five embed files were checked and reference no `ct_*` at all.
+
+  New blocking audit module `regression_opencl_kernel_closure` rebuilds the
+  consumer's embed exactly and asserts the guarded form references no `ct_*`
+  symbol and no `CT*` type, with a live negative control -- without the guard
+  those references are present, so the check cannot pass vacuously if the guard
+  is ever deleted. It is a source scan: no OpenCL device, no vendor compiler and
+  no host preprocessor required, so it runs on every platform.
+
+- **A dead co-Z helper kept the `-Werror` gate red.** `49925a1a` made the co-Z
+  table build the default and deleted the `#else` arm it superseded; that arm
+  held the only call to `jac52_add_mixed_inplace_zr`, so the function survived
+  with no callers. GCC 14 reports `defined but not used`, the Security Audit
+  workflow builds with `-DSECP256K1_WERROR=ON`, and its `Build with -Werror` job
+  had failed on every push since. Reproduced locally with the workflow's exact
+  configure line and `ninja -k 0`, which keeps building past a failure:
+  `point.cpp.o` was the only failing object in the tree, so this one dead
+  function was the entire gate failure. Removing it is not a behaviour change --
+  a static function with no callers contributes no code -- and the co-Z path
+  that replaced it stays covered by
+  `regression_scalar_decomposition_and_comb`.
+
+- The Bitcoin Cash 2019 Schnorr shim (`secp256k1_schnorr_sign` /
+  `secp256k1_schnorr_verify`) did not implement the specification it is named
+  after, and one of the gaps was a private-key recovery defect:
+
+  0. **The nonce was shared with ECDSA (P1).** The signer called
+     `secp256k1::rfc6979_nonce(d, msg)` -- the same function, with the same
+     arguments, that `ct::ecdsa_sign` calls. Signing one message with one key
+     under both schemes reused a single nonce across `s1 = k^-1(z + r*d)` and
+     `s2 = k + e*d`, so `d = (s1*s2 - z)/(r + s1*e)` recovers the private key
+     from two public signatures. Demonstrated, not inferred: the Schnorr `r`
+     equalled the ECDSA `r` in 16/16 cases and 16/16 private keys were recovered
+     from their own signature pairs. The RFC 6979 tag in (2) is what makes the
+     two nonce streams disjoint -- it is a security control, not a formatting
+     detail.
+  1. **`Jacobi(R.y) == 1`.** The signer must negate its nonce when `R.y` is not a
+     quadratic residue; the verifier must fail when `Jacobi(R'.y) != 1` (spec
+     verification step 10). Neither existed, and the omission concealed itself:
+     signatures with a non-residue `R.y` passed our own verifier precisely
+     because that verifier skipped the same check.
+  2. **RFC 6979 `algo16 = "Schnorr+SHA256  "`** (two trailing 0x20). The signer
+     used the plain ECDSA nonce path, so its nonces -- and its signature bytes --
+     matched neither BCHN nor Libauth for the same key and message.
+
+  Measured over 16 fixed (key, message) pairs against an independent pure-Python
+  implementation of the spec: byte-identical to the oracle went 0/16 -> 16/16,
+  residue `R.y` 6/16 -> 16/16, and **accepted by a spec-conformant verifier
+  6/16 -> 16/16**. Ten of sixteen signatures would have been rejected by a BCH
+  node while our own verifier accepted all sixteen.
+
+  Exposure was limited -- the shim ships in no default build, which is also why
+  all three survived -- but that is a root cause, not a mitigation.
+
+  Root cause of its survival: the BCH shim builds only under
+  `SECP256K1_BCHN_SHIM_BUILD_TESTS`, which defaults `OFF` and which no GitHub
+  workflow and no `ci/` script ever enabled -- the file was neither compiled nor
+  tested by any gate. New CTest module `regression_bch_schnorr_spec` fixes that:
+  eight known-answer vectors checked byte-for-byte, a negative control building
+  the `-R` twin of each signature (`s' = 2ed - s`, same `r`) that the verifier
+  must reject, a determinism check, and a probe that the BCH `r` differs from the
+  ECDSA `r` for the same key and message. Against the pre-fix shim the module
+  fails 4 of 7 checks and exits 1.
+
+  `rfc6979_nonce_libsecp_compat` gained an optional `algo16` argument to carry
+  the tag; passing `nullptr` keeps every existing caller byte-for-byte on
+  libsecp256k1's `"ECDSA\0..."` tag. Reported under issue #374.
+
+- **`reduce()` lost a carry two ways, and returned a wrong result for a legal
+  input.** `a = 2^256 - 2^33 - 1` is an ordinary field element: `a < p`,
+  canonical, nothing special about it except its shape.
+
+      input                 fffffffffffffffffffffffffffffffffffffffffffffffffffffffdffffffff
+      expected a^2 mod p    fffff860000e8900
+      FieldElement::square  fffff85f000e8530     <- short by 0x1000003d0 = K - 1
+
+  `square()`, `operator*` and `square_inplace()` all agreed with each other and
+  all disagreed with the arithmetic. Two independent causes. In
+  `field_asm_x64_gas.S`, the second reduction fold in `reduce_4_asm`,
+  `field_mul_full_asm` and `field_sqr_full_asm` carried the comment *"Use AND
+  mask instead of MULX"* -- but the mask was never built: `0x1000003D1 & 1` is 1,
+  not K, so whenever the first fold overflowed the reduction added 1 where it
+  owed K. Fixed by negating the carry first, turning 0/1 into 0/-1 so the AND
+  does what the comment always claimed. Separately, the portable `reduce()` in
+  `field.cpp` propagated its first fold's carry in a way that could not reach
+  `result[4]`. Pinned by an exact-limb regression audit over the trigger family
+  (`2^256-2^33-1`, `2^255-1`, `p-1`, `p`, `2^256-1`) plus 200,000 randomised
+  mul/sqr/add rows against Python big-integer ground truth at 32-byte
+  granularity -- never through normalised `operator==`.
+
+- **`FieldElement::sqrt()` returned a non-root for ~18% of inputs**
+  ([#402](https://github.com/shrec/UltrafastSecp256k1/issues/402)). Over the 256
+  single-bit squares -- `x = 2^k`, input `x^2`, correct answer `±x` -- **46 of
+  256 came back wrong**; `FieldElement52::sqrt()` is exact on all 256.
+
+      x = 2^33   x*x = 2^66   sqrt() -> 0x...fffffc30   (not ±2^33)
+
+  Two things compounded. `FieldElement::sqrt()` was written to delegate to the
+  5x52 chain, guarded on `SECP256K1_FAST_52BIT` -- the FE52 *storage* switch,
+  which is OFF in the default build -- and `field.cpp` never included
+  `config.hpp`, so it saw neither that macro nor `SECP256K1_FE52_COMPUTE`, the
+  one that actually means "the 5x52 kernels can run here". The delegation was
+  compiled out and every caller fell through to the 4x64 chain, which mishandles
+  non-canonical intermediates across its 255 chained squarings. Affected callers:
+  `zk.cpp`, `adaptor.cpp`, `address.cpp`, `pedersen.cpp` and `ellswift.cpp`.
+  Impact is per-caller -- where the caller re-validates `y^2 == x^3+7` a wrong
+  root is rejected, so the effect is a false negative; callers that do not
+  re-validate propagate an off-curve y. The BIP-340 hot paths call `sqrt()` on
+  `FieldElement52` values and were unaffected, which is why the KAT suites stayed
+  green. `sqrt` is also 13% faster as a result.
+
+- **Metal `schnorr_verify_batch` rejected every valid signature.** The host bound
+  its dispatch arguments in the wrong order:
+
+      host:   {buf_pks, buf_msgs, buf_sigs, buf_res, buf_count}
+      kernel:  msg_hashes[[0]], pubkeys_x[[1]], signatures[[2]], results[[3]], count[[4]]
+
+  so every row was verified with the message and the x-only public key
+  exchanged. **This is a false negative, not a false accept** -- the swap cannot
+  make an invalid signature verify other than with negligible probability -- but
+  it made GPU Schnorr batch verify unusable on Apple hardware. The `collect`
+  sibling binds correctly and was right throughout, which is how the parity test
+  found it. Why it survived: the parity test needs a real Metal device, and
+  `CI / macos (Release)` never got that far, because two audit tests were leaking
+  a fail-closed shader-path override and after that the audit binary stopped
+  building. On the first macOS run that both built and executed the suite, the
+  parity test failed 3 of 24.
+
+- **The Metal runtime-shader-compile fallback had never been able to build a
+  translation unit**, and the prebuilt `metallib` was unreachable from the audit
+  binaries on macOS. A chain of related defects: the loader's hardcoded header
+  list named `secp256k1_bloom.h`, a file that has never existed anywhere in the
+  tree; the list named 4 of the 11 headers the kernel actually includes and
+  ignored nested includes, which `newLibraryWithSource` cannot resolve;
+  `SHADER_DIR` was scoped to the `xcrun` guard that the copy list sits outside;
+  and the `metallib` search was relative to a working directory that never
+  contained it. The loader now expands the entry file's own includes recursively,
+  so there is no list in C++ left to drift, and it names the rejected candidate
+  and says whether the build path is compiled in. Pinned by
+  `regression_metal_shader_closure`, which runs on every platform with no Metal
+  device and no Apple toolchain.
+
+- **Metal audit Schnorr signing failed on an unbound kernel argument**, and two
+  audit tests were fail-closing Metal for everything that ran after them.
+  Metal dispatch failure is now distinguished from "invalid", and SNARK witness
+  runtime readiness is guarded.
+
+- **The fixed-base precompute table left a 255 MB file in the caller's working
+  directory.** `use_cache` defaulted true and `cache_dir` to empty, and empty
+  meant *the current working directory* -- so every process that touched a
+  fixed-base multiplication dropped a `cache_w18.bin` wherever it happened to be
+  running, and left it. There were ~13 copies in one working tree, roughly 3 GB.
+  The first repair turned the cache off entirely, which stopped the litter but
+  made every process rebuild a ~250 MB table -- the wrong trade for a table whose
+  whole purpose is to be computed once, and what turned `exploit_selftest_api`
+  from 6.6 s into a 120 s CI timeout on every platform. The cache is the default
+  again, and it now goes where the platform reserves for it:
+
+      Linux/BSD   $XDG_CACHE_HOME/secp256k1  else  ~/.cache/secp256k1
+      macOS       ~/Library/Caches/secp256k1
+      Windows     %LOCALAPPDATA%\secp256k1
+
+  A caller-named `cache_dir` is honoured on the **first write**, not only on
+  read, and a caller-named file is left alone. A build-time mode is available for
+  consumers that want no cache file at all.
+
+- **Android arm64 executables linking the library could not start.**
+
+      error: "<binary>": executable's TLS segment is underaligned:
+             alignment is 8, needs to be at least 64 for ARM64 Bionic
+
+  Bionic requires an executable's `PT_TLS` segment to be 64-byte aligned on
+  arm64. Every `thread_local` in the library is naturally 8- or 16-aligned, so
+  the segment came out at `0x8` and the loader refused the binary outright --
+  nothing to do with the code being wrong, it simply could not run. Found by
+  executing on real hardware (a Rockchip RK3588 over adb); the CI
+  `android (arm64-v8a)` job only cross-compiles and never ran a binary.
+
+- **A GPU backend that is available but runs nothing is no longer reported as a
+  PASS.** `regression_bip352_ct_varbase` keyed its exit code on
+  `g_gpu_available`, which is set the moment `ufsecp_gpu_is_available()` reports
+  a runtime-available backend -- before any operation is attempted. If
+  `bip352_scan_batch_multispend` then returned `UFSECP_ERR_GPU_UNSUPPORTED` for
+  every call, the test still passed with no GPU coverage verified. Found while
+  reviewing [#384](https://github.com/shrec/UltrafastSecp256k1/pull/384).
+
+- **CUDA batch allocation leaks closed**, and the CUDA build gained an explicit
+  architecture policy instead of an implicit default.
+
+- **OpenCL collect dispatch now waits for completion**, and OpenCL kernel source
+  paths resolve correctly when the kernels are staged for the libbitcoin
+  benchmarks.
+
+- **Windows / MSVC**: static export precedence preserved; `__restrict__` matched
+  on cross-TU kernel declarations (LNK2019); the `rpcndr.h` `small` macro avoided
+  in `field_mul_small`; Windows CUDA CRT headers installed in CI; the libbitcoin
+  GPU hook retained with `/INCLUDE`.
+
+- **`Scalar::from_bytes`'s `__int128` reduction is gated** so MSVC and 32-bit ARM
+  build, and the `fe26` field kernels scope their `optimize("O2")` marker to GCC
+  -- it is a no-op on clang and produced two spurious `-Wunknown-attributes`
+  warnings per translation unit
+  ([#336](https://github.com/shrec/UltrafastSecp256k1/issues/336)).
+
+- **HMAC length guards fail closed**, zeroing `out[32]` before returning, and ten
+  more dead wNAF trim loops were removed.
+
+- **The Node binding's FFI source package is installable.**
+
+### Performance
+
+- **The x86 representation sweep, closing the remaining deficits against
+  libsecp256k1 v0.8.0.** A long series of "compute the same value with less
+  work" changes; no public function changes a single output byte, and each one
+  is pinned by an independent recomputation rather than a spot check, because
+  every item in this class fails *silently* when wrong -- the arithmetic stays
+  well formed, nothing asserts, and the answer is simply a different point.
+
+  - `Scalar::from_bytes` ran the same 4-limb subtract chain twice, once in
+    `sub_impl()` for the value and once in `ge()` only to learn whether the
+    borrow came out. **0.71x -> 1.06x against libsecp256k1**, now ahead.
+  - GLV decomposition on both the `fast::` and `ct::` tracks carried libsecp's
+    *derived* constants (`-b1`, `-b2`, `lambda`) instead of the raw lattice
+    basis. `minus_b2 = n - b2` is a full 256-bit constant while `b2` itself is
+    126 bits, so every `c2` product was computed at four times the necessary
+    width and then needed a wide mod-n reduction the narrow form does not.
+  - Comb geometry, wNAF scan bounds and the field-kernel inlining policy were
+    re-measured rather than assumed.
+  - One affine materialisation per point instead of two: `taproot_tweak_privkey`
+    bound `px_bytes` and re-derived the identical 32 bytes eight lines later;
+    `musig2` `key_agg` and `start_sign_session` each called `has_even_y()` (one
+    field inversion) and then `.x().to_bytes()` (a second on the same Z), when
+    negating Y changes neither X nor Z; `ecdh` evaluated `.x()` and `.y()` as two
+    independent expressions.
+  - RFC-6979 keeps a zero-key midstate instead of recomputing it.
+  - In-place point operations at **54 self-assignment sites**. `X = X.add(Y)`
+    writes to a temporary and copies it back; for a `FieldElement52` local that
+    is free (SROA scalarises five limbs into registers), but a `Point` is three
+    FE52 plus flags, and at every one of these sites the target is an array
+    element, a struct member reached through a pointer, or a local too wide for
+    registers -- so the copy is a real round trip through memory.
+  - Four memory round trips removed from the constant-time path (`R.z = R.z *
+    global_z` -> `R.z.mul_assign(global_z)` at the four global-Z rescale sites in
+    `ct_point.cpp`, plus three Bulletproof folding steps in `zk.cpp`). Measured
+    interleaved A/B, 10 samples per arm, rotated, cpu0 pinned, turbo off, every
+    row with non-overlapping ranges: **`ct::generator_mul` -8.87%**,
+    **`ct::ecdsa_sign` -6.39%**, `schnorr_verify` -0.87%, `ecdsa_verify` -0.65%.
+  - The wNAF digit sign folded into the add on the BIP-352 scan path, and the
+    redundant Jacobi pre-check dropped from `lift_x_from_limbs`.
+  - `Point::add` lost a dead zero-fill; the accompanying note records why verify
+    is at a floor rather than implying more is available.
+
+- **GLV Pippenger for MSM, with re-measured windows.** **Schnorr batch
+  verification is up to 19.8% faster per signature.** The same work fixed a P1:
+  `pippenger_msm` returned a well-formed **wrong point** for any input set whose
+  points carry a Z, whenever the window reached the signed-digit path (`c >= 7`)
+  -- every MSM from n = 512 up under the old window table. The unsigned scatter
+  had always branched on `all_affine` and kept a general Jacobian loop; the
+  signed scatter had no such branch and called `from_affine52` /
+  `add_mixed52_inplace` directly, both of which assume `z = 1`.
+
+- **GPU MSM finished its reduction on a single thread; measured -7.9%.**
+  `CudaBackend::msm()` block-reduced the scatter output and then handed the rest
+  to `msm_reduce_and_compress_kernel<<<1,1>>>` -- one thread walking the array
+  with `jacobian_add`, 4096 serial point additions at N=1M and 16384 at N=4M. It
+  now keeps block-reducing while the tail is longer than 32, ping-ponging
+  between the two partial buffers. Behaviour is bit-identical when the tail is
+  already short. Measured on an RTX 5060 Ti (sm_120, CUDA 13.2, driver
+  580.178.04, idle at 39 °C, no other compute processes).
+
+- **The OpenCL generator table moved to constant memory**, and the OpenCL
+  signature column dispatch was stabilised.
+
+- **CI Debug and sanitizer jobs spent 91% of every build doing ThinLTO.** Not a
+  library change, but it is why those jobs took hours. On one push: MSan 127 min
+  total, of which 127 min was the build and 5 min 39 s the test; ASan+UBSan
+  90/76/13.5; `linux (clang-17, Debug)` 64/60/4. Parsing the ninja progress lines
+  out of the MSan log splits that build into **1186 compiles in 10.4 min and 434
+  links in 112.4 min** -- ccache was working (a restore-key hit, and 10 minutes
+  for 1186 objects proves it), but links are not cacheable.
+  `src/cpu/CMakeLists.txt` exported `-flto=thin` to consumers via
+  `target_link_options(... INTERFACE)`, `audit/CMakeLists.txt` alone declares
+  ~444 executables, and `SECP256K1_USE_LTO` defaulted ON with no build-type
+  guard -- so a Debug MSan job redid whole-program codegen 434 times.
+
+- The co-Z odd-multiple table build and the constant-time SafeGCD field inverse
+  are the **default build** now, not opt-in macros. Both came out of
+  `experiments/representation_search` behind `-DREPSEARCH_COZ_TABLE=1` and
+  `-DREPSEARCH_CT_SAFEGCD_INV=1`; both won their controlled A/B, and the
+  superseded branches are deleted rather than left as dead `#else` arms:
+
+  | change | measured | where |
+  |---|---|---|
+  | co-Z table build, all 4 sites | `dual_scalar_mul_gen_point` -7.19%, `ecdsa_verify` -1.96%, 0 regressions | verify, `ct::scalar_mul`, BIP-324 |
+  | CT SafeGCD inverse, both sites | ElligatorSwift XDH -8.23%, session handshake -4.35% | ECDH, BIP-352 scan |
+
+  This closes an evidence gap rather than adding a speedup. The canonical
+  artifact `docs/bench_unified_2026-09-07_gcc14_x86-64.json` was produced WITH
+  both flags set -- its `build` field records the exact command -- so every ratio
+  in `docs/canonical_numbers.json`, and everything the sync scripts derive from
+  it, described a build that `cmake --preset cpu-release` did not produce. It
+  does now.
+
+  Verified as code identity rather than as a re-measurement, which is the
+  stronger claim available here: `src/cpu/src/point.cpp` and
+  `src/cpu/src/ct_point.cpp` compiled from the new default tree emit assembly
+  identical to the previous tree compiled with both macros set (same flags plus
+  `-fno-lto -g0 -S`; 101364 and 83201 asm lines, diff empty once the
+  temp-filename static-init symbol is normalised). The default build IS the arm
+  that was measured.
+
+- Removed `REPSEARCH_DBL_VARIANT`, `REPSEARCH_INLINE_ZINV` and
+  `REPSEARCH_DUALMUL_WINDOW_G` from `src/cpu/src/point.cpp`. These were the axes
+  the representation search refuted or could not resolve -- the alternative sign
+  placement measured +1.17% slower, the inline/noinline flip gave fully
+  overlapping ranges, and no G-table window width beat 15 on ConnectBlock. A
+  losing arm kept behind an `#if` is dead code in the engine's hottest file, not
+  an option: the verdict is what has value, and it stays as a comment at each
+  site, in `experiments/representation_search/README.md`, and in the knowledge
+  base (`DUALMUL-WINDOW-CONNECTBLOCK-NO-WIN`,
+  `X86-REPRESENTATION-SEARCH-EXHAUSTED`). The window constant is now the plain
+  `kDualMulWindowG = 15` that `regression_table_build_invariants` section (1)
+  guards.
+
+
+### Credited
+
+- **[@evoskuil](https://github.com/evoskuil)** for reporting the fixed-base cache
+  litter: *"This file keeps getting left behind, such as in my test case
+  executions: cache_w18.bin. [...] Last preference is that a math lib leaves
+  files behind in our working directory."* We had shipped exactly that last
+  preference. The report produced two fixes -- the cache moved to the per-user
+  platform cache directory, and a build-time mode for consumers that want no
+  cache file at all.
+
+- **[@craigraw](https://github.com/craigraw)** for
+  [#415](https://github.com/shrec/UltrafastSecp256k1/issues/415) — validating the
+  CUDA and OpenCL backends of a downstream extension against `dev`, reporting the
+  OpenCL embed regression with the exact compiler diagnostics and the embed
+  recipe that reproduces it, and identifying it as the same failure class as
+  their earlier [#335](https://github.com/shrec/UltrafastSecp256k1/issues/335)
+  before we did. The observation that this is now the second instance of one
+  class in three months is what turned the fix into a permanent gate rather than
+  a second patch.
+
+- **[@kawacukennedy](https://github.com/kawacukennedy)** for reporting 9 verified
+  issues across GPU backends (Metal, CUDA, OpenCL), API consistency, and
+  documentation accuracy ([#343](https://github.com/shrec/UltrafastSecp256k1/issues/343),
+  [#344](https://github.com/shrec/UltrafastSecp256k1/issues/344),
+  [#345](https://github.com/shrec/UltrafastSecp256k1/issues/345),
+  [#346](https://github.com/shrec/UltrafastSecp256k1/issues/346),
+  [#347](https://github.com/shrec/UltrafastSecp256k1/issues/347),
+  [#348](https://github.com/shrec/UltrafastSecp256k1/issues/348),
+  [#349](https://github.com/shrec/UltrafastSecp256k1/issues/349),
+  [#350](https://github.com/shrec/UltrafastSecp256k1/issues/350),
+  [#352](https://github.com/shrec/UltrafastSecp256k1/issues/352)).
+
+- **[@tatotogonidze-cmd](https://github.com/tatotogonidze-cmd)** for the BIP-352 GPU audit coverage
+  finding ([#384](https://github.com/shrec/UltrafastSecp256k1/pull/384)). The proposed patch was superseded by an earlier fix on
+  `dev`, but it independently reached the same root cause — CPU-only builds
+  linked no GPU provider, so every `ufsecp_gpu_*` symbol in
+  `test_regression_bip352_ct_varbase` was undefined — and it separated "a GPU
+  backend was selected" from "the operation actually ran". That second
+  distinction was a real hole on our side: an available backend whose
+  `bip352_scan_batch_multispend` returns `UFSECP_ERR_GPU_UNSUPPORTED` produced a
+  CTest PASS with no GPU coverage verified. Ported as
+  `bcv_gpu_coverage_is_advisory()` with `test_bcv_coverage_gap_mutation`.
+
 ## [4.5.0] - 2026-07-07
 
 > **Bridge-free libbitcoin integration, public-data GPU parity, and release

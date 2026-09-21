@@ -874,6 +874,29 @@ kernel void lbtc_hash256(
     for (uint j = 0; j < 32; ++j) out[ulong(tid) * 32 + j] = h2[j];
 }
 
+// out[i] = SHA256(SHA256(left32[i] || right32[i])) — Merkle pair parent hash, SoA layout.
+kernel void lbtc_merkle_pair(
+    device const uchar *left32  [[buffer(0)]],   // N × 32
+    device const uchar *right32 [[buffer(1)]],   // N × 32
+    device uchar *out           [[buffer(2)]],   // N × 32
+    constant uint &count        [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    thread uchar combined[64];
+    for (uint j = 0; j < 32; ++j) combined[j]      = left32[ulong(tid) * 32 + j];
+    for (uint j = 0; j < 32; ++j) combined[32 + j] = right32[ulong(tid) * 32 + j];
+    SHA256Ctx ctx1; sha256_init(ctx1);
+    sha256_update(ctx1, combined, 64);
+    thread uchar h1[32];
+    sha256_final(ctx1, h1);
+    SHA256Ctx ctx2; sha256_init(ctx2);
+    sha256_update(ctx2, h1, 32);
+    thread uchar h2[32];
+    sha256_final(ctx2, h2);
+    for (uint j = 0; j < 32; ++j) out[ulong(tid) * 32 + j] = h2[j];
+}
+
 // sha256_update_device: streams SHA-256 blocks directly from `device` memory.
 // The real sha256_update (secp256k1_extended.h) only accepts a `thread const
 // uchar*` pointer, so lbtc_hash256/lbtc_tagged_hash_var copy each row into a
@@ -925,6 +948,55 @@ kernel void lbtc_hash256_var(
     thread uchar h2[32];
     sha256_final(ctx2, h2);                         // SHA256(SHA256(input))
     for (uint j = 0; j < 32; ++j) out[ulong(tid) * 32 + j] = h2[j];
+}
+
+// HASH256 (double SHA-256) of a descriptor-shaped concatenation of per-row
+// field columns — Bitcoin sighash preimage hashing. The host pre-parses the
+// descriptor (same grammar as libbitcoin.hpp's CPU parser) and gathers every
+// referenced field's column into one packed buffer (columns copied verbatim,
+// never a row-assembled preimage) plus four small per-field metadata arrays,
+// since this codebase has no argument-buffer/pointer-array precedent on
+// Metal. Each thread streams its row's fields directly from packed_cols
+// through one running SHA-256 context via sha256_update_device — no per-row
+// preimage buffer, so preimage length is effectively unbounded on-device
+// (the host still enforces the 4 MiB/row policy cap before dispatch).
+// Public data only, no secret material.
+//
+//   col_offsets[fi]     byte offset of field fi's column within packed_cols
+//   strides[fi]         per-row byte stride of field fi within packed_cols
+//   fixed_lens[fi]      0 => variable-length field (read real length below)
+//   varlen_offsets[fi]  element offset of field fi's lengths within packed_varlens
+kernel void lbtc_sighash_descriptor(
+    device const ulong *col_offsets     [[buffer(0)]],
+    device const uint  *strides         [[buffer(1)]],
+    device const uint  *fixed_lens      [[buffer(2)]],
+    device const uint  *varlen_offsets  [[buffer(3)]],
+    constant uint &num_fields           [[buffer(4)]],
+    device const uchar *packed_cols     [[buffer(5)]],
+    device const uint  *packed_varlens  [[buffer(6)]],
+    constant uint &count                [[buffer(7)]],
+    device uchar *out32                 [[buffer(8)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    SHA256Ctx inner; sha256_init(inner);
+    for (uint fi = 0; fi < num_fields; ++fi) {
+        uint stride = strides[fi];
+        uint fixed_len = fixed_lens[fi];
+        uint len = (fixed_len > 0) ? fixed_len : packed_varlens[varlen_offsets[fi] + tid];
+        if (len > stride) len = stride;   // defense in depth: host already enforces var_len<=stride
+        device const uchar *ptr = packed_cols + col_offsets[fi] + ulong(tid) * stride;
+        sha256_update_device(inner, ptr, len);
+    }
+    thread uchar h1[32];
+    sha256_final(inner, h1);                        // SHA256(concatenated fields)
+
+    SHA256Ctx outer; sha256_init(outer);
+    sha256_update(outer, h1, 32);
+    thread uchar h2[32];
+    sha256_final(outer, h2);                         // SHA256(SHA256(concatenated fields))
+    for (uint j = 0; j < 32; ++j) out32[ulong(tid) * 32 + j] = h2[j];
 }
 
 // =============================================================================
@@ -1934,6 +2006,116 @@ kernel void bip352_scan_pipeline_compressed(
     ulong prefix = 0;
     for (int i = 0; i < 8; i++) prefix = (prefix << 8) | ulong(cx[i]);
     prefixes[tid] = prefix;
+}
+
+// =============================================================================
+// BIP-352 multi-spend-key scan (GitHub issue #335)
+// =============================================================================
+// Generalizes bip352_scan_pipeline_compressed to n_spend candidate spend
+// public keys (e.g. base spend key + change-label-derived spend keys,
+// precomputed on the CPU by the caller -- this shader has no BIP-352 label
+// semantics). Phases 1-4 (ECDH via scalar_mul_glv, tagged hash, hash×G) run
+// EXACTLY ONCE per thread/tweak, identical to the single-spend kernel above;
+// only the final mixed point add + prefix extraction repeats, once per
+// spend-key candidate. spend_points/spend_valid are precomputed once (not
+// per tweak) by bip352_decompress_points_kernel below.
+//
+// Buffers:
+//   0: device const uchar*       tweak_pubkeys33 — N × 33-byte compressed
+//   1: constant Scalar256&       scan_scalar     — scan private key
+//   2: device const AffinePoint* spend_points    — n_spend, pre-decompressed
+//   3: device const uchar*       spend_valid     — n_spend, 1=ok 0=invalid
+//   4: constant uint&            n_spend         — spend candidate count
+//   5: device ulong*             prefixes        — N × n_spend, row-major
+//                                                   (tweak-major)
+//   6: constant uint&            count           — N (tweak count)
+// =============================================================================
+
+kernel void bip352_decompress_points_kernel(
+    device const uchar* pubkeys33     [[buffer(0)]],
+    device AffinePoint* out_points    [[buffer(1)]],
+    device uchar*       out_valid     [[buffer(2)]],
+    constant uint&       count        [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    JacobianPoint p;
+    if (lbtc_point_from_compressed(pubkeys33 + tid * 33, p)) {
+        out_points[tid].x = p.x;
+        out_points[tid].y = p.y;
+        out_valid[tid] = 1;
+    } else {
+        out_valid[tid] = 0;
+    }
+}
+
+kernel void bip352_scan_pipeline_compressed_multispend(
+    device const uchar*       tweak_pubkeys33 [[buffer(0)]],
+    constant Scalar256&       scan_scalar     [[buffer(1)]],
+    device const AffinePoint* spend_points    [[buffer(2)]],
+    device const uchar*       spend_valid     [[buffer(3)]],
+    constant uint&            n_spend         [[buffer(4)]],
+    device ulong*             prefixes        [[buffer(5)]],
+    constant uint&            count           [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    device ulong* row = prefixes + (ulong)tid * (ulong)n_spend;
+
+    // Decompress tweak pubkey on GPU
+    JacobianPoint tweak_jac;
+    if (!lbtc_point_from_compressed(tweak_pubkeys33 + tid * 33, tweak_jac)) {
+        for (uint j = 0; j < n_spend; j++) row[j] = 0;
+        return;
+    }
+    AffinePoint tweak; tweak.x = tweak_jac.x; tweak.y = tweak_jac.y;
+
+    // Phase 1: shared = scan_scalar × tweak -- ONCE per tweak.
+    thread Scalar256 local_scan_scalar = scan_scalar;
+    JacobianPoint shared = scalar_mul_glv(tweak, local_scan_scalar);
+    if (shared.infinity != 0) {
+        for (uint j = 0; j < n_spend; j++) row[j] = 0;
+        return;
+    }
+
+    // Phase 2: serialize shared secret -- ONCE per tweak.
+    AffinePoint shared_aff = jacobian_to_affine(shared);
+    uchar x_bytes[32], y_bytes[32];
+    field_to_bytes(shared_aff.x, x_bytes);
+    field_to_bytes(shared_aff.y, y_bytes);
+    uchar ser[37];
+    ser[0] = (y_bytes[31] & 1u) ? 0x03 : 0x02;
+    for (int i = 0; i < 32; i++) ser[1 + i] = x_bytes[i];
+    ser[33] = 0; ser[34] = 0; ser[35] = 0; ser[36] = 0;
+
+    // Phase 3: tagged SHA-256 -- ONCE per tweak.
+    SHA256Ctx sha_ctx;
+    for (int i = 0; i < 8; i++) sha_ctx.h[i] = BIP352_SHAREDSECRET_MIDSTATE[i];
+    sha_ctx.buf_len = 0;
+    sha_ctx.total_len_lo = 64;
+    sha_ctx.total_len_hi = 0;
+    sha256_update(sha_ctx, ser, 37);
+    uchar hash[32];
+    sha256_final(sha_ctx, hash);
+
+    // Phase 4: hash × G -- ONCE per tweak.
+    Scalar256 hs = scalar_from_bytes(hash);
+    JacobianPoint out_pt = scalar_mul_generator_windowed(hs);
+
+    // Phase 5-6: per spend-key candidate -- one mixed add + prefix extract.
+    for (uint j = 0; j < n_spend; j++) {
+        if (!spend_valid[j]) { row[j] = 0; continue; }
+        AffinePoint spend = spend_points[j];
+        JacobianPoint cand = jacobian_add_mixed(out_pt, spend);
+        if (cand.infinity != 0) { row[j] = 0; continue; }
+        AffinePoint cand_aff = jacobian_to_affine(cand);
+        uchar cx[32];
+        field_to_bytes(cand_aff.x, cx);
+        ulong prefix = 0;
+        for (int i = 0; i < 8; i++) prefix = (prefix << 8) | ulong(cx[i]);
+        row[j] = prefix;
+    }
 }
 
 // =============================================================================

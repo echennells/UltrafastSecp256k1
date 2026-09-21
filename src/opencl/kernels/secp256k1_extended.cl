@@ -894,74 +894,73 @@ inline void scalar_mul_glv_impl(JacobianPoint* r, const Scalar* k, const AffineP
 }
 
 // Precomputed generator multiplication using fixed window w=4.
-// Uses a hard-coded affine table of {0G..15G} — eliminates per-thread table
-// construction and uses mixed (J+A) additions instead of J+J (saves ~5 field_muls per add).
-inline void scalar_mul_generator_windowed_impl(JacobianPoint* r, const Scalar* k) {
-    // Precomputed affine table: table[i] = i*G for i = 1..15.
-    AffinePoint table[16];
-    table[0].x.limbs[0] = 0; table[0].x.limbs[1] = 0; table[0].x.limbs[2] = 0; table[0].x.limbs[3] = 0;
-    table[0].y.limbs[0] = 0; table[0].y.limbs[1] = 0; table[0].y.limbs[2] = 0; table[0].y.limbs[3] = 0;
-    table[1].x.limbs[0] = 0x59F2815B16F81798UL; table[1].x.limbs[1] = 0x029BFCDB2DCE28D9UL;
-    table[1].x.limbs[2] = 0x55A06295CE870B07UL; table[1].x.limbs[3] = 0x79BE667EF9DCBBACUL;
-    table[1].y.limbs[0] = 0x9C47D08FFB10D4B8UL; table[1].y.limbs[1] = 0xFD17B448A6855419UL;
-    table[1].y.limbs[2] = 0x5DA4FBFC0E1108A8UL; table[1].y.limbs[3] = 0x483ADA7726A3C465UL;
-    table[2].x.limbs[0] = 0xABAC09B95C709EE5UL; table[2].x.limbs[1] = 0x5C778E4B8CEF3CA7UL;
-    table[2].x.limbs[2] = 0x3045406E95C07CD8UL; table[2].x.limbs[3] = 0xC6047F9441ED7D6DUL;
-    table[2].y.limbs[0] = 0x236431A950CFE52AUL; table[2].y.limbs[1] = 0xF7F632653266D0E1UL;
-    table[2].y.limbs[2] = 0xA3C58419466CEAEEUL; table[2].y.limbs[3] = 0x1AE168FEA63DC339UL;
-    table[3].x.limbs[0] = 0x8601F113BCE036F9UL; table[3].x.limbs[1] = 0xB531C845836F99B0UL;
-    table[3].x.limbs[2] = 0x49344F85F89D5229UL; table[3].x.limbs[3] = 0xF9308A019258C310UL;
-    table[3].y.limbs[0] = 0x6CB9FD7584B8E672UL; table[3].y.limbs[1] = 0x6500A99934C2231BUL;
-    table[3].y.limbs[2] = 0x0FE337E62A37F356UL; table[3].y.limbs[3] = 0x388F7B0F632DE814UL;
-    table[4].x.limbs[0] = 0x74FA94ABE8C4CD13UL; table[4].x.limbs[1] = 0xCC6C13900EE07584UL;
-    table[4].x.limbs[2] = 0x581E4904930B1404UL; table[4].x.limbs[3] = 0xE493DBF1C10D80F3UL;
-    table[4].y.limbs[0] = 0xCFE97BDC47739922UL; table[4].y.limbs[1] = 0xD967AE33BFBDFE40UL;
-    table[4].y.limbs[2] = 0x5642E2098EA51448UL; table[4].y.limbs[3] = 0x51ED993EA0D455B7UL;
-    table[5].x.limbs[0] = 0xCBA8D569B240EFE4UL; table[5].x.limbs[1] = 0xE88B84BDDC619AB7UL;
-    table[5].x.limbs[2] = 0x55B4A7250A5C5128UL; table[5].x.limbs[3] = 0x2F8BDE4D1A072093UL;
-    table[5].y.limbs[0] = 0xDCA87D3AA6AC62D6UL; table[5].y.limbs[1] = 0xF788271BAB0D6840UL;
-    table[5].y.limbs[2] = 0xD4DBA9DDA6C9C426UL; table[5].y.limbs[3] = 0xD8AC222636E5E3D6UL;
-    table[6].x.limbs[0] = 0x2F057A1460297556UL; table[6].x.limbs[1] = 0x82F6472F8568A18BUL;
-    table[6].x.limbs[2] = 0x20453A14355235D3UL; table[6].x.limbs[3] = 0xFFF97BD5755EEEA4UL;
-    table[6].y.limbs[0] = 0x3C870C36B075F297UL; table[6].y.limbs[1] = 0xDE80F0F6518FE4A0UL;
-    table[6].y.limbs[2] = 0xF3BE96017F45C560UL; table[6].y.limbs[3] = 0xAE12777AACFBB620UL;
-    table[7].x.limbs[0] = 0xE92BDDEDCAC4F9BCUL; table[7].x.limbs[1] = 0x3D419B7E0330E39CUL;
-    table[7].x.limbs[2] = 0xA398F365F2EA7A0EUL; table[7].x.limbs[3] = 0x5CBDF0646E5DB4EAUL;
-    table[7].y.limbs[0] = 0xA5082628087264DAUL; table[7].y.limbs[1] = 0xA813D0B813FDE7B5UL;
-    table[7].y.limbs[2] = 0xA3178D6D861A54DBUL; table[7].y.limbs[3] = 0x6AEBCA40BA255960UL;
-    table[8].x.limbs[0] = 0x67784EF3E10A2A01UL; table[8].x.limbs[1] = 0x0A1BDD05E5AF888AUL;
-    table[8].x.limbs[2] = 0xAFF3843FB70F3C2FUL; table[8].x.limbs[3] = 0x2F01E5E15CCA351DUL;
-    table[8].y.limbs[0] = 0xB5DA2CB76CBDE904UL; table[8].y.limbs[1] = 0xC2E213D6BA5B7617UL;
-    table[8].y.limbs[2] = 0x293D082A132D13B4UL; table[8].y.limbs[3] = 0x5C4DA8A741539949UL;
-    table[9].x.limbs[0] = 0xC35F110DFC27CCBEUL; table[9].x.limbs[1] = 0xE09796974C57E714UL;
-    table[9].x.limbs[2] = 0x09AD178A9F559ABDUL; table[9].x.limbs[3] = 0xACD484E2F0C7F653UL;
-    table[9].y.limbs[0] = 0x05CC262AC64F9C37UL; table[9].y.limbs[1] = 0xADD888A4375F8E0FUL;
-    table[9].y.limbs[2] = 0x64380971763B61E9UL; table[9].y.limbs[3] = 0xCC338921B0A7D9FDUL;
-    table[10].x.limbs[0] = 0x52A68E2A47E247C7UL; table[10].x.limbs[1] = 0x3442D49B1943C2B7UL;
-    table[10].x.limbs[2] = 0x35477C7B1AE6AE5DUL; table[10].x.limbs[3] = 0xA0434D9E47F3C862UL;
-    table[10].y.limbs[0] = 0x3CBEE53B037368D7UL; table[10].y.limbs[1] = 0x6F794C2ED877A159UL;
-    table[10].y.limbs[2] = 0xA3B6C7E693A24C69UL; table[10].y.limbs[3] = 0x893ABA425419BC27UL;
-    table[11].x.limbs[0] = 0xBBEC17895DA008CBUL; table[11].x.limbs[1] = 0x5649980BE5C17891UL;
-    table[11].x.limbs[2] = 0x5EF4246B70C65AACUL; table[11].x.limbs[3] = 0x774AE7F858A9411EUL;
-    table[11].y.limbs[0] = 0x301D74C9C953C61BUL; table[11].y.limbs[1] = 0x372DB1E2DFF9D6A8UL;
-    table[11].y.limbs[2] = 0x0243DD56D7B7B365UL; table[11].y.limbs[3] = 0xD984A032EB6B5E19UL;
-    table[12].x.limbs[0] = 0xC5B0F47070AFE85AUL; table[12].x.limbs[1] = 0x687CF4419620095BUL;
-    table[12].x.limbs[2] = 0x15C38F004D734633UL; table[12].x.limbs[3] = 0xD01115D548E7561BUL;
-    table[12].y.limbs[0] = 0x6B051B13F4062327UL; table[12].y.limbs[1] = 0x79238C5DD9A86D52UL;
-    table[12].y.limbs[2] = 0xA8B64537E17BD815UL; table[12].y.limbs[3] = 0xA9F34FFDC815E0D7UL;
-    table[13].x.limbs[0] = 0xDEEDDF8F19405AA8UL; table[13].x.limbs[1] = 0xB075FBC6610E58CDUL;
-    table[13].x.limbs[2] = 0xC7D1D205C3748651UL; table[13].x.limbs[3] = 0xF28773C2D975288BUL;
-    table[13].y.limbs[0] = 0x29B5CB52DB03ED81UL; table[13].y.limbs[1] = 0x3A1A06DA521FA91FUL;
-    table[13].y.limbs[2] = 0x758212EB65CDAF47UL; table[13].y.limbs[3] = 0x0AB0902E8D880A89UL;
-    table[14].x.limbs[0] = 0xE49B241A60E823E4UL; table[14].x.limbs[1] = 0x26AA7B63678949E6UL;
-    table[14].x.limbs[2] = 0xFD64E67F07D38E32UL; table[14].x.limbs[3] = 0x499FDF9E895E719CUL;
-    table[14].y.limbs[0] = 0xC65F40D403A13F5BUL; table[14].y.limbs[1] = 0x464279C27A3F95BCUL;
-    table[14].y.limbs[2] = 0x90F044E4A7B3D464UL; table[14].y.limbs[3] = 0xCAC2F6C4B54E8551UL;
-    table[15].x.limbs[0] = 0x44ADBCF8E27E080EUL; table[15].x.limbs[1] = 0x31E5946F3C85F79EUL;
-    table[15].x.limbs[2] = 0x5A465AE3095FF411UL; table[15].x.limbs[3] = 0xD7924D4F7D43EA96UL;
-    table[15].y.limbs[0] = 0xC504DC9FF6A26B58UL; table[15].y.limbs[1] = 0xEA40AF2BD896D3A5UL;
-    table[15].y.limbs[2] = 0x83842EC228CC6DEFUL; table[15].y.limbs[3] = 0x581E2872A86C72A6UL;
+// The window-4 precomputed affine table {0*G..15*G} is declared ONCE at
+// OpenCL program scope in __constant address space (GENERATOR_TABLE_W4)
+// instead of being rebuilt as a per-invocation array, as would happen with
+// an unqualified function-scope AffinePoint table[16]. In OpenCL C 1.2 such
+// an unqualified declaration is PRIVATE address-space, per-work-item
+// storage (NOT __local/work-group-shared memory) that would be rebuilt
+// on every kernel-thread call. Storage-only change: indexing, arithmetic, and
+// control flow in scalar_mul_generator_windowed_impl below are unchanged --
+// only WHERE the 16-entry table lives changed (measured ~1056B -> ~32B
+// CL_KERNEL_PRIVATE_MEM_SIZE_bytes on RTX 5060 Ti, see
+// docs/BACKEND_ASSURANCE_MATRIX.md). Values are byte-identical to the
+// previous per-call literal table (verified programmatically, not just by
+// eye -- see ci/check_opencl_generator_w4.py and
+// benchmarks/secondary_invariant_constants/opencl_generator_w4_ab/). Uses
+// mixed (J+A) additions instead of J+J (saves ~5 field_muls per add).
+__constant AffinePoint GENERATOR_TABLE_W4[16] = {
+    // i = 0 (unused sentinel: real code only ever indexes 1..15, idx==0
+    // skips the point_from_affine/point_add_mixed_unchecked call entirely)
+    { {{0,0,0,0}}, {{0,0,0,0}} },
+    // 1*G
+    { {{0x59F2815B16F81798UL,0x029BFCDB2DCE28D9UL,0x55A06295CE870B07UL,0x79BE667EF9DCBBACUL}},
+      {{0x9C47D08FFB10D4B8UL,0xFD17B448A6855419UL,0x5DA4FBFC0E1108A8UL,0x483ADA7726A3C465UL}} },
+    // 2*G
+    { {{0xABAC09B95C709EE5UL,0x5C778E4B8CEF3CA7UL,0x3045406E95C07CD8UL,0xC6047F9441ED7D6DUL}},
+      {{0x236431A950CFE52AUL,0xF7F632653266D0E1UL,0xA3C58419466CEAEEUL,0x1AE168FEA63DC339UL}} },
+    // 3*G
+    { {{0x8601F113BCE036F9UL,0xB531C845836F99B0UL,0x49344F85F89D5229UL,0xF9308A019258C310UL}},
+      {{0x6CB9FD7584B8E672UL,0x6500A99934C2231BUL,0x0FE337E62A37F356UL,0x388F7B0F632DE814UL}} },
+    // 4*G
+    { {{0x74FA94ABE8C4CD13UL,0xCC6C13900EE07584UL,0x581E4904930B1404UL,0xE493DBF1C10D80F3UL}},
+      {{0xCFE97BDC47739922UL,0xD967AE33BFBDFE40UL,0x5642E2098EA51448UL,0x51ED993EA0D455B7UL}} },
+    // 5*G
+    { {{0xCBA8D569B240EFE4UL,0xE88B84BDDC619AB7UL,0x55B4A7250A5C5128UL,0x2F8BDE4D1A072093UL}},
+      {{0xDCA87D3AA6AC62D6UL,0xF788271BAB0D6840UL,0xD4DBA9DDA6C9C426UL,0xD8AC222636E5E3D6UL}} },
+    // 6*G
+    { {{0x2F057A1460297556UL,0x82F6472F8568A18BUL,0x20453A14355235D3UL,0xFFF97BD5755EEEA4UL}},
+      {{0x3C870C36B075F297UL,0xDE80F0F6518FE4A0UL,0xF3BE96017F45C560UL,0xAE12777AACFBB620UL}} },
+    // 7*G
+    { {{0xE92BDDEDCAC4F9BCUL,0x3D419B7E0330E39CUL,0xA398F365F2EA7A0EUL,0x5CBDF0646E5DB4EAUL}},
+      {{0xA5082628087264DAUL,0xA813D0B813FDE7B5UL,0xA3178D6D861A54DBUL,0x6AEBCA40BA255960UL}} },
+    // 8*G
+    { {{0x67784EF3E10A2A01UL,0x0A1BDD05E5AF888AUL,0xAFF3843FB70F3C2FUL,0x2F01E5E15CCA351DUL}},
+      {{0xB5DA2CB76CBDE904UL,0xC2E213D6BA5B7617UL,0x293D082A132D13B4UL,0x5C4DA8A741539949UL}} },
+    // 9*G
+    { {{0xC35F110DFC27CCBEUL,0xE09796974C57E714UL,0x09AD178A9F559ABDUL,0xACD484E2F0C7F653UL}},
+      {{0x05CC262AC64F9C37UL,0xADD888A4375F8E0FUL,0x64380971763B61E9UL,0xCC338921B0A7D9FDUL}} },
+    // 10*G
+    { {{0x52A68E2A47E247C7UL,0x3442D49B1943C2B7UL,0x35477C7B1AE6AE5DUL,0xA0434D9E47F3C862UL}},
+      {{0x3CBEE53B037368D7UL,0x6F794C2ED877A159UL,0xA3B6C7E693A24C69UL,0x893ABA425419BC27UL}} },
+    // 11*G
+    { {{0xBBEC17895DA008CBUL,0x5649980BE5C17891UL,0x5EF4246B70C65AACUL,0x774AE7F858A9411EUL}},
+      {{0x301D74C9C953C61BUL,0x372DB1E2DFF9D6A8UL,0x0243DD56D7B7B365UL,0xD984A032EB6B5E19UL}} },
+    // 12*G
+    { {{0xC5B0F47070AFE85AUL,0x687CF4419620095BUL,0x15C38F004D734633UL,0xD01115D548E7561BUL}},
+      {{0x6B051B13F4062327UL,0x79238C5DD9A86D52UL,0xA8B64537E17BD815UL,0xA9F34FFDC815E0D7UL}} },
+    // 13*G
+    { {{0xDEEDDF8F19405AA8UL,0xB075FBC6610E58CDUL,0xC7D1D205C3748651UL,0xF28773C2D975288BUL}},
+      {{0x29B5CB52DB03ED81UL,0x3A1A06DA521FA91FUL,0x758212EB65CDAF47UL,0x0AB0902E8D880A89UL}} },
+    // 14*G
+    { {{0xE49B241A60E823E4UL,0x26AA7B63678949E6UL,0xFD64E67F07D38E32UL,0x499FDF9E895E719CUL}},
+      {{0xC65F40D403A13F5BUL,0x464279C27A3F95BCUL,0x90F044E4A7B3D464UL,0xCAC2F6C4B54E8551UL}} },
+    // 15*G
+    { {{0x44ADBCF8E27E080EUL,0x31E5946F3C85F79EUL,0x5A465AE3095FF411UL,0xD7924D4F7D43EA96UL}},
+      {{0xC504DC9FF6A26B58UL,0xEA40AF2BD896D3A5UL,0x83842EC228CC6DEFUL,0x581E2872A86C72A6UL}} },
+};
 
+inline void scalar_mul_generator_windowed_impl(JacobianPoint* r, const Scalar* k) {
     // Process scalar 4 bits at a time (MSB first)
     point_set_infinity(r);
     int started = 0;
@@ -979,11 +978,22 @@ inline void scalar_mul_generator_windowed_impl(JacobianPoint* r, const Scalar* k
             }
 
             if (idx != 0) {
+                // Copy the __constant table entry into a private temporary
+                // before handing it to point_from_affine / point_add_mixed_unchecked:
+                // those shared helpers declare their AffinePoint* parameter with no
+                // address-space qualifier, which OpenCL C 1.2 defaults to __private,
+                // and __constant is a distinct named address space that is not
+                // implicitly convertible to a __private pointer parameter on every
+                // OpenCL C 1.2 implementation. This copy is the "read from
+                // __constant" storage change itself (one constant-memory load into
+                // a private struct) -- it does not reintroduce the removed
+                // per-call 16-entry table rebuild.
+                AffinePoint sel = GENERATOR_TABLE_W4[idx];
                 if (!started) {
-                    point_from_affine(r, &table[idx]);
+                    point_from_affine(r, &sel);
                     started = 1;
                 } else {
-                    point_add_mixed_unchecked(r, r, &table[idx]);
+                    point_add_mixed_unchecked(r, r, &sel);
                 }
             }
         }
@@ -1194,10 +1204,32 @@ inline void rfc6979_nonce_impl(const Scalar* priv, const uchar msg_hash[32], Sca
 // CT Primitives (needed for constant-time signing paths — Guardrails #8, #14)
 // =============================================================================
 // Include order matters: ct_ops → ct_field → ct_scalar → ct_point
+//
+// SECP256K1_OPENCL_SCAN_ONLY (GitHub issue #415, the OpenCL twin of #335):
+// a consumer that embeds only the scan subset of these kernels -- field, point,
+// gen_table_w8, this file, affine, bip352 -- concatenates them with every
+// #include line stripped and compiles the result at runtime. It builds a
+// scan-only kernel (a BIP-352 batch scanner, say) and never enqueues
+// ecdsa_sign / schnorr_sign / ecdh. The four ct_*.cl files below are not in
+// that embed set, so every ct_* symbol and CT* type they define is undefined
+// in such a build. OpenCL will not dead-strip a function whose callees are
+// unresolved -- the same thing Metal's AIR compiler does not guarantee -- so
+// the sign wrappers fail to compile even though nothing calls them:
+//
+//     <kernel>:3348:5: error: unknown type name 'CTJacobianPoint'
+//     <kernel>:3349:5: warning: implicit declaration of ct_generator_mul_impl
+//
+// Defining SECP256K1_OPENCL_SCAN_ONLY excludes these includes AND every
+// function and kernel that reaches them -- ecdsa_sign_impl, schnorr_sign_impl,
+// the ECDH block, ecdsa_sign_recoverable_impl, and the ecdsa_sign /
+// schnorr_sign kernels -- restoring self-containment for a scan-only embed.
+// This repo's own build never defines it, so the default kernels are unchanged.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 #include "secp256k1_ct_ops.cl"
 #include "secp256k1_ct_field.cl"
 #include "secp256k1_ct_scalar.cl"
 #include "secp256k1_ct_point.cl"
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 // =============================================================================
 // LAYER 4: ECDSA Sign / Verify
@@ -1286,6 +1318,9 @@ inline int lbtc_parse_opaque_signature(__global const uchar* opaque,
     return 1;
 }
 
+// Calls ct_generator_mul_impl / ct_point_to_jacobian / ct_scalar_inverse_impl —
+// see the SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 inline int ecdsa_sign_impl(const uchar msg_hash[32], const Scalar* priv, ECDSASignature* sig) {
     if (scalar_is_zero(priv)) return 0;
 
@@ -1341,9 +1376,15 @@ inline int ecdsa_sign_impl(const uchar msg_hash[32], const Scalar* priv, ECDSASi
 
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 inline int ecdsa_verify_impl(const uchar msg_hash[32], const JacobianPoint* pubkey, const ECDSASignature* sig) {
     if (scalar_is_zero(&sig->r) || scalar_is_zero(&sig->s)) return 0;
+
+    // Reject out-of-range scalars (r >= n or s >= n) so every OpenCL verify
+    // route matches the strict compact/opaque parse contract (defense in depth:
+    // ecdsa_verify_impl itself previously reduced these mod n).
+    if (lbtc_scalar_ge_order(&sig->r) || lbtc_scalar_ge_order(&sig->s)) return 0;
 
     Scalar z;
     scalar_from_bytes_impl(msg_hash, &z);
@@ -1489,6 +1530,10 @@ typedef struct {
     Scalar s;
 } SchnorrSignature;
 
+// Calls ct_generator_mul_impl / ct_point_to_jacobian — see the
+// SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+// SchnorrSignature above stays outside the guard: schnorr_verify_impl needs it.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
                                const uchar aux_rand[32], SchnorrSignature* sig) {
     if (scalar_is_zero(priv)) return 0;
@@ -1607,6 +1652,7 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
 
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
                                  const SchnorrSignature* sig) {
@@ -1663,6 +1709,9 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
 // LAYER 5b: ECDH
 // =============================================================================
 
+// The whole ECDH block reaches ct_point_to_jacobian / ct_jacobian_to_affine —
+// see the SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 // P1-SEC-001 FIX: constant-time scalar multiplication for ECDH on a variable
 // base point (AffinePoint input).  The GLV/wNAF path (scalar_mul_glv_impl) is
 // variable-time and MUST NOT be used when the scalar is a private key.
@@ -1751,6 +1800,7 @@ inline int ecdh_compute_impl(const Scalar* priv, const AffinePoint* peer, uchar 
     sha256_final(&ctx, out);
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 // =============================================================================
 // LAYER 5c: Key Recovery
@@ -1761,6 +1811,9 @@ typedef struct {
     int recid;
 } RecoverableSignature;
 
+// Calls ct_generator_mul_impl / ct_jacobian_to_affine — see the
+// SECP256K1_OPENCL_SCAN_ONLY note at the top of the CT Primitives section.
+#ifndef SECP256K1_OPENCL_SCAN_ONLY
 inline int ecdsa_sign_recoverable_impl(const uchar msg_hash[32], const Scalar* priv,
                                          RecoverableSignature* rsig) {
     if (scalar_is_zero(priv)) return 0;
@@ -1825,6 +1878,7 @@ inline int ecdsa_sign_recoverable_impl(const uchar msg_hash[32], const Scalar* p
     rsig->recid = recid;
     return 1;
 }
+#endif // !SECP256K1_OPENCL_SCAN_ONLY
 
 // Lift x as FieldElement with parity control
 inline int lift_x_field_impl(const FieldElement* x_fe, int parity, JacobianPoint* p) {
@@ -2053,7 +2107,7 @@ inline void msm_pippenger_impl(const Scalar* scalars, const AffinePoint* points,
 // OpenCL Dispatch Kernels — Extended Operations
 // =============================================================================
 
-#ifndef SECP256K1_CT_SIGN_KERNELS
+#if !defined(SECP256K1_CT_SIGN_KERNELS) && !defined(SECP256K1_OPENCL_SCAN_ONLY)
 // Variable-time signing kernel — superseded by secp256k1_ct_extended.cl when
 // SECP256K1_CT_SIGN_KERNELS is defined. Do NOT dispatch on secret inputs.
 __kernel void ecdsa_sign(
@@ -2074,7 +2128,7 @@ __kernel void ecdsa_sign(
     success_flags[gid] = ecdsa_sign_impl(msg, &priv, &sig);
     signatures[gid] = sig;
 }
-#endif /* SECP256K1_CT_SIGN_KERNELS */
+#endif /* !SECP256K1_CT_SIGN_KERNELS && !SECP256K1_OPENCL_SCAN_ONLY */
 
 __kernel void ecdsa_verify(
     __global const uchar* msg_hashes,
@@ -2453,6 +2507,31 @@ __kernel void lbtc_hash256(
     for (int i = 0; i < 32; ++i) out32[(ulong)gid * 32 + i] = h2[i];
 }
 
+/* out[i] = SHA256(SHA256(left32[i] || right32[i])) — Merkle pair parent hash, SoA layout. */
+__kernel void lbtc_merkle_pair(
+    __global const uchar* left32,
+    __global const uchar* right32,
+    __global uchar* out32,
+    const uint count
+) {
+    uint gid = get_global_id(0);
+    if (gid >= count) return;
+    uchar combined[64];
+    for (int j = 0; j < 32; ++j) combined[j]      = left32[(ulong)gid * 32 + j];
+    for (int j = 0; j < 32; ++j) combined[32 + j] = right32[(ulong)gid * 32 + j];
+    uchar h1[32];
+    SHA256Ctx ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, combined, 64);
+    sha256_final(&ctx, h1);
+    uchar h2[32];
+    SHA256Ctx ctx2;
+    sha256_init(&ctx2);
+    sha256_update(&ctx2, h1, 32);
+    sha256_final(&ctx2, h2);
+    for (int i = 0; i < 32; ++i) out32[(ulong)gid * 32 + i] = h2[i];
+}
+
 /* out[i] = SHA256(SHA256(row_i)), where row_i = inputs[i*stride .. i*stride+input_lens[i]).
  * Generic batch variable-length double-SHA256: row i is read directly from
  * __global memory via sha256_update_global (O(1) private scratch), so rows
@@ -2480,6 +2559,59 @@ __kernel void lbtc_hash256_var(
     uchar h2[32];
     sha256_final(&ctx2, h2);              // SHA256(SHA256(row))
     for (int i = 0; i < 32; ++i) out32[(ulong)gid * 32 + i] = h2[i];
+}
+
+/* out32[i] = HASH256(descriptor-shaped concatenation of per-row field columns)
+ * -- Bitcoin sighash preimage hashing. The host pre-parses the descriptor
+ * (same grammar as libbitcoin.hpp's CPU parser) and gathers every referenced
+ * field's column into one packed buffer (columns copied verbatim, never a
+ * row-assembled preimage) plus four small per-field metadata arrays, since
+ * OpenCL 1.2 cannot bind an array of __global buffer pointers as a single
+ * kernel argument (unlike CUDA's device pointer array). Each work item
+ * streams its row's fields directly from packed_cols through one running
+ * SHA-256 context via sha256_update_global -- no per-row preimage buffer, so
+ * preimage length is effectively unbounded on-device (the host still enforces
+ * the 4 MiB/row policy cap before dispatch). Public data only, no secret
+ * material.
+ *
+ *   col_offsets[fi]    byte offset of field fi's column within packed_cols
+ *   strides[fi]        per-row byte stride of field fi within packed_cols
+ *   fixed_lens[fi]      0 => variable-length field (read real length below)
+ *   varlen_offsets[fi]  element offset of field fi's lengths within packed_varlens
+ */
+__kernel void lbtc_sighash_descriptor(
+    __global const ulong* col_offsets,
+    __global const uint*  strides,
+    __global const uint*  fixed_lens,
+    __global const uint*  varlen_offsets,
+    const uint num_fields,
+    __global const uchar* packed_cols,
+    __global const uint*  packed_varlens,
+    const uint count,
+    __global uchar* out32
+) {
+    uint gid = get_global_id(0);
+    if (gid >= count) return;
+
+    SHA256Ctx inner;
+    sha256_init(&inner);
+    for (uint fi = 0; fi < num_fields; ++fi) {
+        const uint stride = strides[fi];
+        const uint fixed_len = fixed_lens[fi];
+        uint len = (fixed_len > 0) ? fixed_len : packed_varlens[varlen_offsets[fi] + gid];
+        if (len > stride) len = stride;   /* defense in depth: host already enforces var_len<=stride */
+        __global const uchar* ptr = packed_cols + col_offsets[fi] + (ulong)gid * stride;
+        sha256_update_global(&inner, ptr, len);
+    }
+    uchar h1[32];
+    sha256_final(&inner, h1);             // SHA256(concatenated fields)
+
+    SHA256Ctx outer;
+    sha256_init(&outer);
+    sha256_update(&outer, h1, 32);
+    uchar h2[32];
+    sha256_final(&outer, h2);             // SHA256(SHA256(concatenated fields))
+    for (int j = 0; j < 32; ++j) out32[(ulong)gid * 32 + j] = h2[j];
 }
 
 /* ecdh_scalar_mul_compressed — GPU-side pubkey decompress + scalar multiplication.
@@ -2547,7 +2679,7 @@ __kernel void ecrecover_batch(
     }
 }
 
-#ifndef SECP256K1_CT_SIGN_KERNELS
+#if !defined(SECP256K1_CT_SIGN_KERNELS) && !defined(SECP256K1_OPENCL_SCAN_ONLY)
 // Variable-time signing kernel — superseded by secp256k1_ct_extended.cl when
 // SECP256K1_CT_SIGN_KERNELS is defined. Do NOT dispatch on secret inputs.
 __kernel void schnorr_sign(
@@ -2569,7 +2701,7 @@ __kernel void schnorr_sign(
     success_flags[gid] = schnorr_sign_impl(&priv, msg, aux, &sig);
     signatures[gid] = sig;
 }
-#endif /* SECP256K1_CT_SIGN_KERNELS */
+#endif /* !SECP256K1_CT_SIGN_KERNELS && !SECP256K1_OPENCL_SCAN_ONLY */
 
 __kernel void schnorr_verify(
     __global const uchar* pubkeys_x,

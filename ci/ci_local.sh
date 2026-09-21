@@ -223,10 +223,25 @@ run_caas_check "Secret parse strictness (Rule 11)"      python3 ci/check_secret_
 run_caas_check "Protocol invariants (FROST threshold)"  python3 ci/check_protocol_invariants.py
 run_caas_check "Nonce erase coverage (BIP-327)"         python3 ci/check_nonce_erase_coverage.py
 # P2-CI-004: these three gates run in gate.yml caas-security but were missing locally
+# Refresh the source_graph_kit DB and bind it to current HEAD before the quality
+# gate runs, so a stale or pre-commit graph does not produce a spurious freshness
+# or graph_head_match FAIL (check_source_graph_quality.py compares
+# graph_build_revision against `git rev-parse HEAD`). Hard-fail, not best-effort.
+printf "  %-52s" "Refresh source graph (build -i)..."
+if _sg_refresh_out=$(python3 tools/source_graph_kit/source_graph.py build -i 2>&1); then
+  echo -e "${GREEN}OK${NC}"
+  ((pass++))
+  gate_results["Refresh source graph"]="pass"
+else
+  echo -e "${RED}FAIL${NC}"
+  echo "$_sg_refresh_out" | tail -6 | sed 's/^/    /'
+  ((fail++)); ((_caas_fail++))
+  gate_results["Refresh source graph"]="fail"
+fi
 run_caas_check "Source graph quality"                   python3 ci/check_source_graph_quality.py
 run_caas_check "Bitcoin Core test results"              python3 ci/check_bitcoin_core_test_results.py
 run_caas_check "Core build mode"                        python3 ci/check_core_build_mode.py
-run_caas_check "Secret path change gate"                python3 ci/check_secret_path_changes.py --base origin/main
+run_caas_check "Secret path change gate"                python3 ci/check_secret_path_changes.py --base origin/dev
 echo ""
 
 if [[ $FULL -eq 0 ]]; then
@@ -291,6 +306,20 @@ if [[ $FULL -eq 1 ]]; then
       echo -e "${YELLOW}SKIP${NC} (binary not built)"
     fi
     run_check "BIP-39 NFKD"            "$BUILD_DIR/audit/test_exploit_bip39_nfkd_standalone"
+
+    # Issue #335 round 6: dual-CWD sweep of every mandatory ALL_MODULES[]
+    # entry (repo root vs an unrelated /tmp CWD). Needs a real compiled
+    # binary, so it lives here (--full tier) rather than in the no-build
+    # fast gates. Reuse this build's already-compiled binary when present;
+    # otherwise let the gate build its own (bounded, /tmp-scratch) copy.
+    echo -e "${BOLD}[7.1] Audit CWD-independence (dual-CWD sweep)${NC}"
+    if [[ -x "$BUILD_DIR/audit/unified_audit_runner" ]]; then
+      run_caas_check "Audit CWD-independence (dual-CWD sweep)" \
+        python3 ci/check_audit_cwd_independence.py --binary "$BUILD_DIR/audit/unified_audit_runner"
+    else
+      run_caas_check "Audit CWD-independence (dual-CWD sweep, self-built)" \
+        python3 ci/check_audit_cwd_independence.py --build
+    fi
   fi
 
   rm -rf "$BUILD_DIR" 2>/dev/null || true

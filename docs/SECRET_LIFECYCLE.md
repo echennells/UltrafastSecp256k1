@@ -1,6 +1,344 @@
 # Secret Lifecycle Review
 
-**Last updated**: 2026-06-17 | **Version**: 4.5.0
+**Last updated**: 2026-09-21 | **Version**: 4.6.0
+
+### 2026-09-21 - v4.6.0 lifecycle review: one real defect, and it was nonce reuse
+
+**The defect: the BCH 2019 Schnorr shim shared its nonce with ECDSA.** This is a
+secret-lifecycle failure of the strictest kind — not a buffer that outlived its
+use, but the same nonce derived twice for two different schemes. The signer
+called `secp256k1::rfc6979_nonce(d, msg)`, the identical function with the
+identical arguments that `ct::ecdsa_sign` calls, so signing one message with one
+key under both schemes produced one `k` across `s1 = k^-1(z + r*d)` and the
+Schnorr form. Two equations, two unknowns, private key recovered.
+
+`rfc6979_nonce_libsecp_compat` now takes an optional `algo16` tag to separate the
+derivations; passing `nullptr` keeps every existing caller byte-for-byte on
+libsecp256k1's `"ECDSA\0..."` tag, so no other lifecycle changes.
+
+Why it survived: the BCH shim builds only under
+`SECP256K1_BCHN_SHIM_BUILD_TESTS`, which defaults OFF and which no workflow and
+no `ci/` script ever enabled. **The file was neither compiled nor tested by any
+gate.** That is the lifecycle lesson worth keeping: an unbuilt secret-bearing
+path has no evidence at all, and "it ships in no default build" describes the
+exposure, not the risk. `regression_bch_schnorr_spec` now compiles into the
+unified runner as a blocking module.
+
+**Everything else in this release: zeroization verdict unchanged.** No
+`secure_erase` call site, GPU buffer zeroing step or key-material lifetime is
+added, removed or moved by the field fixes, the Metal and CUDA repairs, the
+fixed-base cache relocation, or the performance work. One note on the cache,
+since it writes to disk: `cache_w18.bin` holds the **fixed-base generator
+table** — public precomputed multiples of G, no secret material — so relocating
+it to the per-user cache directory changes where a public artifact lands, not
+what is exposed.
+
+### 2026-09-21 - v4.6.0: no lifecycle change (OpenCL scan-only guard, dead co-Z helper)
+
+Both changes reach the gate-watched surface (`CHANGELOG.md`); this answers the
+classification rather than waiving it.
+
+**Zeroization verdict: unchanged.** No `secure_erase` call site, GPU buffer
+zeroing step or key-material lifetime is added, removed or moved, and no function
+body that touches secret material was edited.
+
+- `src/opencl/kernels/secp256k1_extended.cl` gains `#ifndef` guards only. The
+  private-key erasure loops inside `rfc6979_nonce_impl` and the sign paths are
+  untouched; preprocessing the file with no macro defined, before (`17fceb76`)
+  and after, yields 2169 identical lines and an empty diff, so the default
+  kernels are the same text they were. A scan-only build simply does not contain
+  the sign or ECDH paths — it holds no private key, so it has no lifecycle to
+  manage. Guardrail #10 (GPU private-key material erased after use) is unaffected
+  in every build that defines nothing.
+- `src/cpu/src/point.cpp` loses `jac52_add_mixed_inplace_zr`, a static function
+  that had no callers after `49925a1a`. It handled no secret material, and a
+  function with no callers emits no code.
+
+**Evidence.** The residual lifecycle-relevant artifacts in `audit/ci-evidence/`
+were refreshed from real runs on this tree the same day: `regression_ct_ops`
+42/42, `adversarial_protocol` 793/793 (includes the FFI hostile-caller and ECDH
+suites), `ecies_regression` 92/92 (includes the RNG fail-closed seam),
+`fuzz_address_bip32_ffi` 82976/82976 with 0 crashes.
+
+### 2026-09-15 - legacy c_api rename: no lifecycle change, one secret-handling hazard removed
+
+The 36 `bindings/c_api` functions are `ultrafast_secp256k1_*` now. The gate-watched
+surface touched is `CHANGELOG.md`; this answers the classification rather than
+waiving it.
+
+**Zeroization verdict: unchanged.** No `secure_erase` call site is added, removed or
+moved, no buffer lifetime changes, and no function body was edited.
+
+**One secret-handling hazard is removed.** Eleven of the 36 names were also defined
+by the bundled libsecp256k1 shim with a different argument order, and several take a
+private key:
+
+    ultrafast_secp256k1_ec_seckey_verify(privkey32)          <- ours
+    secp256k1_ec_seckey_verify(ctx, seckey32)                <- libsecp
+    ultrafast_secp256k1_ecdsa_sign(msg_hash, privkey, out)   <- ours
+    secp256k1_ecdsa_sign(ctx, sig, msg32, seckey, fp, nd)    <- libsecp
+
+A dynamic resolution landing on the wrong one shifts every argument by one position,
+so a `secp256k1_context*` is read as a 32-byte private key -- 32 bytes of unrelated
+process memory treated as key material and, on the signing paths, fed to a scalar
+parse and a generator multiply. The reverse dereferences a private-key pointer as a
+context. Renaming the surface removes the possibility instead of documenting around
+it. See [`SECURITY_CLAIMS.md`](SECURITY_CLAIMS.md) under the same date.
+
+### 2026-09-14 - BCH Schnorr nonce was shared with ECDSA: a nonce-lifetime defect, now domain-separated
+
+`compat/libsecp256k1_bchn_shim/src/shim_schnorr_bch.cpp` derived its nonce with
+`secp256k1::rfc6979_nonce(d, msg)` -- the same call `ct::ecdsa_sign` makes. One
+nonce therefore served two different signature equations whenever an application
+signed the same message with the same key under both schemes, and the private key
+is algebraically recoverable from that pair. 16 of 16 keys were recovered in
+measurement. This is a secret-lifetime defect, not merely an interop one: the
+nonce's single-use property is what the whole construction rests on.
+
+**Fixed** by RFC 6979 `algo16 = "Schnorr+SHA256  "`, which makes the BCH nonce
+stream disjoint from the ECDSA stream for the same inputs. `src/cpu/src/ecdsa.cpp`
+changed only to carry the tag: `rfc6979_nonce_libsecp_compat` gained an optional
+`algo16` argument and `nullptr` reproduces the previous `"ECDSA\0..."` behaviour
+byte-for-byte, so no existing nonce stream moves.
+
+**Zeroization verdict: unchanged.** No `secure_erase` site is added, removed or
+moved.
+
+- The signer's erase set is what it was -- `kb`, `d`, `k` on every exit path,
+  including the new early returns.
+- The quadratic-residue normalisation replaces `k` through
+  `ct::scalar_cneg(k, mask)`, so the variable that gets erased is the one that
+  was used. The negated copy that `scalar_cneg` forms internally is a function
+  local, exactly like the temporaries every other `ct::` primitive creates, and
+  is not separately erased -- unchanged policy, not a new exposure.
+- The Jacobi test reads `R.y`, which is public: `R.x` is the signature's `r` and
+  any observer can `lift_x(r)` and recompute the same bit. It introduces no new
+  resident secret.
+
+### 2026-09-14 - co-Z table build and CT SafeGCD inverse as defaults: no secret lifecycle change
+
+`REPSEARCH_COZ_TABLE` and `REPSEARCH_CT_SAFEGCD_INV` became the default build and
+their superseded branches were deleted. The gate-watched surfaces touched are
+`src/cpu/src/ct_point.cpp`, `src/cpu/src/point.cpp` and `CHANGELOG.md`; this entry
+answers the classification rather than waiving it.
+
+**Secret-buffer and zeroization verdict: unchanged.** No `secure_erase` call site
+is added, removed or moved, and no new resident secret buffer is created.
+
+- The co-Z chain replaces the mixed-add chain in place. It writes the same
+  `iso[]` / `zr[]` / `tbl[]` arrays the previous construction wrote, with the
+  same lifetime and the same scope, and its extra temporaries (`dX`, `dY`, `aX`,
+  `aY`, `chainZ`) are stack `FE52` values holding multiples of the **base point**
+  — public data at every site. It holds no key material, so it needs no erase.
+- The inverse swap changes which algorithm computes one `FE52`, not how long any
+  buffer lives. `ct::field_inv` takes its input by const reference and returns by
+  value; the SafeGCD state (`SG62 d/e/f/g`, `SGTrans`) is function-local and dies
+  with the call, exactly as the Fermat chain's temporaries did. Neither the old
+  nor the new inverse erased its intermediates, and that is unchanged.
+
+**What does hold secret-derived material here, unchanged:** the XDH denominator
+`R.z^2 * g * xd` at `ecmult_const_xonly` derives from `q*P_eff` with `q` secret,
+and the Montgomery prefix product at `batch_scalar_mul_fixed_k` derives from the
+`KPlan`'s scalar (the BIP-352 scan key at its callers). Both were secret-derived
+before this change and are secret-derived after it; both are inverted by a
+constant-time algorithm before and after. See
+[`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date.
+
+### 2026-09-10 - GPU compact-ECDSA strict-range guard (`src/cuda/include/ecdsa.cuh`, Metal shader, OpenCL kernel): no secret lifecycle change
+
+`ecdsa_verify()` on each GPU backend now rejects a compact signature whose `r >= n`
+or `s >= n` before any verification work. The gate-watched surfaces touched are
+the GPU verify sources and `CHANGELOG.md`; this entry answers the classification
+rather than waiving it.
+
+**Secret-buffer and zeroization verdict: unchanged.** The guard operates on the
+two public scalars of the already-parsed 64-byte compact signature. No new
+resident secret buffer is created and no `secure_erase` site is added or removed;
+the failure exits return before the verify math that would allocate
+secret-path state.
+
+**Fail-closed input handling.** In section `[B]` of
+`audit/test_gpu_ecdsa_compact_range.cpp` the collect key buffer is
+seeded with `0xEE` and the test asserts each `r >= n` / `s >= n` row is left
+exactly at that seed — invalid inputs write no state a later collect step could
+mistake for a verdict. This matches the existing gather/collect contract that
+invalid inputs must not partially mutate secret or verdict buffers. Compare the SHA-256
+message-comparison guard in `src/gpu/src/gpu_backend_cuda.cu`, which already
+specified the fail-closed collect contract this regression restores.
+
+### 2026-09-07 - Affine-materialisation / in-place / RFC-6979-midstate wave: two secure_erase sites removed, one process-lifetime static added
+
+Three commits on this cycle touch the files the secret-path gate watches:
+`d0ca219c` (one affine materialisation per point, RFC-6979 zero-key midstate),
+`d2544fc8` (HMAC guards fail closed) and `9e7d9d61` (in-place point ops at 54
+self-assignment sites), plus `360f3968` (Jacobi pre-check removal in `lift_x`).
+Between `origin/main` and this commit they change `address.cpp`, `bip32.cpp`,
+`ecdh.cpp`, `ecdsa.cpp`, `frost.cpp`, `musig2.cpp`, `recovery.cpp` and
+`schnorr.cpp`. Everything below was re-derived from the diff itself; where the
+commit messages and the code disagree, the code is what is recorded.
+
+#### 1. Two `secure_erase` call sites were removed (`schnorr.cpp`)
+
+`schnorr_sign` used a `uint8_t t[32]` staging buffer for BIP-340's
+`t = d XOR tagged_hash("BIP0340/aux", aux_rand)`, then `memcpy`'d it into
+`nonce_input[0..31]`. `d0ca219c` deletes the buffer and XORs straight into the
+hash input (`schnorr.cpp:449`). Both `detail::secure_erase(t, sizeof(t));` calls
+went with it — `origin/main:src/cpu/src/schnorr.cpp:441` (the `k' == 0`
+early-return block) and `:473` (the main cleanup block).
+
+**Coverage is preserved, and this is why:** on `origin/main` `t` was written at
+`:426` and read exactly once, by the `memcpy` at `:430`. Those bytes now live
+only in `nonce_input[0..31]`, and `detail::secure_erase(nonce_input, sizeof(nonce_input));`
+still runs on **both** exit paths — `schnorr.cpp:460` and `:493`. The net effect
+is one resident copy of `d XOR t_hash` where there were two. `d_bytes` and
+`t_hash` are erased exactly as before.
+
+It is recorded here anyway: a deleted zeroization call is never a silent change,
+even when the value it covered is still covered somewhere else.
+
+The rewritten expression takes the BIP-340 private signing key as a direct
+operand (`d_bytes = kp.d.to_bytes()`, `schnorr.cpp:441`). It is a fixed
+32-iteration loop with no secret-dependent index or branch, so the CT properties
+are unchanged.
+
+#### 2. A process-lifetime `static const` HMAC midstate (`ecdsa.cpp`)
+
+RFC 6979 step c keys its first HMAC with `K0 = 0x00 * 32`. Both pad midstates
+are therefore input-independent, so `init_zero_key32` (`ecdsa.cpp:226`) computes
+them once into a function-local `static const HMAC_Ctx` (`:230`) and `memcpy`s
+them per call.
+
+That places an HMAC midstate in static storage for the life of the process,
+which is the shape of a finding, so plainly: **the key is the all-zero constant,
+not a secret.** Nothing derived from a private key, nonce or seed is retained.
+The midstate is produced by `c.init_key32(ZERO_KEY32)` (`:232`) rather than
+transcribed from a table, so it is bit-identical to the per-call computation it
+replaces. The build defines no `-fno-threadsafe-statics`, so the magic-static
+guard makes the shared initialisation safe across threads.
+
+Three of twelve `init_key32` call sites were re-pointed at it — `rfc6979_nonce`
+(`:387`), `rfc6979_nonce_hedged` (`:482`) and `rfc6979_nonce_libsecp_compat`
+(`:599`). The nine keyed on secret DRBG state (`:396`, `:407`, `:431`, `:493`,
+`:510`, `:527`, `:607`, `:617`, `:634`) are untouched.
+
+**Two caveats a future reader needs.** The `assert` at `:227-228` that pins
+"the caller really passed K0" is compiled out under `-DNDEBUG`
+(`CMakeLists.txt:440`, Release), and `(void)key;` at `:229` means the `key`
+parameter is read by nothing at all in a production build: a future caller that
+passes a secret `K` there would silently receive the public K0 midstate.
+Second, because `init_key32` used to read all 32 bytes of `K` and
+`init_zero_key32` reads none, the `std::memset(K, 0x00, 32)` at `:380`, `:476`
+and `:578` is now an eliminable dead store — RFC 6979 step c is no longer
+materially executed at those sites, and `K` may hold prior stack residue until
+it is overwritten at `:393`, `:490` and `:603`. It is still erased with the
+enclosing `HMAC_Ctx` at `:457`, `:552` and `:658`, so this is a stack-state
+change, not a leak.
+
+#### 3. Three HMAC helpers now fail closed on a length precondition (`ecdsa.cpp`)
+
+`compute_short` (`:247`), `compute_two_block` (`:291`) and `compute_three_block`
+(`:331`) each had a length guard that `return`ed with the 32-byte output buffer
+untouched. Each now zeroes `out` first. The guards exist to stop a `size_t` wrap
+in a later length computation and they always did; what they left behind was an
+undefined output a caller might read.
+
+**The in-file rationale at `:285-288` is narrower than it reads.** It says an
+all-zero output is "rejected by `parse_bytes_strict_nonzero`". That is true only
+at the six candidate sites (`:422`, `:436`, `:518`, `:532`, `:625`, `:639` — the
+`compute_short(V, 32, V)` calls that feed `t`). Every `compute_two_block` and
+`compute_three_block` call writes the DRBG key `K` (`:393`, `:404`, `:490`,
+`:502`, `:603`, `:604`, `:612`, `:613`), as do the `compute_short` calls at
+`:429`, `:525` and `:632`; a zeroed output there is never parsed and would
+silently key the next HMAC with `K = 0`. For those the property is the weaker
+but still correct one: **a deterministic zero instead of stack residue.**
+
+**This change shipped without a test.** `d2544fc8` touches
+`src/cpu/src/{ecdsa,ct_point,ct_scalar,glv,point}.cpp` and two headers with no
+`audit/test_*.cpp` or `tests/*.cpp`; `python3 ci/check_security_fix_has_test.py --since d2544fc8~1`
+names it by hash. It is recorded as an open item, not as verified hardening.
+(`d0ca219c`, the midstate change, does carry
+`audit/test_regression_single_affine_materialisation.cpp` with an RFC-6979
+byte-stability section.)
+
+#### 4. Everything else on these paths is public data
+
+Recorded per file because the files are on the watch list, not because anything
+secret moved. `secure_erase` counts and text are identical to `origin/main` in
+every one of them.
+
+- **`ecdh.cpp`** — the SEC-005 on-curve check in all three entry points
+  (`ecdh_compute` `:23-31`, `ecdh_compute_xonly` `:57-65`, `ecdh_compute_raw`
+  `:90-98`) normalises a local `Point affine = public_key;` copy once instead of
+  paying a Z-inversion in each of `x()` and `y()`, and computes `px.square() * px`
+  / `py.square()` instead of `px * px * px` / `py * py`. The saving applies to
+  Jacobian pubkeys only; an already-affine pubkey never paid two inversions.
+  `ct::scalar_mul` still consumes the original `public_key` object — same value,
+  different representation — and the private-key guard, the infinity guard and
+  both `secure_erase` calls per function are byte-identical.
+- **`musig2.cpp`** — `musig2_key_agg` (`:137`) reads the aggregate PUBLIC key
+  `Q`'s parity bit and X bytes from one `x_bytes_and_parity()` instead of
+  `has_even_y()` plus a second inversion of the same Z; the explicit
+  `|| Q.is_infinity()` restores the infinity behaviour `has_even_y()` had.
+  `musig2_start_sign_session` (`:397`) does the same for the aggregate nonce
+  point `R`. Also in the diff: `decompress_point`'s `y.negate_assign()` (`:65`),
+  the now-unused file-local `has_even_y` helper deleted, `add_inplace` in
+  `musig2_nonce_agg` (`:322-323`) and `musig2_nonce_agg_points` (`:342-343`),
+  and `negate_inplace` in `musig2_partial_verify` (`:573`). No hunk lands in
+  `musig2_nonce_gen` or `musig2_partial_sign`; all 26 `secure_erase` sites are
+  unchanged.
+- **`frost.cpp`** — four lines, all `add_inplace` / `negate_inplace` (not
+  `negate_assign`, which this file never calls): the group nonce commitment
+  accumulator (`:227`), the VSS commitment polynomial evaluation `Sum(A_j * x_i^j)`
+  over the sender's public coefficients and the public participant-index scalar
+  (`:426`), the group public key accumulation (`:454`), and BIP-340 even-y
+  normalisation of the public group commitment `R` (`:670`). The `:426` site sits
+  four lines below `Point const lhs = ct::generator_mul(share.value);` — that
+  line, `ct::generator_mul` and the `ct::point_eq(lhs, rhs)` at `:434` are all
+  untouched, and `rhs` remains a pure function of public data.
+- **`address.cpp`** — one line: the BIP-352 input-pubkey accumulator
+  `A_sum.add_inplace(A)` (`:858`), operands being public transaction input
+  public keys. The two secret-adjacent `.add(` sites in the same function
+  (`:838`, `:895`, both on `t_k`) were deliberately **not** converted — that is
+  what makes this entry safe. `ct::scalar_mul(A_sum, scan_privkey)` at `:862`
+  now receives a Jacobian rather than affine `A_sum`; same value, and the secret
+  operand is the scalar, not the point.
+- **`bip32.cpp`** — one line: `y.negate_assign()` (`:265`) in the parity fixup
+  of `ExtendedKey::public_key()`. `y` is a decompressed public-key
+  y-coordinate; the line is unreachable for private keys because the
+  `if (is_private)` block returns at `:239`/`:243` before the decompression path.
+- **`recovery.cpp`** — one line: `y52.negate_assign(1)` (`:47`) in the
+  file-static `lift_x`, whose single caller is `ecdsa_recover` (`:213`) with
+  `sig.r` and `recid`. `ecdsa_sign_recoverable` is untouched and does not call
+  `lift_x`; all 11 `secure_erase` sites are unchanged.
+- **`schnorr.cpp` (`lift_x_from_limbs`)** — `360f3968` removes the
+  `y2.jacobi_var() != 1` pre-check in front of the authoritative sqrt-and-verify
+  (`:97-101`), which still runs unconditionally. Inputs are `sig.r` and pubkey
+  x-values, both public. Note the direction: rejecting a non-residue or
+  off-curve x is now **slower**, not faster — one `jacobi_var` is replaced by a
+  full `sqrt` plus square/negate/add/normalize — and `lift_x_cached` never
+  caches failures (`:311-313` returns on `is_infinity()` before the cache store),
+  so the cost repeats per call. The path is attacker-reachable through
+  `schnorr_xonly_pubkey_parse` (`:687`). `jacobi_var` itself survives elsewhere;
+  in particular `ellswift.cpp`'s `fe_sqrt_checked` (`:121-126`) has no
+  sqrt-and-verify backstop by design, so "the defense that covered it" is a
+  statement about `schnorr.cpp` only. Also here: `y52.negate_assign(1)` (`:108`),
+  and `schnorr_pubkey` returning `P.x_only_bytes()` instead of discarding the
+  parity from `x_bytes_and_parity()` (`:396-403`) — `P` is
+  `ct::generator_mul(private_key)`, so this is a secret-derived point, and the
+  change leaves strictly less residue: `x_only_bytes` never materialises or
+  normalises `y_aff`. `schnorr_keypair_create` still uses `x_bytes_and_parity`
+  because it genuinely needs the parity.
+
+#### Summary of lifecycle deltas
+
+| | |
+|---|---|
+| `secure_erase` sites added | 0 |
+| `secure_erase` sites removed | 2 (`schnorr.cpp`, both for the eliminated `t[32]`; coverage preserved via `nonce_input`) |
+| `secure_erase` sites reordered | 0 |
+| New static storage holding key material | 1, public constant only (`ecdsa.cpp:230`, RFC 6979 K0 midstate) |
+| Resident copies of secret-derived bytes | net −1 (`schnorr_sign`), −1 (`schnorr_pubkey`, no `y_aff`) |
+| Open items | `d2544fc8` shipped with no test; `init_zero_key32`'s K0 assert is `NDEBUG`-only |
 
 ### 2026-06-22 - CPU batch-verify pool + decompress: verify-path only, no secret lifecycle change
 
