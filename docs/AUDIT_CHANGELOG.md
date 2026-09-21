@@ -1,5 +1,27 @@
 # Audit Changelog
 
+## 2026-09-21 - a dead co-Z helper kept the -Werror gate red
+
+`49925a1a` made the co-Z table build the default and deleted the `#else` arm it
+superseded. That arm held the only call to `jac52_add_mixed_inplace_zr`
+(`src/cpu/src/point.cpp`), so the function survived with no callers. GCC 14 says
+`defined but not used`, the Security Audit workflow builds with
+`-DSECP256K1_WERROR=ON`, and the `Build with -Werror` job has failed on every
+push since -- `point.cpp.o` is the first and only object that fails, and the
+whole library build stops there.
+
+Reproduced locally with the workflow's exact configure line (g++-14,
+`-DSECP256K1_MARCH=x86-64-v3`, tests/bench/examples off) and `ninja -k 0`, which
+keeps building past a failure: `point.cpp.o` was the single failing object in
+the tree, so this one dead function was the entire gate failure.
+
+The function is removed rather than marked used. Nothing calls it, the co-Z
+table path that replaced it is the measured-and-shipped one, and its correctness
+is already pinned by `audit/test_regression_scalar_decomposition_and_comb.cpp`
+(515 boundary scalars, `k*P` against `(k-1)*P + P`, `fast::` against `ct::`).
+
+No behavioural change: a static function with no callers contributes no code.
+
 ## 2026-09-15 - the legacy C API was squatting libsecp256k1's namespace
 
 `bindings/c_api` exported 36 functions named `secp256k1_*` and its `exports.map`
