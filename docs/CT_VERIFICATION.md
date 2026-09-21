@@ -13,6 +13,34 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-21 v4.6.0 — OpenCL scan-only guard and a dead co-Z helper (no CT boundary moved)
+
+Two changes reach the gate-watched surface (`CHANGELOG.md`); neither moves a CT
+boundary, and this records why rather than waiving the classification.
+
+**`src/opencl/kernels/secp256k1_extended.cl` — preprocessor only.**
+`SECP256K1_OPENCL_SCAN_ONLY` (GitHub issue #415) excludes the four
+`secp256k1_ct_*.cl` includes and every function and kernel that reaches them, so
+a consumer embedding the six scan-only kernel files can compile them with the
+`#include` lines stripped. No statement inside any CT routine was edited, no
+scalar-mul or inverse was substituted, and the CT sign/ECDH paths are unchanged
+in every build that defines nothing. Verified as text identity rather than
+asserted: preprocessing the file with no macro defined, before (`17fceb76`) and
+after, yields 2169 identical lines and an empty diff. A scan-only build does not
+contain the CT sign paths at all — it therefore makes no CT claim about them.
+
+**`src/cpu/src/point.cpp` — dead code removed.** `jac52_add_mixed_inplace_zr`
+lost its only caller in `49925a1a` (the `#else` arm superseded by the co-Z table
+build) and was deleted. A static function with no callers emits no code, so no
+CT surface, timing profile or instruction sequence changes. The co-Z path that
+replaced its call site keeps its existing coverage under
+`regression_scalar_decomposition_and_comb`.
+
+**CT evidence:** the residual CT artifacts in `audit/ci-evidence/` were refreshed
+from real runs on this tree the same day — `regression_ct_ops` 42/42,
+`adversarial_protocol` 793/793, `ecies_regression` 92/92, `fuzz_parsers`
+580019/580019, `fuzz_address_bip32_ffi` 82976/82976, 0 crashes.
+
 ### 2026-09-15 legacy c_api renamed off libsecp256k1's namespace (no CT boundary moved)
 
 The 36 functions in `bindings/c_api` are `ultrafast_secp256k1_*` now instead of
@@ -277,7 +305,7 @@ classification rather than waiving it.
 
 
 
-**UltrafastSecp256k1 v4.5.0** -- CT Layer Methodology & Audit Status
+**UltrafastSecp256k1 v4.6.0** -- CT Layer Methodology & Audit Status
 
 ### 2026-05-11 ct_point::scalar_mul_jac_fe52_z1 — HAMBURG=true (xdh-dedicated path)
 
@@ -1035,4 +1063,4 @@ add (unified_add_core<false>, 12M+2S) to incomplete mixed Jacobian+affine add
 fixed precomputed G multiples; degenerate probability ~2^-128. CT properties
 (fixed iteration count, branchless table lookup via cmov) unchanged. -->
 
-*UltrafastSecp256k1 v4.5.0 -- CT Verification*
+*UltrafastSecp256k1 v4.6.0 -- CT Verification*

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.0] - 2026-09-21
+
+> **A security release with a namespace break in the legacy C API.** The
+> `ufsecp_*` C ABI is untouched -- `UFSECP_ABI_VERSION` stays 4 -- but the 36
+> functions in `bindings/c_api` are renamed out of libsecp256k1's `secp256k1_*`
+> namespace, which they had no business occupying and which made linking both
+> surfaces a duplicate-symbol error. Two protocol defects are fixed: the Bitcoin
+> Cash 2019 Schnorr shim shared its nonce with ECDSA (private-key recovery from
+> one key signing one message under both schemes), and every GPU verify path
+> silently reduced out-of-range compact ECDSA scalars instead of rejecting them.
+> A second embed-closure regression, this time in OpenCL, is fixed and gated
+> against recurrence.
+
 ### Added
 
 - Added the ABI-compatible `ufsecp_addr_p2sh_with_ctx` entry point for P2SH
@@ -81,6 +94,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Standard Test Vectors goes 10/10 -> 11/11.
 
 ### Fixed
+
+- **The OpenCL scan-only kernel embed was no longer self-contained**
+  ([#415](https://github.com/shrec/UltrafastSecp256k1/issues/415)). A consumer
+  that wants only the scan half of the OpenCL kernels embeds six files --
+  `secp256k1_field.cl`, `secp256k1_point.cl`, `secp256k1_gen_table_w8.cl`,
+  `secp256k1_extended.cl`, `secp256k1_affine.cl`, `secp256k1_bip352.cl` --
+  concatenates them, strips every `#include` line (`clCreateProgramWithSource`
+  has no include path) and compiles the result at runtime. At v4.5.0 that
+  worked. Since then `secp256k1_extended.cl` gained four
+  `#include "secp256k1_ct_*.cl"` lines and sign paths that call into them, so
+  with the includes stripped the NVIDIA compiler reported `unknown type name
+  'CTJacobianPoint'` plus implicit declarations of `ct_generator_mul_impl`,
+  `ct_point_to_jacobian`, `ct_scalar_inverse_impl` and `ct_jacobian_to_affine`.
+  Nothing calls those wrappers -- OpenCL, like Metal's AIR, does not dead-strip
+  a function whose callees are unresolved, so they broke the compile anyway.
+
+  This is [#335](https://github.com/shrec/UltrafastSecp256k1/issues/335)
+  reproduced in a second backend and takes the same remedy.
+  `SECP256K1_OPENCL_SCAN_ONLY` now excludes the four includes and everything
+  that reaches them: `ecdsa_sign_impl`, `schnorr_sign_impl`, the whole ECDH
+  block, `ecdsa_sign_recoverable_impl`, and the `ecdsa_sign` / `schnorr_sign`
+  kernels. Following the chain up to the kernel entry points is the part that
+  matters -- guarding only the callee moves the error onto the wrapper. The
+  `SchnorrSignature` and `RecoverableSignature` typedefs stay outside the guard,
+  since `schnorr_verify_impl` needs the first and neither references anything
+  undefined. **The repo's own build never defines the macro, so the default
+  kernels are unchanged** -- verified rather than asserted: preprocessing
+  `secp256k1_extended.cl` with no macro defined, before and after the guard,
+  yields 2169 identical lines and an empty diff. Measured on the embed itself:
+  6 surviving `ct_*` / `CT*` references without the macro, 0 with it. The other
+  five embed files were checked and reference no `ct_*` at all.
+
+  New blocking audit module `regression_opencl_kernel_closure` rebuilds the
+  consumer's embed exactly and asserts the guarded form references no `ct_*`
+  symbol and no `CT*` type, with a live negative control -- without the guard
+  those references are present, so the check cannot pass vacuously if the guard
+  is ever deleted. It is a source scan: no OpenCL device, no vendor compiler and
+  no host preprocessor required, so it runs on every platform.
+
+- **A dead co-Z helper kept the `-Werror` gate red.** `49925a1a` made the co-Z
+  table build the default and deleted the `#else` arm it superseded; that arm
+  held the only call to `jac52_add_mixed_inplace_zr`, so the function survived
+  with no callers. GCC 14 reports `defined but not used`, the Security Audit
+  workflow builds with `-DSECP256K1_WERROR=ON`, and its `Build with -Werror` job
+  had failed on every push since. Reproduced locally with the workflow's exact
+  configure line and `ninja -k 0`, which keeps building past a failure:
+  `point.cpp.o` was the only failing object in the tree, so this one dead
+  function was the entire gate failure. Removing it is not a behaviour change --
+  a static function with no callers contributes no code -- and the co-Z path
+  that replaced it stays covered by
+  `regression_scalar_decomposition_and_comb`.
 
 - The Bitcoin Cash 2019 Schnorr shim (`secp256k1_schnorr_sign` /
   `secp256k1_schnorr_verify`) did not implement the specification it is named
@@ -171,6 +235,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Credited
+
+- **[@craigraw](https://github.com/craigraw)** for
+  [#415](https://github.com/shrec/UltrafastSecp256k1/issues/415) — validating the
+  CUDA and OpenCL backends of a downstream extension against `dev`, reporting the
+  OpenCL embed regression with the exact compiler diagnostics and the embed
+  recipe that reproduces it, and identifying it as the same failure class as
+  their earlier [#335](https://github.com/shrec/UltrafastSecp256k1/issues/335)
+  before we did. The observation that this is now the second instance of one
+  class in three months is what turned the fix into a permanent gate rather than
+  a second patch.
 
 - **[@kawacukennedy](https://github.com/kawacukennedy)** for reporting 9 verified
   issues across GPU backends (Metal, CUDA, OpenCL), API consistency, and

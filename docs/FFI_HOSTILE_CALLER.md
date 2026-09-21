@@ -1,6 +1,6 @@
 # FFI Hostile-Caller Coverage
 
-**Last updated**: 2026-07-15 | **Version**: 4.5.0
+**Last updated**: 2026-07-15 | **Version**: 4.6.0
 
 ### 2026-07-15 - `ufsecp_gpu_bip352_scan_batch_multispend` hostile-caller contract (GitHub issue #335, paired with `include/ufsecp/ufsecp_gpu.h`)
 

@@ -1,6 +1,44 @@
 # Security Claims & API Contract
 
-**UltrafastSecp256k1 v4.5.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
+**UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
+
+### 2026-09-21 - v4.6.0: a warning gate that was not enforcing, and a consumer build that was broken
+
+Two repairs, neither of them a cryptographic claim. Both reach the gate-watched
+surface (`CHANGELOG.md`), and this answers the classification rather than waiving
+it. See [`CT_VERIFICATION.md`](CT_VERIFICATION.md) under the same date for the
+CT-boundary reasoning and [`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md) for the
+zeroization verdict.
+
+**The claim repaired first is gate integrity.** `49925a1a` deleted the `#else`
+arm that held the only call to `jac52_add_mixed_inplace_zr`, leaving a static
+function with no callers. GCC 14 calls that `defined but not used`, the Security
+Audit workflow builds with `-DSECP256K1_WERROR=ON`, and its `Build with -Werror`
+job had failed on every push since 2026-09-15. **A gate that is red on every push
+is not enforcing anything** — a genuinely new warning would have been
+indistinguishable from the standing failure. The library build stops at
+`point.cpp.o`, so nothing after it was being checked either. Reproduced locally
+with the workflow's exact configure line and `ninja -k 0`, which keeps building
+past a failure: `point.cpp.o` was the only failing object in the whole tree.
+Deleting the function restores the gate; it changes no behaviour, because a
+static function with no callers contributes no code.
+
+**The claim repaired second is consumer buildability, not a vulnerability.**
+GitHub issue #415: a consumer that embeds the six scan-only OpenCL kernel files
+with `#include` lines stripped could no longer compile them, because
+`secp256k1_extended.cl` had grown four `secp256k1_ct_*.cl` includes and sign
+paths that call into them, and OpenCL — like Metal's AIR — does not dead-strip a
+function whose callees are unresolved. Nothing was exploitable: the failure is a
+compile error in a downstream build, and no shipped kernel misbehaved.
+
+What makes it worth a claims entry is that this is **the second instance of one
+failure class in three months**, after #335 in Metal. `SECP256K1_OPENCL_SCAN_ONLY`
+mirrors `SECP256K1_METAL_SCAN_ONLY`, and the class is now gated on every push by
+a blocking audit module (`regression_opencl_kernel_closure`) that rebuilds the
+consumer's embed and fails if any `ct_*` symbol or `CT*` type survives it, with a
+live negative control so it cannot pass vacuously. The default build is
+unaffected and that is verified, not asserted: preprocessing the kernel with no
+macro defined, before and after, yields 2169 identical lines and an empty diff.
 
 ### 2026-09-15 - The legacy c_api stopped squatting libsecp256k1's C namespace
 
@@ -1878,4 +1916,4 @@ Every release must answer: **"Did the CT scope change?"**
 
 <!-- 2026-05-28: shim_ecdsa.cpp + shim_recovery.cpp + shim_ellswift.cpp + bip32.cpp — secret-key stack-residue hardening (CT-01/SHIM-01/02/CT-02). Claim: parsed private-key scalars and BIP-324 handshake key material do not persist on the stack after the call returns. (CT-01) shim ECDSA sign / sign_recoverable secure_erase the parsed key scalar (`k` / `privkey_scalar`) on every return path; (SHIM-01/02) ellswift_create and ellswift_xdh erase `sk`+`kb` on all returns (success, parse-fail, and the three xdh error branches), completing SHIM-006; (CT-02) BIP-32 hardened derive_child erases the HMAC-derived `il_scalar` on all 7 return paths. Also RT-02: secp256k1_ecdsa_signature_parse_der now requires exact SEQUENCE consumption (`p == end`), rejecting trailing bytes inside the SEQUENCE — matching upstream + the native C ABI parser. Output bytes written before erase; no behavioral change. Regression guard: audit/test_regression_shim_seckey_erase.cpp. -->
 
-*UltrafastSecp256k1 v4.5.0 -- Security Claims*
+*UltrafastSecp256k1 v4.6.0 -- Security Claims*

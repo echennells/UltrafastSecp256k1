@@ -33,8 +33,10 @@ the guard -- `schnorr_verify_impl` needs the first, and neither references
 anything undefined.
 
 The repo's own build never defines the macro, so the default kernels are
-unchanged. Measured on the embed itself: 6 surviving `ct_*` / `CT*` references
-without the macro, **0** with it.
+unchanged -- verified rather than asserted: preprocessing `secp256k1_extended.cl`
+with no macro defined, before the guard (`17fceb76`) and after, yields 2169
+identical lines and an empty diff. Measured on the embed itself: 6 surviving
+`ct_*` / `CT*` references without the macro, **0** with it.
 
 The other five embed files were checked for the same defect and have no `ct_*`
 reference at all.

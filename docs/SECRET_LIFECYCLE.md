@@ -1,6 +1,33 @@
 # Secret Lifecycle Review
 
-**Last updated**: 2026-09-10 | **Version**: 4.5.0
+**Last updated**: 2026-09-21 | **Version**: 4.6.0
+
+### 2026-09-21 - v4.6.0: no lifecycle change (OpenCL scan-only guard, dead co-Z helper)
+
+Both changes reach the gate-watched surface (`CHANGELOG.md`); this answers the
+classification rather than waiving it.
+
+**Zeroization verdict: unchanged.** No `secure_erase` call site, GPU buffer
+zeroing step or key-material lifetime is added, removed or moved, and no function
+body that touches secret material was edited.
+
+- `src/opencl/kernels/secp256k1_extended.cl` gains `#ifndef` guards only. The
+  private-key erasure loops inside `rfc6979_nonce_impl` and the sign paths are
+  untouched; preprocessing the file with no macro defined, before (`17fceb76`)
+  and after, yields 2169 identical lines and an empty diff, so the default
+  kernels are the same text they were. A scan-only build simply does not contain
+  the sign or ECDH paths — it holds no private key, so it has no lifecycle to
+  manage. Guardrail #10 (GPU private-key material erased after use) is unaffected
+  in every build that defines nothing.
+- `src/cpu/src/point.cpp` loses `jac52_add_mixed_inplace_zr`, a static function
+  that had no callers after `49925a1a`. It handled no secret material, and a
+  function with no callers emits no code.
+
+**Evidence.** The residual lifecycle-relevant artifacts in `audit/ci-evidence/`
+were refreshed from real runs on this tree the same day: `regression_ct_ops`
+42/42, `adversarial_protocol` 793/793 (includes the FFI hostile-caller and ECDH
+suites), `ecies_regression` 92/92 (includes the RNG fail-closed seam),
+`fuzz_address_bip32_ffi` 82976/82976 with 0 crashes.
 
 ### 2026-09-15 - legacy c_api rename: no lifecycle change, one secret-handling hazard removed
 
