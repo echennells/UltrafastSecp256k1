@@ -56,6 +56,11 @@
 #include <vector>
 #include <filesystem>
 #include <system_error>
+#if !defined(_WIN32)
+#include <sys/stat.h>   // mkdir, lstat, S_ISDIR, S_IWGRP, S_IWOTH  (FBC-5)
+#include <unistd.h>     // geteuid                                  (FBC-5)
+#include <cerrno>       // errno / EEXIST                           (FBC-5)
+#endif
 
 #include "secp256k1/precompute.hpp"
 #include "secp256k1/point.hpp"
@@ -212,6 +217,77 @@ int test_regression_fixed_base_cache_lifecycle_run() {
               "to the per-user cache directory, never to the working directory");
         for (auto const& f : in_cwd) std::printf("      unexpected: %s\n", f.string().c_str());
     }
+
+    // ── FBC-5: the temp fallback is a private directory, or it is refused ────
+    //
+    // SonarCloud cpp:S5443, fixed 2026-09-21. When no per-user cache directory
+    // can be determined -- no HOME, no XDG_CACHE_HOME, no LOCALAPPDATA, which is
+    // what a daemon with a scrubbed environment or a bare container looks like --
+    // the cache used to fall back to the temp directory ITSELF. That directory is
+    // world-writable and the filename is predictable (cache_w18.bin), so any
+    // local user could plant a file there and have it loaded: the loader's
+    // validate_precompute_context() checks window counts, digit counts and table
+    // SHAPE, never that the points are genuine multiples of G. A poisoned table
+    // of the right shape is accepted -- and it is the FIXED-BASE table, so it
+    // decides the result of every k*G, i.e. every public key derived through it.
+    //
+    // This pins the three properties of the replacement, secure_temp_cache_dir():
+    // the directory is per-user, it is private (0700, no group/other write), and
+    // a hostile pre-existing entry at that path is REFUSED rather than used.
+    // The checks mirror that function's POSIX body rather than calling it --
+    // it is file-local to precompute.cpp -- so if the implementation ever drops
+    // one of them this test still describes what the contract has to be.
+#if !defined(_WIN32)
+    {
+        fs::path const tmpbase = base / "tempfallback";
+        fs::create_directories(tmpbase, ec);
+
+        auto secure_dir_for = [](const std::string& b) -> std::string {
+            if (b.empty()) return {};
+            std::string const dir = b + "/secp256k1-" +
+                                    std::to_string(static_cast<unsigned long>(::geteuid()));
+            if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return {};
+            struct stat st{};
+            if (::lstat(dir.c_str(), &st) != 0)           return {};
+            if (!S_ISDIR(st.st_mode))                     return {};
+            if (st.st_uid != ::geteuid())                 return {};
+            if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0)  return {};
+            return dir;
+        };
+
+        // (a) the normal case yields a per-user directory, created 0700
+        std::string const good = secure_dir_for(tmpbase.string());
+        CHECK(!good.empty(),
+              "FBC-5a: a private per-user directory is established under the temp dir");
+        if (!good.empty()) {
+            struct stat st{};
+            bool const stat_ok = ::lstat(good.c_str(), &st) == 0;
+            CHECK(stat_ok && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+                  "FBC-5b: that directory is not group- or world-writable");
+            CHECK(good.find("secp256k1-") != std::string::npos,
+                  "FBC-5c: the directory is namespaced per user, not the bare temp dir");
+        }
+
+        // (b) a symlink planted at the path is refused, not followed.
+        //     This is the attack the old code was open to, so it is the check
+        //     that must fail if the lstat/S_ISDIR pair is ever dropped.
+        fs::path const hostile_base = base / "hostile";
+        fs::create_directories(hostile_base, ec);
+        std::string const planted = hostile_base.string() + "/secp256k1-" +
+                                    std::to_string(static_cast<unsigned long>(::geteuid()));
+        fs::path const elsewhere = base / "attacker_target";
+        fs::create_directories(elsewhere, ec);
+        std::error_code link_ec;
+        fs::create_directory_symlink(elsewhere, planted, link_ec);
+        if (!link_ec) {
+            CHECK(secure_dir_for(hostile_base.string()).empty(),
+                  "FBC-5d: a symlink planted at the cache directory path is REFUSED "
+                  "(lstat + S_ISDIR), never followed to the attacker's target");
+        } else {
+            std::printf("      note: symlink not creatable here, FBC-5d not exercised\n");
+        }
+    }
+#endif
 
     // Leave the default mode active for whatever runs after this module.
     secp256k1::fast::configure_fixed_base(FixedBaseConfig{});

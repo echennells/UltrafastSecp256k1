@@ -132,6 +132,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The fixed-base cache could be planted in a world-writable directory.** When
+  no per-user cache directory can be determined -- no `HOME`, no
+  `XDG_CACHE_HOME`, no `LOCALAPPDATA`, i.e. a daemon with a scrubbed environment
+  or a bare container -- the cache fell back to the system temp directory
+  **itself**, with a predictable filename (`cache_w18.bin`). On a multi-user host
+  any local user could pre-create that file and the next process would load it.
+
+  The load path checks the window count, the digit count and the table *shape*.
+  It does not check that the points are genuine multiples of G, and the file
+  carries no checksum or signature. A poisoned table of the correct shape is
+  accepted -- and this is the **fixed-base table**, so it determines every
+  `k*G`: every public key derived through it and every signature that uses it.
+
+  Removing the temp fallback would have been the wrong fix: turning the disk
+  cache off is what previously took `exploit_selftest_api` from 6.6 s to a 120 s
+  CI timeout on every platform, because each process then rebuilds a ~250 MB
+  table. What changed is **where** it goes. The cache now lands in
+  `<temp>/secp256k1-<uid>`, created `0700` and re-checked with `lstat` (not
+  `stat`) for "is a directory, owned by this euid, not group- or world-writable".
+  A symlink planted at that path is refused rather than followed. If no safe
+  directory can be established, the library builds in memory and writes nothing.
+
+  **Residual, stated rather than hidden:** a cache file inside a directory the
+  user themselves owns is still loaded without cryptographic verification. That
+  is not a privilege boundary -- anything running as that user can replace the
+  library outright -- but a load-time check that the table really is multiples of
+  G would be defence in depth, and this release does not implement it.
+
+  Pinned by `regression_fixed_base_cache_lifecycle` FBC-5a..d, including a
+  planted symlink that must be refused.
+
+- **A 64-bit shift by 64 in the Pippenger window extractor.**
+  `limbs[limb_idx + 1] << (64 - bit_idx)` is undefined behaviour at
+  `bit_idx == 0` rather than evaluating to zero. The surrounding arithmetic
+  already makes it unreachable -- reaching it needs a window width above 64 --
+  but the guarantee lived three invariants away from the shift. The precondition
+  is now stated where the shift happens.
+
 - **P0 -- `schnorr_batch_verify` accepted batches containing individually
   invalid signatures.** Reproduced end to end: a batch of 97 signatures, two of
   which fail `schnorr_verify` on their own, returned `true` -- on both the

@@ -106,7 +106,7 @@ class Point {
     // stores this exists to remove.
     struct Uninitialised {};
     // cppcheck-suppress-begin uninitMemberVarPrivate
-    explicit Point(Uninitialised) noexcept {}
+    explicit Point(Uninitialised) noexcept {}  // NOSONAR cpp:S2107 -- see above
     // cppcheck-suppress-end uninitMemberVarPrivate
 
 public:

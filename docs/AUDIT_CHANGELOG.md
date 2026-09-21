@@ -1,5 +1,68 @@
 # Audit Changelog
 
+## 2026-09-21 - the fixed-base cache could be planted in a world-writable directory
+
+Found by SonarCloud's quality gate on `main` (`cpp:S5443`), and it is a real
+defect rather than the analyser being cautious.
+
+**What was wrong.** When no per-user cache directory can be determined -- no
+`HOME`, no `XDG_CACHE_HOME`, no `LOCALAPPDATA`, which is what a daemon with a
+scrubbed environment or a bare container looks like -- `compute_default_cache_dir()`
+fell back to the system temp directory **itself**. The cache filename is derived
+from the window width and is therefore predictable (`cache_w18.bin`). On a
+multi-user host `/tmp` is world-writable, so any local user could pre-create that
+file and the next process to start would load it.
+
+**Why loading it matters.** `validate_precompute_context()` checks the window
+count, the digit count and the table SHAPE. It does not check that the points are
+genuine multiples of G, and there is no checksum or signature on the file. A
+poisoned table of the correct shape is accepted -- and this is the **fixed-base
+table**, so it decides the result of every `k*G`: every public key derived
+through it, and every signature that uses it. A local user planting a file in
+`/tmp` therefore gets to choose key material for anyone who starts the library
+with a scrubbed environment.
+
+**The fix, and the fix that was rejected.** Removing the temp fallback entirely
+is the obvious move and it is wrong: turning the disk cache off is exactly what
+took `exploit_selftest_api` from 6.6 s to a 120 s CI timeout on every platform,
+because each process then rebuilds a ~250 MB table. What changes is **where** it
+goes. `secure_temp_cache_dir()` places it in `<temp>/secp256k1-<uid>`, creates it
+`0700`, and then re-checks it with **`lstat`** -- not `stat` -- requiring that it
+is a directory, that it is owned by the current euid, and that it is not group-
+or world-writable. A symlink planted at that path is refused rather than
+followed. When no safe directory can be established the function returns an empty
+string, `get_default_cache_path()` turns that into "no path", and
+`ensure_built_locked()` builds in memory and writes nothing. A slower build is
+recoverable; a poisoned generator table is not.
+
+**Residual, stated rather than hidden.** A cache file inside a directory the user
+themselves owns is still loaded with no cryptographic verification. That is not a
+privilege boundary -- anything running as that user can replace the library
+outright -- but a load-time check that the table really is multiples of G would
+be defence in depth, and this release does **not** implement it. The NOSONAR
+block at the top of the anonymous namespace in `precompute.cpp` says so in those
+words, so the next reader does not mistake the suppressions for a claim that the
+file is trusted.
+
+**Test.** `audit/test_regression_fixed_base_cache_lifecycle.cpp` gains FBC-5
+(a-d): a private per-user directory is established under the temp dir, it is not
+group- or world-writable, it is namespaced per user rather than the bare temp
+directory, and **a symlink planted at that path is refused**. That last check is
+the one that fails if the `lstat`/`S_ISDIR` pair is ever dropped. 11/11 checks
+pass, up from 7.
+
+**Also in this pass, from the same Sonar gate.** `pippenger.cpp` computed
+`limbs[limb_idx + 1] << (64 - bit_idx)` (`cpp:S3949`); at `bit_idx == 0` that is
+a 64-bit shift by 64, which is undefined behaviour rather than zero. The
+surrounding arithmetic already makes it unreachable -- it would need a window
+width above 64 -- but "safe if you follow three other invariants" is not
+something a reader or an analyser can see locally, so the precondition is now
+stated where the shift happens. The remaining flagged items are suppressed with
+their reasons recorded at the site: `Point(Uninitialised)` (`cpp:S2107`,
+deliberate and verified: both call sites write all six members), and the
+`SECP256K1_SELFTEST_VECTORS` env-var hook (`S2083`/`S5145`, opt-in, traversal
+already rejected, read-only, non-fatal).
+
 ## 2026-09-21 - the Security tab: three real fixes and one false positive
 
 Six open code-scanning alerts on the repository Security tab, triaged one by

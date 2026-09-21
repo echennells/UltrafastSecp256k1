@@ -219,8 +219,40 @@ uint64_t g_decomp_normalize_cycles = 0;
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// Why the fixed-base cache file operations below carry NOSONAR cppsecurity:S2083
+// ---------------------------------------------------------------------------
+// S2083 is "path injection via a user-controlled path". Every file operation in
+// this translation unit acts on the fixed-base cache path, which is one of:
+//
+//   1. FixedBaseConfig::cache_path / cache_dir -- chosen by the CALLER through
+//      the public API. A library whose documented contract is "tell me where to
+//      keep the table" cannot treat its own parameter as attacker input; the
+//      caller already decides what this process does.
+//   2. The per-user cache directory ($XDG_CACHE_HOME/secp256k1, ~/.cache/...,
+//      %LOCALAPPDATA%\secp256k1) -- derived from the environment of the process
+//      itself, created 0700.
+//   3. secure_temp_cache_dir() -- <temp>/secp256k1-<uid>, created 0700 and
+//      re-checked with lstat for "is a directory, owned by us, not group- or
+//      world-writable" before anything is read from or written to it.
+//
+// Case 3 is the one that WAS a real finding and is fixed rather than suppressed:
+// the temp fallback used to be the bare, world-writable temp directory with a
+// predictable filename, so any local user could plant a cache file and have it
+// loaded -- and validate_precompute_context() checks table SHAPE, never that
+// the points are genuine multiples of G. See secure_temp_cache_dir() for the
+// full reasoning and for what happens when a safe directory cannot be made.
+//
+// Residual, stated rather than hidden: a poisoned cache file inside a directory
+// the user themselves owns is still loaded without cryptographic verification.
+// That is not a privilege boundary -- anything running as the user can already
+// replace the library -- but a load-time check that the table really is
+// multiples of G would be defence in depth, and is deliberately NOT claimed
+// here because it is not implemented.
+// ---------------------------------------------------------------------------
+
 static bool remove_file_if_exists(const std::string& path) {
-    if (std::remove(path.c_str()) == 0) {
+    if (std::remove(path.c_str()) == 0) {  // NOSONAR cppsecurity:S2083
         return true;
     }
     return errno == ENOENT;
@@ -2307,9 +2339,9 @@ bool make_directory(const std::string& path) {
         return (st.st_mode & S_IFDIR) != 0;
     }
 #if defined(_WIN32)
-    return _mkdir(path.c_str()) == 0 || errno == EEXIST;
+    return _mkdir(path.c_str()) == 0 || errno == EEXIST;  // NOSONAR cppsecurity:S2083
 #else
-    return ::mkdir(path.c_str(), 0700) == 0 || errno == EEXIST;
+    return ::mkdir(path.c_str(), 0700) == 0 || errno == EEXIST;  // NOSONAR cppsecurity:S2083
 #endif
 }
 
@@ -2352,7 +2384,57 @@ std::string system_temp_dir() {
 #if defined(_WIN32)
     return ".";   // no TMP/TEMP set on Windows is pathological; stay put
 #else
-    return "/tmp";
+    return "/tmp";  // NOSONAR -- never used directly; see secure_temp_cache_dir()
+#endif
+}
+
+// A private, per-user directory INSIDE the temp directory -- or nothing.
+//
+// SECURITY (SonarCloud cpp:S5443, 2026-09-21). The temp fallback used to hand
+// back /tmp itself, and the cache file placed there has a predictable name
+// (cache_w18.bin). /tmp is world-writable, so on a multi-user host any local
+// user could pre-create that file, and load_precompute_cache_locked() would
+// read it: validate_precompute_context() checks window counts, digit counts and
+// table SHAPE, never that the points are genuine multiples of G. A poisoned
+// table of the right shape is accepted, and it is the fixed-base table -- it
+// decides the result of every k*G, i.e. every public key and every signature
+// derived through it. That is a local attacker controlling key material, not a
+// cosmetic finding.
+//
+// The fallback is kept rather than removed: turning the disk cache off entirely
+// is what previously took exploit_selftest_api from 6.6 s to a 120 s CI timeout
+// on every platform, because each process then rebuilds a ~250 MB table. What
+// changes is WHERE it goes -- <temp>/secp256k1-<uid>, created 0700 and verified
+// to be ours before use.
+//
+// Returns "" when a safe directory cannot be established. The caller treats
+// that as "no disk cache", which is the correct trade: a slower build is
+// recoverable, a poisoned generator table is not.
+std::string secure_temp_cache_dir() {
+#if defined(_WIN32)
+    // %TMP%/%TEMP% on Windows already resolve under the per-user profile, and
+    // the ACL model has no world-writable /tmp equivalent to guard against.
+    return system_temp_dir();
+#else
+    std::string const base = system_temp_dir();
+    if (base.empty()) return {};
+    std::string const dir = base + "/secp256k1-" + std::to_string(static_cast<unsigned long>(geteuid()));
+
+    // EEXIST is fine -- the checks below decide whether an existing directory is
+    // acceptable. Any other failure means we could not make it, so give up.
+    if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+        return {};
+    }
+
+    // lstat, not stat: a symlink planted at this path must be rejected, not
+    // followed to whatever it points at.
+    struct stat st{};
+    if (::lstat(dir.c_str(), &st) != 0) return {};
+    if (!S_ISDIR(st.st_mode))          return {};   // not a directory (symlink, file, fifo)
+    if (st.st_uid != ::geteuid())      return {};   // someone else owns it
+    if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0) return {};  // group/world writable
+
+    return dir;
 #endif
 }
 
@@ -2404,7 +2486,10 @@ DefaultCacheDir compute_default_cache_dir() {
     if (!user_dir.empty() && make_directories(user_dir)) {
         return DefaultCacheDir{user_dir, true};
     }
-    return DefaultCacheDir{system_temp_dir(), false};
+    // secure_temp_cache_dir() returns "" when it cannot establish a directory
+    // that is ours and ours alone; get_default_cache_path() turns that into "no
+    // disk cache" rather than falling back to a shared location.
+    return DefaultCacheDir{secure_temp_cache_dir(), false};
 }
 
 // Resolved once: the answer cannot change within a process, and the directory
@@ -2437,6 +2522,13 @@ std::string get_default_cache_path(unsigned window_bits) {
     std::string const filename = cache_filename(window_bits);
     std::string const dir = g_config.cache_dir.empty() ? default_cache_dir()
                                                        : g_config.cache_dir;
+    // An empty directory means secure_temp_cache_dir() refused: no per-user
+    // cache directory exists and no private one could be made under the temp
+    // directory. Return "" rather than "/cache_w18.bin"; ensure_built_locked()
+    // reads that as "build in memory, write nothing".
+    if (dir.empty()) {
+        return {};
+    }
     return dir + "/" + filename;
 }
 
@@ -2545,7 +2637,7 @@ bool save_precompute_cache_locked(const std::string& path) {
     std::string const tmp_path = path + ".tmp." + std::to_string(getpid());
 #endif
     
-    std::ofstream file(tmp_path, std::ios::binary);
+    std::ofstream file(tmp_path, std::ios::binary);  // NOSONAR cppsecurity:S2083
     if (!file.is_open()) {
         return false;
     }
@@ -2597,7 +2689,7 @@ bool save_precompute_cache_locked(const std::string& path) {
     // Atomic rename: readers see either the old complete file or the new complete file.
     // Use std::rename (C) instead of std::filesystem::rename to avoid MSan false
     // positives from uninstrumented libstdc++ filesystem internals.
-    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {  // NOSONAR cppsecurity:S2083
         (void)remove_file_if_exists(tmp_path);
         return false;
     }
@@ -2617,7 +2709,7 @@ bool load_precompute_cache_locked(const std::string& path, unsigned max_windows)
     auto load_start = std::chrono::steady_clock::now();
 #endif
     
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(path, std::ios::binary);  // NOSONAR cppsecurity:S2083
     if (!file.is_open()) {
         return false;
     }
@@ -2778,13 +2870,22 @@ void ensure_built_locked() {
         // Fallback: in-memory build (should not normally be reached)
 #endif
         // Try to load from cache if enabled
-        if (g_config.use_cache) {
-            // MSan-safe path selection: std::string::empty() reads SSO bits which
-            // are untracked under MSan with uninstrumented libc++, causing false
-            // positives. Use the scalar bool flag instead to avoid __is_long().
-            std::string cache_path = g_config.cache_path_set
-                                         ? g_config.cache_path
-                                         : get_default_cache_path(g_config.window_bits);
+        // cache_path_len is the MSan-safe emptiness test: std::string::empty()
+        // reads SSO bits that are untracked under MSan with an uninstrumented
+        // libc++, so __is_long() reports a false positive. size() does not.
+        std::string const resolved_cache_path =
+            g_config.cache_path_set ? g_config.cache_path
+                                    : get_default_cache_path(g_config.window_bits);
+        bool const have_cache_path = resolved_cache_path.size() != 0;
+
+        // use_cache says the caller WANTS a disk cache; have_cache_path says we
+        // found somewhere safe to put it. An empty path means
+        // secure_temp_cache_dir() refused -- no per-user directory and no
+        // private one creatable under the temp directory -- and the correct
+        // response is to build in memory, not to write the fixed-base table
+        // somewhere another local user can replace it.
+        if (g_config.use_cache && have_cache_path) {
+            std::string cache_path = resolved_cache_path;
             
             // Try to load existing cache (using _locked version since we already have the mutex)
             if (load_precompute_cache_locked(cache_path, g_config.max_windows_to_load)) {

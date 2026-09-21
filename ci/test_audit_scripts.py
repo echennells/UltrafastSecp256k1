@@ -4609,6 +4609,38 @@ def check_windows_cuda_contract_fixtures() -> None:
                     f"hash-pin ({run[:80]!r})"
                 )
 
+    # Block 2's job timeout must leave room for a COLD build.
+    #
+    # GitHub Actions caches are branch-scoped: a run restores caches from its own
+    # branch or the default branch and nothing else. main IS the default branch,
+    # so it can only use caches main itself created, and main builds only when a
+    # release merge lands -- its ccache is effectively always cold while dev's is
+    # warm. The v4.6.0 merge hit the old 45-minute limit twice in a row, at
+    # 45m22s and 45m19s, and "Gate / Final Verdict" failed both times on a build
+    # that was never allowed to finish. Anything at or below 45 reintroduces that
+    # on the next release merge, which is the worst possible moment to find it.
+    try:
+        import yaml as _yaml
+        gate = _yaml.safe_load((LIB_ROOT / ".github" / "workflows" / "gate.yml")
+                               .read_text(encoding="utf-8"))
+    except Exception as exc:
+        failures.append(f"gate.yml does not parse as YAML: {exc}")
+    else:
+        build_jobs = [
+            (jid, job) for jid, job in (gate.get("jobs") or {}).items()
+            if "Build + Unit Tests" in str(job.get("name", ""))
+        ]
+        if not build_jobs:
+            failures.append("gate.yml has no 'Block 2 / Build + Unit Tests' job")
+        for jid, job in build_jobs:
+            tmo = job.get("timeout-minutes")
+            if not isinstance(tmo, int):
+                failures.append(f"gate.yml job {jid} has no integer timeout-minutes")
+            elif tmo < 60:
+                failures.append(
+                    f"gate.yml job {jid} timeout-minutes={tmo} is below 60; a cold "
+                    f"main build was cut at 45 twice during the v4.6.0 merge"
+                )
     # The requirements file itself must exist and actually carry hashes --
     # --require-hashes against a hashless file is a pip error, not a silent pass.
     reqs = LIB_ROOT / requirements_file

@@ -657,15 +657,27 @@ static bool run_external_vectors(bool verbose) {
     if (!path) return true; // Not provided: treat as success
     // Reject paths with directory traversal
     if (std::string(path).find("..") != std::string::npos) return true;
+    // NOSONAR cppsecurity:S2083 -- the path comes from SECP256K1_SELFTEST_VECTORS,
+    // an opt-in environment variable read by the SELFTEST harness, not from a
+    // request, a file or any remote input. Whoever sets it already controls the
+    // process environment, so it is not a privilege boundary: a caller who can
+    // set it can equally run any binary they like. Traversal is rejected above,
+    // the file is opened read-only, a missing file is non-fatal, and nothing
+    // here writes. Left as an env-var read rather than "hardened" into a fixed
+    // path, because the whole point of the hook is that an auditor can point it
+    // at their own vector file.
     std::ifstream in(path);
     if (!in) {
         if (verbose) {
+            // NOSONAR cppsecurity:S5145 -- see above; `path` is operator-supplied
+            // and this is a console diagnostic, not a structured log another
+            // system parses.
             SELFTEST_PRINT("\n[Selftest] Vector file not found: %s (skipping)\n", path);
         }
         return true; // Non-fatal
     }
     if (verbose) {
-        SELFTEST_PRINT("\nExternal Vector Tests (%s):\n", path);
+        SELFTEST_PRINT("\nExternal Vector Tests (%s):\n", path);  // NOSONAR cppsecurity:S5145
     }
     bool all_ok = true;
     std::string line;

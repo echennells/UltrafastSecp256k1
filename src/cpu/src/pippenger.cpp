@@ -86,8 +86,19 @@ static inline uint32_t extract_digit(const Scalar& s, unsigned bit_offset, unsig
     // Primary word: shift down to align desired bits
     std::uint64_t word = limbs[limb_idx] >> bit_idx;
 
-    // If window crosses a limb boundary, OR in bits from next limb
-    if (bit_idx + width > 64 && limb_idx < 3) {
+    // If window crosses a limb boundary, OR in bits from next limb.
+    //
+    // bit_idx != 0 is not redundant with the condition beside it, it is what
+    // makes the shift defined. `limbs[...] << (64 - bit_idx)` is undefined
+    // behaviour at bit_idx == 0, because shifting a 64-bit value by 64 is UB
+    // rather than zero. The surrounding arithmetic already rules that out --
+    // reaching the shift with bit_idx == 0 would need width > 64, and width is
+    // a window width bounded well below that -- but "unreachable if you follow
+    // three other invariants" is not something a reader or an analyser can see
+    // locally, and SonarCloud cpp:S3949 flagged exactly this. Stating the
+    // precondition where the shift happens costs one comparison that the
+    // optimiser folds away, and makes the safety local instead of inferred.
+    if (bit_idx != 0 && bit_idx + width > 64 && limb_idx < 3) {
         word |= limbs[limb_idx + 1] << (64 - bit_idx);
     }
 

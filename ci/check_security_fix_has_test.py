@@ -98,6 +98,20 @@ TEST_PATTERNS = (
 # commit (retroactive coverage). The gate accepts these provided the named
 # test file exists on disk. Format: sha_prefix → [test_file, reason].
 RETROACTIVELY_COVERED: dict[str, tuple[list[str], str]] = {
+    "a7842fe2b2": (
+        ["ci/test_audit_scripts.py"],
+        "gate.yml is a SECURITY_CI_FILE, and this commit changed exactly one thing "
+        "in it: Block 2's timeout-minutes, 45 -> 90. A cold main build was cut at "
+        "the 45-minute limit twice during the v4.6.0 merge (45m22s, 45m19s) because "
+        "GitHub Actions caches are branch-scoped and main -- the default branch -- "
+        "can only restore caches it created itself, which happens only on release "
+        "merges. The paired check is the timeout floor added to "
+        "check_windows_cuda_contract_fixtures() in ci/test_audit_scripts.py in the "
+        "immediately-following commit: it parses gate.yml and fails if Block 2's "
+        "timeout-minutes is missing, non-integer, or back below 60. No gate logic, "
+        "no job list and no permission changed here -- only how long one build is "
+        "allowed to take.",
+    ),
     "8c25dd3eb1": (
         ["audit/test_regression_scalar_decomposition_and_comb.cpp"],
         "Pure dead-code removal: jac52_add_mixed_inplace_zr (src/cpu/src/point.cpp) "
@@ -732,7 +746,7 @@ RETROACTIVELY_COVERED: dict[str, tuple[list[str], str]] = {
 # Frozen count guard (CAAS-006): prevents silent whitelist growth.
 # When adding a new entry above, increment this constant too.
 # Unauthorized bypass (adding an entry without incrementing) → import-time assertion failure.
-RETROACTIVELY_COVERED_FROZEN_COUNT: int = 65
+RETROACTIVELY_COVERED_FROZEN_COUNT: int = 66
 assert len(RETROACTIVELY_COVERED) == RETROACTIVELY_COVERED_FROZEN_COUNT, (
     f"RETROACTIVELY_COVERED has {len(RETROACTIVELY_COVERED)} entries but "
     f"RETROACTIVELY_COVERED_FROZEN_COUNT={RETROACTIVELY_COVERED_FROZEN_COUNT}. "
