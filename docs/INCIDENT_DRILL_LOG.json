@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-09-15T02:39:44.691898+00:00",
-  "commit": "7a7e71340a09f097961b2b62788bae839f7a831c",
+  "timestamp": "2026-09-21T10:08:40.835699+00:00",
+  "commit": "86b5386678a42db337a7207b97991e007c37f2c3",
   "overall_pass": true,
   "drills_total": 3,
   "drills_passed": 3,
-  "drill_response_time_seconds": 2.96,
+  "drill_response_time_seconds": 1.72,
   "injections": [
     {
       "drill": "key_compromise",
@@ -36,7 +36,7 @@
       "injected_fault": "known-weak / out-of-range private keys (zero, n, n+1, all-ones)",
       "detection_gate": "ufsecp pubkey() ABI boundary (strict scalar parse)",
       "detected": true,
-      "elapsed_seconds": 2.79,
+      "elapsed_seconds": 1.61,
       "weak_keys_tested": 4,
       "results": [
         {
@@ -64,7 +64,7 @@
       "injected_fault": "tampered build artifact (provider-B hash mismatch)",
       "detection_gate": "multi_ci_repro_check.py",
       "detected": true,
-      "elapsed_seconds": 0.04,
+      "elapsed_seconds": 0.03,
       "legit_hash": "9591c3413eb94501503e251559da8bd592c91afe2bb6349b24a6be745336e612",
       "tampered_hash": "6d578ac8241868a9d71ab6459806d6c52c2160e0b8361a334bee37bea120022c",
       "issues": []
@@ -75,7 +75,7 @@
       "injected_fault": "CMakeLists.txt with no cmake_minimum_required (unpinned toolchain)",
       "detection_gate": "supply_chain_gate.check_build_input_pinning",
       "detected": true,
-      "elapsed_seconds": 0.13,
+      "elapsed_seconds": 0.08,
       "issues": []
     }
   ]
