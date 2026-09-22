@@ -1,6 +1,28 @@
 # Secret Lifecycle Review
 
-**Last updated**: 2026-09-21 | **Version**: 4.6.0
+**Last updated**: 2026-09-22 | **Version**: 4.6.0
+
+### 2026-09-22 - process-wide state can now be released (GitHub #430): what that frees, and what it does not
+
+`secp256k1::release_process_resources()` / `ufsecp_release_process_resources()`
+free the fused dual-mul generator tables and stop the batch worker pool. Neither
+is secret material, and the release is not a zeroization mechanism:
+
+- **The generator tables hold multiples of G and H = 2^128·G** -- public
+  constants, identical for every user of the curve. They are freed with plain
+  `delete`; there is nothing to erase.
+- **The worker pool runs verification only.** Batch verify is variable-time over
+  public data (signatures, pubkeys, messages); no private key, nonce or signing
+  share ever reaches a pool worker. Joining the workers ends their
+  `thread_local` state, which is public-data verify caches.
+
+So this change moves no secret lifetime and adds no erase obligation. It exists
+because the retained blocks were indistinguishable from a leak in the MSVC debug
+CRT and leak sanitizers, not because anything sensitive outlived its use.
+
+Unchanged and stated for completeness: nothing in the library keeps a secret in
+process-wide storage. Secret-bearing buffers stay on the stack of the signing
+call and are `secure_erase`d there, exactly as the entries below describe.
 
 ### 2026-09-21 - v4.6.0 addendum: the cache file on disk holds no secret, and its directory is now private
 

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -4196,8 +4197,30 @@ namespace {
         }
     }
 
+    // Built on the first verify that needs it and kept for the life of the process.
+    //
+    // At w=15 the two tables are 8192 entries each, and GitHub issue #430 reports the
+    // block that makes: 1,310,720 bytes still live at exit, which the MSVC debug CRT and
+    // every leak sanitizer report as a leak even though it is one-time and bounded. The
+    // allocation stays deliberate -- an immortal table has no static-destruction-order
+    // hazard and costs nothing to keep -- but it is now explicitly releasable through
+    // secp256k1::release_process_resources(), so an embedder under a leak check can hand
+    // it back instead of carrying a suppression.
+    //
+    // Atomic pointer rather than a magic static because the release has to be able to
+    // null it. The hot path is one acquire load, the same cost class as the magic-static
+    // guard it replaces; the mutex is taken only on the first call after a release.
+    std::atomic<const DualMulGenTables*> g_dual_mul_gen_tables{nullptr};
+    std::mutex                           g_dual_mul_gen_tables_init_m;
+
     static const DualMulGenTables* get_dual_mul_gen_tables() {
-        static const DualMulGenTables* const tables = []() -> const DualMulGenTables* {
+        if (const DualMulGenTables* p =
+                g_dual_mul_gen_tables.load(std::memory_order_acquire)) {
+            return p;
+        }
+        std::lock_guard<std::mutex> lk(g_dual_mul_gen_tables_init_m);
+        const DualMulGenTables* p = g_dual_mul_gen_tables.load(std::memory_order_relaxed);
+        if (!p) {
             auto* t = new DualMulGenTables;
             Point const G = Point::generator();
             JacobianPoint52 const G52 = to_jac52(G);
@@ -4205,12 +4228,46 @@ namespace {
             JacobianPoint52 H52 = G52;
             for (std::size_t i = 0; i < 128; i++) jac52_double_inplace(H52);
             dual_mul_build_table(H52, t->tbl_H, static_cast<std::size_t>(kDualMulGTableSize));
-            return t;
-        }();
-        return tables;
+            p = t;
+            g_dual_mul_gen_tables.store(p, std::memory_order_release);
+        }
+        return p;
     }
 } // anonymous namespace
 #endif
+
+namespace detail {
+
+// Reachable from src/cpu/src/process_resources.cpp, which is what
+// secp256k1::release_process_resources() calls. Defined unconditionally so that
+// translation unit needs no copy of the guard above.
+//
+// SCOPE: this covers the FE52 dual-mul G/H tables only. The ESP32/STM32 arm of
+// dual_scalar_mul_gen_point keeps its own generator table in a function-local static
+// (see the comment there); it is deliberately left alone because reaching it would mean
+// hoisting WINDOW_G/TABLE_SIZE_G to file scope in a path that is not built or tested on
+// a desktop host, and because the platforms that compile it have no debug CRT and no
+// leak sanitizer to report it to.
+bool gen_tables_active() noexcept {
+#if defined(SECP256K1_FE52_COMPUTE) && !defined(SECP256K1_USE_4X64_POINT_OPS)
+    return g_dual_mul_gen_tables.load(std::memory_order_acquire) != nullptr;
+#else
+    return false;
+#endif
+}
+
+void release_gen_tables() noexcept {
+#if defined(SECP256K1_FE52_COMPUTE) && !defined(SECP256K1_USE_4X64_POINT_OPS)
+    const DualMulGenTables* p = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_dual_mul_gen_tables_init_m);
+        p = g_dual_mul_gen_tables.exchange(nullptr, std::memory_order_acq_rel);
+    }
+    delete p;
+#endif
+}
+
+}  // namespace detail
 
 // FE52 fused dual-mul (a*G + b*P) — the verify hot path. Enabled wherever FE52 COMPUTE
 // is available, INCLUDING MSVC cl: with the pointer-accumulation u128 (Step A,
@@ -4610,6 +4667,14 @@ Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const P
 
     // C++11 magic static: thread-safe one-time initialization.
     // Replaces bare check-then-allocate pattern that had a data race.
+    //
+    // Unlike the FE52 tables above this one is NOT covered by
+    // secp256k1::release_process_resources(): it is function-local, so reaching it would
+    // mean hoisting it and WINDOW_G/TABLE_SIZE_G to file scope in an arm that no desktop
+    // host builds or tests. Deliberate: the targets that compile this (ESP32, STM32) have
+    // no debug CRT and no leak sanitizer to report the retention to, and a single
+    // never-exiting firmware process has nothing to hand the memory back to. If this arm
+    // ever gains a host-testable build, hoist it the way the FE52 tables were hoisted.
     static const DualGenTables& gen4 = *[]() {
         auto* t = new DualGenTables;
 

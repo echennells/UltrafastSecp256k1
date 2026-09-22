@@ -2,6 +2,31 @@
 
 **UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-22 - explicit release of process-wide state (GitHub #430)
+
+**New API, no claim moves.** `secp256k1::release_process_resources()` and
+`secp256k1::process_resources_active()` (header `secp256k1/process_resources.hpp`),
+plus the C ABI wrapper `ufsecp_release_process_resources()`. They free the fused
+dual-mul generator tables and join the batch-verify worker pool.
+
+What a consumer can rely on:
+
+- **Default behaviour is unchanged.** Nothing is released unless the embedder
+  calls it. The tables and the pool are still retained for the process lifetime
+  otherwise, deliberately: the pool has no automatic destruction because its
+  destructor joins threads, which deadlocks under the Windows loader lock during
+  DLL unload.
+- **Correctness after a release.** The next call rebuilds what it needs. Covered
+  by `audit/test_regression_process_resource_release.cpp` PRR-5: the rebuilt
+  `a*G + b*P` is byte-identical to the pre-release answer and equal to an
+  independent two-scalar-mul computation.
+- **Precondition, not a guarantee:** no other thread may be inside the library
+  during the call. It is not thread-safe against a concurrent verify, by design --
+  making it so would put a lock on the verify hot path.
+- **No CT boundary moves.** Both released objects serve public-data verification
+  only; no signing path is touched.
+- **Not covered:** the ESP32/STM32 arm's function-local generator table.
+
 ### 2026-09-21 - v4.6.0 addendum: the fixed-base cache and a trust boundary we had not named
 
 Found by SonarCloud's gate on `main` while preparing the release, and added to

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -62,21 +63,10 @@ bool gpu_columns_available() noexcept {
     return false;
 }
 
-namespace detail {
-// Single process-wide persistent worker pool, lazily created on first batch-verify _mt
-// call and reused thereafter (no per-call thread spawn).
-//
-// INTENTIONALLY LEAKED (heap, never deleted): the destructor would join the worker
-// threads at static-destruction time, which on Windows runs during DLL unload while the
-// loader lock is held — joining threads there deadlocks (the workers need the loader lock
-// to exit). Leaking the singleton means no destructor runs; the OS reclaims the threads
-// and memory at process exit. This is the portable (MSVC + libstdc++ + libc++) choice and
-// avoids static-destruction-order hazards as well.
-BatchWorkerPool& batch_worker_pool() {
-    static BatchWorkerPool* pool = new BatchWorkerPool();
-    return *pool;
-}
-}  // namespace detail
+// The process-wide persistent worker pool used by the _mt paths below now lives in
+// secp256k1/detail/batch_pool.hpp: it is reached from process_resources.cpp, which is
+// compiled unconditionally, while this translation unit is not (SECP256K1_BUILD_PIPPENGER).
+// See that header for why the pool has no automatic destruction and how it is released.
 
 // Seeded hash for 32-byte pubkey deduplication.
 // Seed is randomised per batch call so adversarial pubkey inputs cannot

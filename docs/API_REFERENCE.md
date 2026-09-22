@@ -359,6 +359,56 @@ if (!passed) {
 
 ---
 
+#### Process-wide resources
+
+Two things in this library are built on first use and then kept for the life of
+the process: the fused dual-mul generator tables (built on the first verify that
+needs them) and the batch-verify worker pool (one thread per hardware thread).
+
+Both are deliberate. An immortal table has no static-destruction-order hazard,
+and the pool has **no** automatic destruction because its destructor joins
+threads — at static-destruction time on Windows that runs during DLL unload while
+the loader lock is held, and joining there deadlocks.
+
+If you never run a leak check, nothing here concerns you and there is nothing to
+call. If you do — the MSVC debug CRT, Boost.Test's `_CRTDBG_LEAK_CHECK_DF`,
+ASan/LSan — that retained state is reported as live blocks at exit
+(GitHub issue [#430](https://github.com/shrec/UltrafastSecp256k1/issues/430):
+259 blocks, ~1.32 MB, one-time and bounded rather than accumulating). Release it
+explicitly instead of carrying a suppression:
+
+```cpp
+#include <secp256k1/process_resources.hpp>
+
+int main() {
+    // ... use the library ...
+
+    secp256k1::release_process_resources();   // frees the tables, joins the pool
+    assert(!secp256k1::process_resources_active());
+}
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `release_process_resources` | `() noexcept -> void` | Free every process-wide table and stop the batch worker pool. Idempotent; a no-op if the library was never used |
+| `process_resources_active` | `() noexcept -> bool` | True while any table is built or the pool is running — so the release can be asserted, not assumed |
+
+**Preconditions.** No other thread may be inside the library: this joins the
+batch worker threads. Do not call it from `DllMain`, from a static destructor, or
+from anything else running under the Windows loader lock — that is the deadlock
+the pool avoids by having no destructor in the first place. Call it from your own
+code, on a thread you control, e.g. at the end of `main()`.
+
+**Not a one-way door.** The next call into the library rebuilds what it needs, so
+this is safe to call at a quiet point and keep running.
+
+C callers use `ufsecp_release_process_resources()`; it releases the same state.
+
+Not covered: the ESP32/STM32 generator table, which is function-local on those
+targets. They have no debug CRT and no leak sanitizer to report it to.
+
+---
+
 ### ECDSA (RFC 6979)
 
 **Namespace:** `secp256k1`
@@ -2233,6 +2283,13 @@ ufsecp_set_cache_dir("/var/lib/myapp/ufsecp_cache");
 
 // Destroy (NULL-safe)
 ufsecp_ctx_destroy(ctx);
+
+// Free the library's process-wide lazily-built state: the fused dual-mul
+// generator tables and the batch worker pool (joins its threads). Idempotent,
+// process-global, and independent of ufsecp_ctx_destroy. Not a one-way door --
+// the next call rebuilds what it needs. Call it from your own code, never from
+// DllMain or a static destructor. See "Process-wide resources" below.
+ufsecp_release_process_resources();
 ```
 
 | Function | Signature | Description |
@@ -2245,6 +2302,7 @@ ufsecp_ctx_destroy(ctx);
 | `ufsecp_ctx_size` | `(void) -> size_t` | Compiled ctx struct size |
 | `ufsecp_set_cache_dir` | `(const char* dir\|NULL) -> error_t` | Set fixed-base cache directory (replaces config.ini); NULL/"" = CWD. Process-global |
 | `ufsecp_context_randomize` | `(ctx, seed32[32]\|NULL) -> error_t` | Install scalar blinding (thread-local); NULL clears |
+| `ufsecp_release_process_resources` | `(void) -> void` | Free process-wide tables + stop the batch worker pool. Idempotent; not bound to any ctx. Requires no other thread inside the library |
 
 <a id="c-abi-private-key-operations"></a>
 ### Private Key Operations

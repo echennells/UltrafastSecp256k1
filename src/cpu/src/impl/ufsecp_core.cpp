@@ -103,6 +103,13 @@ size_t ufsecp_ctx_size(void) {
     return sizeof(ufsecp_ctx);
 }
 
+void ufsecp_release_process_resources(void) {
+    // Deliberately NOT tied to ufsecp_ctx_destroy(): the generator tables and the batch
+    // worker pool are process-global, and destroying one context must not free state
+    // another context is still using. See secp256k1/process_resources.hpp and GH#430.
+    secp256k1::release_process_resources();
+}
+
 ufsecp_error_t ufsecp_set_cache_dir(const char* dir) {
     // Programmatic replacement for config.ini: point the engine at the caller's
     // fixed-base cache directory. NULL/"" means "use the current directory".

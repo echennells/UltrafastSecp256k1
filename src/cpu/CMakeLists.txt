@@ -29,6 +29,7 @@ set(SECP256K1_SOURCES
     src/scalar.cpp
     src/point.cpp
     src/precompute.cpp
+    src/process_resources.cpp  # explicit teardown for process-wide tables + the batch pool (GH#430)
     src/field_asm.cpp      # Tier 2: BMI2 intrinsics (runtime detection)
     src/glv.cpp            # GLV endomorphism optimization
     src/selftest.cpp       # Self-test with known arithmetic vectors

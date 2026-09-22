@@ -3721,6 +3721,25 @@ add_test(NAME regression_fixed_base_cache_lifecycle
 set_tests_properties(regression_fixed_base_cache_lifecycle PROPERTIES
     TIMEOUT 120 LABELS "audit;regression;precompute;cache")
 
+# -- Process-wide resource teardown (evoskuil #430: 259 blocks live at exit) ---
+add_executable(test_regression_process_resource_release_standalone
+    test_regression_process_resource_release.cpp
+    # PRR-7 exercises the C ABI wrapper, so this target carries the FFI impl the
+    # unified runner already compiles.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/cpu/src/ufsecp_impl.cpp)
+audit_target_defaults(test_regression_process_resource_release_standalone)
+target_link_libraries(test_regression_process_resource_release_standalone PRIVATE Threads::Threads)
+target_include_directories(test_regression_process_resource_release_standalone PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_BINARY_DIR}/include
+)
+target_compile_definitions(test_regression_process_resource_release_standalone PRIVATE
+    STANDALONE_TEST UFSECP_BUILDING)
+add_test(NAME regression_process_resource_release
+    COMMAND test_regression_process_resource_release_standalone)
+set_tests_properties(regression_process_resource_release PROPERTIES
+    TIMEOUT 120 LABELS "audit;regression;lifecycle;threads")
+
 # -- PT_TLS alignment (Android arm64 could not load any binary at all) --------
 add_executable(test_regression_tls_segment_alignment_standalone
     test_regression_tls_segment_alignment.cpp)
@@ -4517,6 +4536,8 @@ add_executable(unified_audit_runner
     test_regression_metal_buffer_binding_order.cpp
     # Regression: fixed-base cache does not litter the working directory.
     test_regression_fixed_base_cache_lifecycle.cpp
+    # Regression: release_process_resources() frees the retained tables + pool (#430).
+    test_regression_process_resource_release.cpp
     # Regression: PT_TLS alignment >= 64 so Android arm64 can load the image.
     test_regression_tls_segment_alignment.cpp
     # SEC-001: CT scalar_inverse zero-branch removal (2026-05-21)
