@@ -14,7 +14,9 @@ Sources:
   ci_workflow_*    ← .github/workflows/*.yml count
   ct_pipelines     ← .github/workflows/ct-*.yml count
   bitcoin_core_*   ← docs/BITCOIN_CORE_TEST_RESULTS.json
-  last_updated     ← today's date (UTC)
+  last_updated     ← today's date (UTC), but only when some other field moved;
+                     a run that derives an identical set of numbers keeps the
+                     stored date so the file stays byte-identical (see main()).
 """
 
 from __future__ import annotations
@@ -146,6 +148,22 @@ def main() -> int:
         return 0
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    # last_updated is decorative — the --dry-run drift check above deliberately
+    # pops it from both sides before comparing. Rewriting it unconditionally made
+    # this script dirty the tree on every day except the one it last ran on, and
+    # release.yml's sync-docs job reads `git diff --quiet` as "the developer
+    # forgot to stamp the CHANGELOG": it commits, force-moves the release tag off
+    # main onto that commit, and the retag re-triggers Release — whose CAAS gate
+    # then fails, because the evidence bundle still records the pre-stamp SHA.
+    # Keep the stored date when nothing that is actually checked has changed.
+    if OUT.exists():
+        try:
+            existing = json.loads(OUT.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if {k: v for k, v in existing.items() if k != "last_updated"} == \
+           {k: v for k, v in data.items() if k != "last_updated"}:
+            data["last_updated"] = existing.get("last_updated", data["last_updated"])
     OUT.write_text(json.dumps(data, indent=2) + "\n")
     print(f"\nWrote {OUT}")
     return 0
