@@ -37,7 +37,24 @@ permissions:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A CEILING for a runaway job, not a measurement of how long this takes.
+    #
+    # The ccache below is branch-scoped by GitHub: a run restores caches written
+    # by its own branch or by the default branch, and nothing else. main IS the
+    # default branch, so it restores only what main itself wrote -- and main
+    # builds only when a release merge lands, so its ccache is cold every time,
+    # while dev's is warm on almost every push. The v4.6.0 release merge logged
+    # "Cache not found for input keys: ccache-bench-..., ccache-bench-", spent
+    # 2252s in Build, and the 45-minute cap cut `bench_unified` mid-suite at
+    # 45m22s -- leaving a red Benchmark Dashboard on main at the one moment it
+    # matters. The same commit on dev restored the cache and finished in 40m.
+    #
+    # 90 is chosen to be clearly above a cold build plus the full suite with
+    # room left over, so the cap fires only on a genuine hang. It is not a
+    # claim about this job's duration: wall-clock on a shared runner is not a
+    # benchmark, and these results carry a DIAGNOSTIC-ONLY disclaimer for that
+    # very reason.
+    timeout-minutes: 90
     permissions:
       contents: write
       deployments: write

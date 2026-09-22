@@ -4692,6 +4692,34 @@ def check_windows_cuda_contract_fixtures() -> None:
                     f"main build was cut at 45 twice during the v4.6.0 merge"
                 )
 
+    # benchmark.yml's Linux job builds from the same cold ccache on main, and it
+    # then has a full bench_unified suite to run on top of the build. The v4.6.0
+    # merge logged "Cache not found for input keys: ccache-bench-...", spent
+    # 2252s in Build, and was cut mid-suite at 45m22s -- a red Benchmark
+    # Dashboard on the release commit. The warm dev run of the same tree hit the
+    # cache and finished in 40m, which is the whole point: the branch that is
+    # always cold is the branch a release is cut from.
+    try:
+        import yaml as _yaml
+        bench = _yaml.safe_load((LIB_ROOT / ".github" / "workflows" / "benchmark.yml")
+                                .read_text(encoding="utf-8"))
+    except Exception as exc:
+        failures.append(f"benchmark.yml does not parse as YAML: {exc}")
+    else:
+        bench_job = (bench.get("jobs") or {}).get("benchmark")
+        if not isinstance(bench_job, dict):
+            failures.append("benchmark.yml has no 'benchmark' job")
+        else:
+            tmo = bench_job.get("timeout-minutes")
+            if not isinstance(tmo, int):
+                failures.append("benchmark.yml job benchmark has no integer timeout-minutes")
+            elif tmo < 60:
+                failures.append(
+                    f"benchmark.yml job benchmark timeout-minutes={tmo} is below 60; "
+                    f"a cold main build plus the bench suite was cut at 45 during the "
+                    f"v4.6.0 merge"
+                )
+
     # Every NOSONAR marker must sit on a line that carries CODE.
     #
     # SonarCloud honours NOSONAR only on the SAME line as the issue. A marker
