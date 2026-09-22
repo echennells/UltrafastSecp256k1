@@ -4641,6 +4641,53 @@ def check_windows_cuda_contract_fixtures() -> None:
                     f"gate.yml job {jid} timeout-minutes={tmo} is below 60; a cold "
                     f"main build was cut at 45 twice during the v4.6.0 merge"
                 )
+
+    # Every NOSONAR marker must sit on a line that carries CODE.
+    #
+    # SonarCloud honours NOSONAR only on the SAME line as the issue. A marker
+    # written into an explanatory comment block above the call looks right,
+    # reviews fine, and suppresses nothing. That happened during the v4.6.0
+    # Sonar pass: six markers appended to their own lines worked, the seventh
+    # went into the comment block above secure_temp_cache_dir()'s mkdir, and the
+    # quality gate stayed red on one BLOCKER while appearing to be handled.
+    #
+    # A comment-only line whose sole content is a NOSONAR marker is therefore a
+    # defect, not a style choice. The explanation belongs above; the marker
+    # belongs on the code.
+    for rel in ("src/cpu/src/precompute.cpp",
+                "src/cpu/src/selftest.cpp",
+                "src/cpu/include/secp256k1/point.hpp"):
+        src_file = LIB_ROOT / rel
+        try:
+            lines = src_file.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            failures.append(f"could not read {rel}: {exc}")
+            continue
+        for lineno, raw in enumerate(lines, 1):
+            if "NOSONAR" not in raw:
+                continue
+            # A line FAILS only when it IS a marker: a comment opener followed
+            # immediately by NOSONAR. Prose that merely mentions the word --
+            # "...operations below carry NOSONAR cppsecurity:S2083", or a
+            # rationale paragraph -- has text before it and is documentation,
+            # not a failed suppression. Flagging that would make this check
+            # unusable in exactly the files that need the explanation most.
+            body = raw.strip()
+            for opener in ("///", "//", "/*", "*"):
+                if body.startswith(opener):
+                    body = body[len(opener):].strip()
+                    break
+            else:
+                continue   # code precedes the marker -- this is the correct shape
+
+            if body.startswith("NOSONAR"):
+                failures.append(
+                    f"{rel}:{lineno}: NOSONAR marker sits on a comment-only line; "
+                    f"SonarCloud honours it only on the line carrying the issue, "
+                    f"so this suppresses nothing. Put the marker on the code line "
+                    f"and keep the reasoning in the comment above it."
+                )
+
     # The requirements file itself must exist and actually carry hashes --
     # --require-hashes against a hashless file is a pip error, not a silent pass.
     reqs = LIB_ROOT / requirements_file

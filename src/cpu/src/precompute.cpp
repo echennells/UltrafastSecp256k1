@@ -2422,7 +2422,19 @@ std::string secure_temp_cache_dir() {
 
     // EEXIST is fine -- the checks below decide whether an existing directory is
     // acceptable. Any other failure means we could not make it, so give up.
-    if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+    //
+    // Suppression rationale for cppsecurity:S2083, whose marker is on the mkdir
+    // line below -- a marker alone on a comment line suppresses nothing.
+    // `dir` is TMPDIR/TMP/TEMP plus a fixed
+    // "/secp256k1-<euid>" suffix. It is process-environment input, not request
+    // or file input: whoever sets TMPDIR for this process already chose what the
+    // process runs, so it is not a privilege boundary. This mkdir is also the
+    // hardening for the finding that WAS real (cpp:S5443, the bare world-
+    // writable temp dir) -- it creates the private directory, and the lstat
+    // ownership and permission checks immediately below decide whether it may be
+    // used at all. Flagging the mitigation as the vulnerability is the analyser
+    // following the taint, not a second defect.
+    if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {  // NOSONAR cppsecurity:S2083 -- see the block above
         return {};
     }
 
