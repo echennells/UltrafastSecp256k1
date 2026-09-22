@@ -4548,7 +4548,23 @@ def check_windows_cuda_contract_fixtures() -> None:
     """WIN-CUDA-001: reject silent CPU fallback and incomplete CUDA installs."""
     tag = "WIN-CUDA:workflow_contract_fixtures"
     failures = []
-    dependency_step = "python3 -m pip install --disable-pip-version-check --no-cache-dir PyYAML==6.0.2"
+    # The dependency install must be HASH-pinned, not merely version-pinned.
+    # Scorecard PinnedDependenciesID flagged the old
+    # `pip install ... PyYAML==6.0.2` form on all three workflows: a version pin
+    # still trusts whatever the index serves under that name. The requirements
+    # file carries every published sha256 for 6.0.2, and --require-hashes makes
+    # pip refuse anything else, so this fixture now pins the stronger property.
+    requirements_file = ".github/requirements/gate-deps.txt"
+    # Check the RENDERED command, not the raw file text. A first attempt at this
+    # wrote the install as a two-line plain scalar ending in a backslash. The
+    # YAML was valid and every substring check below passed, but a plain scalar
+    # FOLDS its newline into a space, so the runner received
+    #   pip install ... --no-cache-dir \ --require-hashes -r ...
+    # and pip reported: Invalid requirement: '--require-hashes'. Preflight went
+    # red on dev. Substring checks against the file cannot see that; parsing the
+    # YAML and inspecting the step's actual `run` string can.
+    required_fragments = ("--require-hashes", requirements_file)
+    step_name = "Install deterministic gate dependencies"
     for workflow_name in ("gate.yml", "doc-gates.yml", "preflight.yml"):
         workflow = LIB_ROOT / ".github" / "workflows" / workflow_name
         try:
@@ -4556,8 +4572,134 @@ def check_windows_cuda_contract_fixtures() -> None:
         except OSError as exc:
             failures.append(f"could not read {workflow_name}: {exc}")
             continue
-        if dependency_step not in workflow_text:
-            failures.append(f"{workflow_name} does not install pinned PyYAML before Python gates")
+        missing = [f for f in required_fragments if f not in workflow_text]
+        if missing:
+            failures.append(
+                f"{workflow_name} does not hash-pin its Python gate dependencies "
+                f"(missing {', '.join(missing)})"
+            )
+            continue
+
+        try:
+            import yaml as _yaml
+            parsed = _yaml.safe_load(workflow_text)
+        except Exception as exc:
+            failures.append(f"{workflow_name} does not parse as YAML: {exc}")
+            continue
+
+        runs = [
+            step.get("run", "")
+            for job in (parsed.get("jobs") or {}).values()
+            for step in (job.get("steps") or [])
+            if step.get("name") == step_name
+        ]
+        if not runs:
+            failures.append(f"{workflow_name} has no '{step_name}' step")
+            continue
+        for run in runs:
+            if "\\" in run:
+                failures.append(
+                    f"{workflow_name}: the '{step_name}' command carries a literal "
+                    f"backslash after YAML folding -- the shell will pass it to pip "
+                    f"as an argument. Use a single line or a block scalar."
+                )
+            if not all(f in run for f in required_fragments):
+                failures.append(
+                    f"{workflow_name}: the rendered '{step_name}' command does not "
+                    f"hash-pin ({run[:80]!r})"
+                )
+
+    # Block 2's job timeout must leave room for a COLD build.
+    #
+    # GitHub Actions caches are branch-scoped: a run restores caches from its own
+    # branch or the default branch and nothing else. main IS the default branch,
+    # so it can only use caches main itself created, and main builds only when a
+    # release merge lands -- its ccache is effectively always cold while dev's is
+    # warm. The v4.6.0 merge hit the old 45-minute limit twice in a row, at
+    # 45m22s and 45m19s, and "Gate / Final Verdict" failed both times on a build
+    # that was never allowed to finish. Anything at or below 45 reintroduces that
+    # on the next release merge, which is the worst possible moment to find it.
+    try:
+        import yaml as _yaml
+        gate = _yaml.safe_load((LIB_ROOT / ".github" / "workflows" / "gate.yml")
+                               .read_text(encoding="utf-8"))
+    except Exception as exc:
+        failures.append(f"gate.yml does not parse as YAML: {exc}")
+    else:
+        build_jobs = [
+            (jid, job) for jid, job in (gate.get("jobs") or {}).items()
+            if "Build + Unit Tests" in str(job.get("name", ""))
+        ]
+        if not build_jobs:
+            failures.append("gate.yml has no 'Block 2 / Build + Unit Tests' job")
+        for jid, job in build_jobs:
+            tmo = job.get("timeout-minutes")
+            if not isinstance(tmo, int):
+                failures.append(f"gate.yml job {jid} has no integer timeout-minutes")
+            elif tmo < 60:
+                failures.append(
+                    f"gate.yml job {jid} timeout-minutes={tmo} is below 60; a cold "
+                    f"main build was cut at 45 twice during the v4.6.0 merge"
+                )
+
+    # Every NOSONAR marker must sit on a line that carries CODE.
+    #
+    # SonarCloud honours NOSONAR only on the SAME line as the issue. A marker
+    # written into an explanatory comment block above the call looks right,
+    # reviews fine, and suppresses nothing. That happened during the v4.6.0
+    # Sonar pass: six markers appended to their own lines worked, the seventh
+    # went into the comment block above secure_temp_cache_dir()'s mkdir, and the
+    # quality gate stayed red on one BLOCKER while appearing to be handled.
+    #
+    # A comment-only line whose sole content is a NOSONAR marker is therefore a
+    # defect, not a style choice. The explanation belongs above; the marker
+    # belongs on the code.
+    for rel in ("src/cpu/src/precompute.cpp",
+                "src/cpu/src/selftest.cpp",
+                "src/cpu/include/secp256k1/point.hpp"):
+        src_file = LIB_ROOT / rel
+        try:
+            lines = src_file.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            failures.append(f"could not read {rel}: {exc}")
+            continue
+        for lineno, raw in enumerate(lines, 1):
+            if "NOSONAR" not in raw:
+                continue
+            # A line FAILS only when it IS a marker: a comment opener followed
+            # immediately by NOSONAR. Prose that merely mentions the word --
+            # "...operations below carry NOSONAR cppsecurity:S2083", or a
+            # rationale paragraph -- has text before it and is documentation,
+            # not a failed suppression. Flagging that would make this check
+            # unusable in exactly the files that need the explanation most.
+            body = raw.strip()
+            for opener in ("///", "//", "/*", "*"):
+                if body.startswith(opener):
+                    body = body[len(opener):].strip()
+                    break
+            else:
+                continue   # code precedes the marker -- this is the correct shape
+
+            if body.startswith("NOSONAR"):
+                failures.append(
+                    f"{rel}:{lineno}: NOSONAR marker sits on a comment-only line; "
+                    f"SonarCloud honours it only on the line carrying the issue, "
+                    f"so this suppresses nothing. Put the marker on the code line "
+                    f"and keep the reasoning in the comment above it."
+                )
+
+    # The requirements file itself must exist and actually carry hashes --
+    # --require-hashes against a hashless file is a pip error, not a silent pass.
+    reqs = LIB_ROOT / requirements_file
+    try:
+        reqs_text = reqs.read_text(encoding="utf-8")
+    except OSError as exc:
+        failures.append(f"could not read {requirements_file}: {exc}")
+    else:
+        if "PyYAML==6.0.2" not in reqs_text:
+            failures.append(f"{requirements_file} no longer pins PyYAML==6.0.2")
+        if "--hash=sha256:" not in reqs_text:
+            failures.append(f"{requirements_file} carries no --hash= entries")
 
     try:
         mod = _load_ci_module("check_windows_cuda_contract.py", "windows_cuda_contract_selftest")

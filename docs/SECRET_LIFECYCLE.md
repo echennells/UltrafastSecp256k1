@@ -2,6 +2,30 @@
 
 **Last updated**: 2026-09-21 | **Version**: 4.6.0
 
+### 2026-09-21 - v4.6.0 addendum: the cache file on disk holds no secret, and its directory is now private
+
+The fixed-base cache relocation (see `SECURITY_CLAIMS.md` and
+`AUDIT_CHANGELOG.md` under the same date) touches a file this library writes to
+disk, so it is worth saying plainly what is in it.
+
+**`cache_w{bits}.bin` contains no secret material.** It holds precomputed
+multiples of the generator G -- public constants, identical for every user of
+the curve. Nothing derived from a private key, a nonce or a signing share is
+ever written to it, so there is no zeroization obligation on this path and none
+is added.
+
+The defect was integrity, not confidentiality: the file used to be placed in a
+world-writable directory when no per-user one existed, and the loader accepts a
+table of the right shape without checking that its points are multiples of G.
+The directory is now `<temp>/secp256k1-<uid>`, `0700`, `lstat`-verified for
+ownership and non-group/other-write, with symlinks refused and no cache written
+at all when that cannot be established.
+
+**Zeroization verdict: unchanged.** No `secure_erase` call site, GPU buffer
+zeroing step or key-material lifetime is added, removed or moved by this change,
+by the Pippenger shift guard, or by the analyser suppressions that accompany
+them.
+
 ### 2026-09-21 - v4.6.0 lifecycle review: one real defect, and it was nonce reuse
 
 **The defect: the BCH 2019 Schnorr shim shared its nonce with ECDSA.** This is a

@@ -86,16 +86,28 @@ struct KPlan {
 };
 
 class Point {
-    // Leaves x_, y_, z_ UNINITIALIZED. Only for a destination that is written in
-    // full immediately afterwards -- the mixed-add paths in Point::add(), where
+    // Leaves EVERY member UNINITIALIZED -- x_, y_, z_, z_one_, infinity_ and
+    // is_generator_. Only for a destination that is written in full immediately
+    // afterwards. That is exactly what the two mixed-add paths in Point::add()
+    // do: they assign z_one_ and is_generator_ themselves, and
     // jac52_add_mixed_to writes x, y, z and infinity on every one of its exits.
+    // Those two sites are the ONLY callers; a third must write all six or it is
+    // reading indeterminate values.
     //
     // The default constructor writes zero, one, zero and two flags: fifteen
     // 64-bit stores that the very next call overwrites. On a 226 ns operation
-    // that is not free, and Point::add is the public entry point every caller
-    // outside the engine uses.
+    // that is not free (Point::add measured 225.5 -> 220.7 ns when the zero-fill
+    // went), and Point::add is the public entry point every caller outside the
+    // engine uses.
+    //
+    // cppcheck reports uninitMemberVarPrivate here for infinity_ and
+    // is_generator_. That is the declared intent of this constructor, not a
+    // defect -- suppressed deliberately rather than "fixed" by reinstating the
+    // stores this exists to remove.
     struct Uninitialised {};
-    explicit Point(Uninitialised) noexcept {}
+    // cppcheck-suppress-begin uninitMemberVarPrivate
+    explicit Point(Uninitialised) noexcept {}  // NOSONAR cpp:S2107 -- see above
+    // cppcheck-suppress-end uninitMemberVarPrivate
 
 public:
     Point();

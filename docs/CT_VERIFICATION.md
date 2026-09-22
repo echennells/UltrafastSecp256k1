@@ -13,6 +13,32 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-21 v4.6.0 addendum — the cache-directory fix moves no CT boundary
+
+The fixed-base cache relocation and the Pippenger shift guard (see
+`AUDIT_CHANGELOG.md` under the same date) both sit outside the CT surface, and
+this records why rather than leaving it to be re-derived.
+
+**`secure_temp_cache_dir()` runs once, before any secret exists.** It is reached
+from `ensure_built_locked()` during first-touch table construction, its inputs
+are environment variables and the effective uid, and it never sees a private
+key, a nonce or a signing share. The branches it introduces (`mkdir` result,
+`lstat` result, ownership, permission bits) are all on filesystem state, not on
+secret data, so none of them is a CT-relevant branch.
+
+**The fixed-base table itself is public data.** It is precomputed multiples of
+G. What the fix protects is its INTEGRITY -- a poisoned table yields wrong
+public keys -- not its confidentiality, and the CT claims in the table below
+concern neither.
+
+**`pippenger.cpp` gains one comparison on `bit_idx`.** `bit_idx` is a window
+position derived from the loop counter, not from the scalar's value, so the
+added `bit_idx != 0` test is data-independent and does not introduce a
+secret-dependent branch. Pippenger MSM is a verification-side, public-data path
+in any case.
+
+No CT surface in the table below changes, and no CT evidence is invalidated.
+
 ### 2026-09-21 v4.6.0 — the field defects were correctness, not CT
 
 Two field bugs fixed in this release returned **wrong answers for legal inputs**,

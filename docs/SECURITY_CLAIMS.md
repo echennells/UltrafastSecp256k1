@@ -2,6 +2,34 @@
 
 **UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-21 - v4.6.0 addendum: the fixed-base cache and a trust boundary we had not named
+
+Found by SonarCloud's gate on `main` while preparing the release, and added to
+the claims below as a fifth item because it is a genuine defect, not analyser
+noise.
+
+**The claim that was wrong: where the fixed-base table may come from.** With no
+per-user cache directory available -- no `HOME`, no `XDG_CACHE_HOME`, no
+`LOCALAPPDATA` -- the cache fell back to the system temp directory itself, under
+a predictable name. `/tmp` is world-writable, so **any local user could supply
+the fixed-base generator table**, and the loader checks shape, not content: no
+verification that the points are multiples of G, no checksum, no signature. The
+fixed-base table decides every `k*G`, so that is a local user choosing other
+users' key material.
+
+Fixed by relocating, not by disabling: `<temp>/secp256k1-<uid>`, `0700`,
+re-verified with `lstat` for directory-ness, ownership and non-group/other-write,
+symlinks refused, and no disk cache at all when none of that can be established.
+
+**The trust boundary, now stated explicitly.** The library trusts the cache file
+in a directory the invoking user owns. It does not verify the table
+cryptographically. That is acceptable only because it is not a privilege
+boundary -- anything running as that user can replace the library binary -- and
+it is written here so that nobody reads the `NOSONAR` suppressions in
+`precompute.cpp` as a claim that the file is authenticated. **It is not.** A
+load-time check that the table really is multiples of G remains unimplemented
+and is not claimed.
+
 ### 2026-09-21 - v4.6.0 release claims: what a consumer must re-check on upgrade
 
 The v4.6.0 `CHANGELOG.md` section is the full account. This is the claims view of
