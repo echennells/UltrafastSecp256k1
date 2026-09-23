@@ -2,6 +2,35 @@
 
 **UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-23 - libbitcoin direct BIP-352 column scan (#431)
+
+`ufsecp::lbtc::bip352_scan_columns` is a secret-bearing C++ adapter:
+`scan_privkey32` is the receiver's private scan key. Adjacent rows with the
+same four-byte correlate form one transaction; only the first row of a group
+is marked when a candidate matches any row's public eight-byte prefix.
+`max_threads == 1` selects the serial CPU path. Otherwise an installed GPU
+provider may call the existing `bip352_scan_batch_multispend` once for the
+compacted groups; an unavailable or declining provider falls back to CPU.
+
+The CPU path strictly rejects zero and out-of-range scan scalars, uses
+`ct::scalar_mul` and `ct::generator_mul` for scalar multiplications, and
+clears `matches_out` after a failed group computation. Its subsequent
+secret-derived `spend.add(offset)` uses `fast::Point::add`; that addition
+remains a timing review blocker, with no end-to-end CT release claim. The
+GPU path inherits the selected backend's scan-key validation and device
+buffer contract, but its new host grouping and prefix comparison are outside
+the earlier C ABI's fail-closed wrapper. A trusted single-tenant GPU remains
+required when this provider is used. The adapter's complete timing behavior
+is not claimed constant-time; see [`CT_VERIFICATION.md`](CT_VERIFICATION.md).
+
+The GPU provider's host vector of key-derived candidate prefixes is erased by
+an exit guard before its storage is released, including on backend failure or
+CPU-fallback decline. It checks every candidate for the backend's zero
+sentinel before accepting a match, so an invalid later spend key cannot be
+hidden by an earlier match. The host lifecycle is recorded in
+[`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md); backend device-buffer erasure is
+a separate guarantee.
+
 ### 2026-09-22 - explicit release of process-wide state (GitHub #430)
 
 **New API, no claim moves.** `secp256k1::release_process_resources()` and
@@ -23,8 +52,9 @@ What a consumer can rely on:
 - **Precondition, not a guarantee:** no other thread may be inside the library
   during the call. It is not thread-safe against a concurrent verify, by design --
   making it so would put a lock on the verify hot path.
-- **No CT boundary moves.** Both released objects serve public-data verification
-  only; no signing path is touched.
+- **No signing CT boundary moves.** The release call frees public generator
+  tables and joins the worker pool; after #431 that pool can also have served
+  per-call BIP-352 scan jobs. Release is not a key-erasure operation.
 - **Not covered:** the ESP32/STM32 arm's function-local generator table.
 
 ### 2026-09-21 - v4.6.0 addendum: the fixed-base cache and a trust boundary we had not named

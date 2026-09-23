@@ -94,7 +94,7 @@ target_link_libraries(secp256k1_metal_lib PRIVATE
 # cmake --install verification (Linux-only machine).
 include(GNUInstallDirs)
 install(TARGETS secp256k1_metal_lib
-    EXPORT ufsecpTargets
+    EXPORT ${SECP256K1_GPU_EXPORT_SET}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 

@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.0] - 2026-09-21
+## [4.6.0] - 2026-09-23
 
 > **A security and correctness release, with a namespace break in the legacy C
-> API.** 195 commits since v4.5.0. The `ufsecp_*` C ABI is untouched --
+> API.** The `ufsecp_*` C ABI is untouched --
 > `UFSECP_ABI_VERSION` stays 4 -- but the 36 functions in `bindings/c_api` are
 > renamed out of libsecp256k1's `secp256k1_*` namespace, which they had no
 > business occupying and which made linking both surfaces a duplicate-symbol
@@ -35,6 +35,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > against recurrence.
 
 ### Added
+
+- **Explicit release of process-wide resources** ([#430](https://github.com/shrec/UltrafastSecp256k1/issues/430)).
+  C++ callers can use `secp256k1::release_process_resources()` to free the
+  retained generator tables and stop the batch worker pool at a quiet point;
+  `secp256k1::process_resources_active()` reports whether either remains.
+  The C ABI exposes `ufsecp_release_process_resources()`. Release is
+  idempotent, and later calls rebuild needed resources. No other thread may
+  be inside the library during release; do not call it under the Windows
+  loader lock. This makes leak-check teardown explicit while retaining the
+  existing default lifetime.
+
+- **Canonical libbitcoin BIP-352 column scans** ([#431](https://github.com/shrec/UltrafastSecp256k1/pull/431)).
+  The bridge-free `secp256k1::fastsecp256k1_libbitcoin` target exposes
+  `ufsecp::lbtc::bip352_scan_columns`, which groups adjacent correlate rows
+  and marks the first row when a scan-key-derived candidate matches a prefix.
+  It selects an installed GPU provider or uses the bounded CPU worker pool;
+  `max_threads == 1` requests serial CPU execution. The scan private key is
+  secret-bearing; see `docs/CT_VERIFICATION.md` and `docs/SECRET_LIFECYCLE.md`
+  for the timing and erasure limits of this adapter.
 
 - **The fixed-base precompute table is built once, kept, and loaded thereafter.**
   The disk cache is the default, and it now lives in the per-user cache directory
@@ -96,6 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Grouped BIP-352 scans reuse the existing cross-backend GPU primitive.**
+  The provider compacts adjacent transaction rows to one tweak per correlate,
+  calls `bip352_scan_batch_multispend` once for the compact batch, and matches
+  its candidate prefixes on the host. CUDA, OpenCL, and Metal share this
+  backend contract; no column-only GPU operation is required.
+
 - **BREAKING (legacy C API):** the 36 functions in `bindings/c_api` are
   `ultrafast_secp256k1_*` now, not `secp256k1_*`. That prefix is libsecp256k1's C
   namespace and this library had no business occupying it. Eleven of the 36 were
@@ -131,6 +156,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Standard Test Vectors goes 10/10 -> 11/11.
 
 ### Fixed
+
+- **Installed CUDA packages carry the selected runtime dependency.** CUDA
+  device symbols are resolved in the static archive and the generated CMake
+  package exports the selected CUDA runtime so C++ consumers can link
+  `secp256k1::fastsecp256k1_libbitcoin` without unresolved CUDA symbols.
 
 - **The fixed-base cache could be planted in a world-writable directory.** When
   no per-user cache directory can be determined -- no `HOME`, no

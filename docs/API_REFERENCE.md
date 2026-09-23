@@ -664,6 +664,36 @@ int  context_randomize(seed32);
 - `ecdsa_verify_batch` / `ecdsa_verify_columns` — rows `[hash32|pub33|sig64]` @ stride, or parallel spans
 - `schnorr_verify_batch` / `schnorr_verify_columns` — rows `[msg32|xonly32|sig64]` @ stride, or parallel spans
 
+**BIP-352 receiver scanning:**
+
+```cpp
+// Prefix matrix, row-major by tweak then spend key. This lower-level helper
+// requires an installed GPU provider and returns false when none is available.
+bool bip352_scan_prefixes(const uint8_t scan_privkey32[32],
+                          const uint8_t* spend_pubkeys33, size_t n_spend,
+                          const uint8_t* tweak_pubkeys33, size_t n_tweaks,
+                          uint64_t* prefix64_out) noexcept;
+
+// Unified grouped scan. The provider chooses GPU or bounded CPU execution.
+// max_threads: 0=auto, 1=serial/no GPU, N=CPU worker cap when GPU declines.
+bool bip352_scan_columns(const uint8_t scan_privkey32[32],
+                         const uint8_t* spend_pubkeys33, size_t n_spend,
+                         const uint8_t* correlates4,
+                         const uint8_t* prefixes8,
+                         const uint8_t* tweak_pubkeys33, size_t rows,
+                         uint8_t* matches_out,
+                         size_t max_threads = 0) noexcept;
+```
+
+`bip352_scan_columns` treats adjacent equal four-byte correlates as one
+transaction group. Every row in a group must carry the same compressed tweak
+point. On a match it sets only the group's first `matches_out` byte; every
+other byte remains zero. The function returns `false` and zeroes all match
+bytes for malformed groups, invalid keys, cryptographic failure, or worker
+cancellation. A missing or declining GPU provider is not an error: the same
+operation continues on the CPU. The scan private key and derived secret
+material are erased by both implementations before return.
+
 **Public-data batch ops (validate / commitment / hashing):** all `[[nodiscard]] inline bool` in `ufsecp::lbtc`, all **variable-time / public-data** (no secret is ever touched). Each is ONE surface — internal GPU acceleration via the EXISTING `GpuBackend` virtuals + deterministic CPU fallback, no CPU/GPU split, no GPU status code, no caller chunking, no C ABI.
 
 ```cpp

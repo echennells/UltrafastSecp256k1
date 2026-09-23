@@ -74,6 +74,14 @@ if(NOT OpenCL_FOUND)
     endif()
 endif()
 
+if(NOT TARGET OpenCL::OpenCL)
+    add_library(OpenCL::OpenCL UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(OpenCL::OpenCL PROPERTIES
+        IMPORTED_LOCATION "${OpenCL_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${OpenCL_INCLUDE_DIR}"
+    )
+endif()
+
 message(STATUS "OpenCL found:")
 message(STATUS "  Include: ${OpenCL_INCLUDE_DIR}")
 message(STATUS "  Library: ${OpenCL_LIBRARY}")
@@ -106,7 +114,7 @@ target_include_directories(secp256k1_opencl
 
 target_link_libraries(secp256k1_opencl
     PRIVATE
-        ${OpenCL_LIBRARY}
+        OpenCL::OpenCL
 )
 
 # Compiler flags (global -Wall/-Wextra/-Wpedantic inherited from root CMakeLists.txt)
@@ -338,9 +346,9 @@ add_test(NAME opencl_audit COMMAND opencl_audit_runner --kernel-dir ${CMAKE_CURR
 # be a member of THAT SAME export set. See src/gpu/CMakeLists.txt and
 # src/cuda/CMakeLists.txt for the matching fix on the other backends.
 install(TARGETS secp256k1_opencl
-    EXPORT ufsecpTargets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
+    EXPORT ${SECP256K1_GPU_EXPORT_SET}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION bin
 )
 

@@ -33,6 +33,7 @@
  * ============================================================================ */
 
 #include "secp256k1/batch_verify.hpp"   /* GpuColumnsVerifyHook + installer */
+#include "secp256k1/detail/secure_erase.hpp"
 #include "gpu_backend.hpp"              /* GpuBackend, GpuError, backend_ids,
                                           is_available, create_backend (registry).
                                           NOT ufsecp_gpu.h: the libbitcoin-direct
@@ -43,8 +44,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 /* Link-retention anchor. This TU's only payload is the file-scope
  * EngineGpuColumnsInstaller static initializer below, which has no
@@ -142,9 +146,9 @@ EngineGpuColumnsInstaller g_engine_gpu_columns_installer;
 }  // namespace
 
 /* ============================================================================
- * libbitcoin public-data batch ops — GPU offload trampolines (self-installing)
+ * libbitcoin direct batch ops — GPU offload trampolines (self-installing)
  * ============================================================================
- * Sibling of the column-verify provider above, for the seven header-only
+ * Sibling of the column-verify provider above, for the header-only
  * ufsecp::lbtc batch ops (xonly/pubkey/taproot-commitment validate +
  * tagged_hash/tagged_hash_var/hash256/hash256_var). The header CPU surface
  * (<ufsecp/libbitcoin.hpp>) consults engine-owned atomic fn-ptr hooks
@@ -171,6 +175,9 @@ EngineGpuColumnsInstaller g_engine_gpu_columns_installer;
  * stride<=kMaxHash256VarStride check below is a policy bound mirroring the
  * ABI layer's cap (src/cpu/src/ufsecp_gpu_impl.cpp), applied here too because
  * this libbitcoin-direct path never goes through that C ABI wrapper.
+ * BIP-352 is the explicit secret-bearing exception in this hook family; its
+ * backend contract uses branchless scan-key arithmetic and erases transient
+ * host/device copies.
  * ============================================================================ */
 #if defined(SECP256K1_LBTC_GPU_OPS)
 
@@ -337,6 +344,109 @@ int engine_lbtc_sighash_hook(const std::uint8_t* descriptor, std::size_t descrip
     }
 }
 
+int engine_lbtc_bip352_hook(const std::uint8_t* scan_privkey32, const std::uint8_t* spend_pubkeys33,
+                            std::size_t n_spend, const std::uint8_t* tweak_pubkeys33, std::size_t n_tweaks,
+                            std::uint64_t* prefix64_out) noexcept {
+    try {
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        secp256k1::gpu::GpuBackend* b = engine_gpu_backend();
+        if (b == nullptr)
+            return -1;
+        return b->bip352_scan_batch_multispend(scan_privkey32, spend_pubkeys33, n_spend, tweak_pubkeys33, n_tweaks,
+                                               prefix64_out) == secp256k1::gpu::GpuError::Ok
+                   ? 0
+                   : -1;
+    } catch (...) {
+        return -1;
+    }
+}
+
+int engine_lbtc_bip352_columns_hook(const std::uint8_t* scan_privkey32, const std::uint8_t* spend_pubkeys33,
+                                    std::size_t n_spend, const std::uint8_t* correlates4, const std::uint8_t* prefixes8,
+                                    const std::uint8_t* tweak_pubkeys33, std::size_t rows,
+                                    std::uint8_t* matches_out) noexcept {
+    try {
+        std::lock_guard<std::mutex> lk(g_engine_gpu_backend_mtx);
+        secp256k1::gpu::GpuBackend* b = engine_gpu_backend();
+        if (b == nullptr)
+            return -1;
+
+        struct Group {
+            std::size_t first;
+            std::size_t rows;
+        };
+
+        // Keep bip352_scan_batch_multispend() as the one cross-backend GPU
+        // primitive. Compact adjacent transaction rows to one tweak per group,
+        // run that primitive once, then compare its row-major candidate prefixes
+        // against the caller's output-prefix column on the host.
+        std::memset(matches_out, 0, rows);
+        std::vector<Group> groups;
+        std::vector<std::uint8_t> grouped_tweaks;
+        groups.reserve(rows);
+        grouped_tweaks.reserve(rows * 33);
+        for (std::size_t first = 0; first < rows;) {
+            const auto correlate = correlates4 + first * 4;
+            if (correlate[0] == 0xff && correlate[1] == 0xff && correlate[2] == 0xff && correlate[3] == 0xff)
+                return -1;
+
+            std::size_t end = first + 1;
+            while (end < rows && std::memcmp(correlates4 + end * 4, correlate, 4) == 0) {
+                if (std::memcmp(tweak_pubkeys33 + first * 33, tweak_pubkeys33 + end * 33, 33) != 0)
+                    return -1;
+                ++end;
+            }
+
+            groups.push_back({first, end - first});
+            grouped_tweaks.insert(grouped_tweaks.end(), tweak_pubkeys33 + first * 33,
+                                  tweak_pubkeys33 + first * 33 + 33);
+            first = end;
+        }
+
+        if (groups.size() > std::numeric_limits<std::size_t>::max() / n_spend)
+            return -1;
+        std::vector<std::uint64_t> candidates(groups.size() * n_spend);
+        struct CandidateGuard {
+            std::vector<std::uint64_t>& values;
+            ~CandidateGuard() {
+                if (!values.empty())
+                    secp256k1::detail::secure_erase(values.data(), values.size() * sizeof(values[0]));
+            }
+        } candidate_guard{candidates};
+        if (b->bip352_scan_batch_multispend(scan_privkey32, spend_pubkeys33, n_spend, grouped_tweaks.data(),
+                                            groups.size(), candidates.data()) != secp256k1::gpu::GpuError::Ok)
+            return -1;
+
+        // Every candidate must be valid, even when an earlier spend matched.
+        // Zero also aliases a rare valid x prefix, so let the CPU disambiguate.
+        for (const auto candidate : candidates)
+            if (candidate == 0)
+                return -1;
+
+        for (std::size_t group_index = 0; group_index < groups.size(); ++group_index) {
+            const auto& group = groups[group_index];
+            for (std::size_t spend_index = 0; spend_index < n_spend; ++spend_index) {
+                const auto candidate = candidates[group_index * n_spend + spend_index];
+
+                for (std::size_t row = group.first; row < group.first + group.rows; ++row) {
+                    std::uint64_t observed = 0;
+                    for (int byte = 0; byte < 8; ++byte)
+                        observed = (observed << 8) | prefixes8[row * 8 + static_cast<std::size_t>(byte)];
+                    if (observed == candidate) {
+                        matches_out[group.first] = 1;
+                        break;
+                    }
+                }
+                if (matches_out[group.first] != 0)
+                    break;
+            }
+        }
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 /* Benchmark/evidence-only telemetry trampoline (see lbtc_gpu_ops.hpp
  * GpuTelemetry doc comment). Reuses engine_gpu_backend() -- the SAME cached
  * probe used by every op hook above, under the SAME mutex -- so this reports
@@ -427,6 +537,8 @@ struct EngineLbtcOpsInstaller {
         ufsecp::lbtc::gpu_hook::install_lbtc_hash256_var_hook(&engine_lbtc_hash256_var_hook);
         ufsecp::lbtc::gpu_hook::install_lbtc_merkle_pair_hook(&engine_lbtc_merkle_pair_hook);
         ufsecp::lbtc::gpu_hook::install_lbtc_sighash_hook(&engine_lbtc_sighash_hook);
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_hook(&engine_lbtc_bip352_hook);
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(&engine_lbtc_bip352_columns_hook);
         ufsecp::lbtc::gpu_hook::install_lbtc_gpu_telemetry_hook(&engine_lbtc_gpu_telemetry);
         ufsecp::lbtc::gpu_hook::install_lbtc_gpu_last_error_hook(&engine_lbtc_gpu_last_error);
     }
