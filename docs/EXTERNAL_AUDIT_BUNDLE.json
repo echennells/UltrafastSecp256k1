@@ -39,8 +39,8 @@
     {
       "exists": true,
       "path": "docs/CT_VERIFICATION.md",
-      "sha256": "5cd8a6885e41fea6502ffe827511eae258740c7cca22775eb996612ac6358227",
-      "size": 63133
+      "sha256": "fa1689b2b75c3a6cfb4bc8ba4933ca257d99aaf7273009850828a9c519781af3",
+      "size": 65055
     },
     {
       "exists": true,
@@ -126,7 +126,7 @@
           {
             "findings": [
               {
-                "message": "No changed secret-bearing paths detected",
+                "message": "No uncommitted changes to evaluate",
                 "severity": "PASS"
               }
             ],
@@ -200,20 +200,8 @@
           {
             "findings": [
               {
-                "message": "3 files modified/deleted since graph build (2026-09-22T19:35:14)",
-                "severity": "WARN"
-              },
-              {
-                "message": "MODIFIED: docs/BUILD_OPTIONS.md",
-                "severity": "INFO"
-              },
-              {
-                "message": "MODIFIED: docs/INCIDENT_DRILL_LOG.json",
-                "severity": "INFO"
-              },
-              {
-                "message": "MODIFIED: docs/SECURITY_AUTONOMY_KPI.json",
-                "severity": "INFO"
+                "message": "Graph is fresh (built: 2026-09-23T15:58:15)",
+                "severity": "PASS"
               }
             ],
             "name": "P6: Graph Freshness",
@@ -264,7 +252,7 @@
           {
             "findings": [
               {
-                "message": "66 CTest targets not in TEST_MATRIX.md: ${_name}_shim, bip324_kat_cuda, bip327_keyagg_vectors, bip327_sign_verify_vectors, bip327_tweak_sign",
+                "message": "62 CTest targets not in TEST_MATRIX.md: ${_name}_shim, bip324_kat_cuda, bip327_keyagg_vectors, bip327_sign_verify_vectors, bip327_tweak_sign",
                 "severity": "WARN"
               }
             ],
@@ -396,7 +384,7 @@
           {
             "findings": [
               {
-                "message": "3 changed files have matching docs",
+                "message": "No uncommitted changes",
                 "severity": "PASS"
               }
             ],
@@ -406,11 +394,11 @@
           {
             "findings": [
               {
-                "message": "Mutation report age: 161.5 days (threshold: 14)",
+                "message": "Mutation report age: 162.4 days (threshold: 14)",
                 "severity": "INFO"
               },
               {
-                "message": "Mutation report is stale (161.5 > 14 days) \u2014 rerun recommended",
+                "message": "Mutation report is stale (162.4 > 14 days) \u2014 rerun recommended",
                 "severity": "WARN"
               }
             ],
@@ -644,7 +632,7 @@
                 "severity": "INFO"
               },
               {
-                "message": "Source graph \"files\" has 1785 rows (threshold: 200)",
+                "message": "Source graph \"files\" has 1758 rows (threshold: 200)",
                 "severity": "PASS"
               }
             ],
@@ -658,23 +646,23 @@
                 "severity": "PASS"
               },
               {
-                "message": "INT-SHIM-PARITY: PRE-ALERT: 3d until stale \u2014 re-verify soon",
+                "message": "INT-SHIM-PARITY: PRE-ALERT: 2d until stale \u2014 re-verify soon",
                 "severity": "WARN"
               },
               {
-                "message": "INT-CROSS-LIBSECP [warning]: last_verified 106d ago (> 45d freshness SLO)",
+                "message": "INT-CROSS-LIBSECP [warning]: last_verified 107d ago (> 45d freshness SLO)",
                 "severity": "WARN"
               },
               {
-                "message": "INT-DER-BLOCK704789 [warning]: last_verified 101d ago (> 60d freshness SLO)",
+                "message": "INT-DER-BLOCK704789 [warning]: last_verified 102d ago (> 60d freshness SLO)",
                 "severity": "WARN"
               },
               {
-                "message": "INT-ECDSA-CACHE-SAMEX [warning]: last_verified 101d ago (> 60d freshness SLO)",
+                "message": "INT-ECDSA-CACHE-SAMEX [warning]: last_verified 102d ago (> 60d freshness SLO)",
                 "severity": "WARN"
               },
               {
-                "message": "INT-SCHNORR-VERIFY [warning]: last_verified 101d ago (> 60d freshness SLO)",
+                "message": "INT-SCHNORR-VERIFY [warning]: last_verified 102d ago (> 60d freshness SLO)",
                 "severity": "WARN"
               },
               {
@@ -718,7 +706,7 @@
                 "severity": "PASS"
               },
               {
-                "message": "FUZZ-MUSIG2-FROST-STATEFUL: PRE-ALERT: 10d until campaign evidence stale \u2014 re-run",
+                "message": "FUZZ-MUSIG2-FROST-STATEFUL: PRE-ALERT: 9d until campaign evidence stale \u2014 re-run",
                 "severity": "WARN"
               },
               {
@@ -740,19 +728,19 @@
                 "severity": "PASS"
               },
               {
-                "message": "GPU-CUDA-PUBLIC-DATA [warning]: last_verified 101d ago (> 90d SLO)",
+                "message": "GPU-CUDA-PUBLIC-DATA [warning]: last_verified 102d ago (> 90d SLO)",
                 "severity": "WARN"
               },
               {
-                "message": "GPU-OPENCL-PUBLIC-DATA [warning]: last_verified 101d ago (> 90d SLO)",
+                "message": "GPU-OPENCL-PUBLIC-DATA [warning]: last_verified 102d ago (> 90d SLO)",
                 "severity": "WARN"
               },
               {
-                "message": "GPU-METAL-PUBLIC-DATA [warning]: last_verified 101d ago (> 90d SLO)",
+                "message": "GPU-METAL-PUBLIC-DATA [warning]: last_verified 102d ago (> 90d SLO)",
                 "severity": "WARN"
               },
               {
-                "message": "GPU-SCHNORR-SNARK-FALLBACK: documented residual RR-005 (RESIDUAL_RISK_REGISTER.md) \u2014 last_verified 144d ago (past 120d)",
+                "message": "GPU-SCHNORR-SNARK-FALLBACK: documented residual RR-005 (RESIDUAL_RISK_REGISTER.md) \u2014 last_verified 145d ago (past 120d)",
                 "severity": "INFO"
               },
               {
@@ -812,35 +800,25 @@
           "reason": null,
           "status": "available",
           "value": {
-            "dirty": true,
-            "ref": "dev",
-            "sha": "0985ca2f04099ec45f9dd4a9c1e5eefb49117b14",
-            "short": "0985ca2f04"
+            "dirty": false,
+            "ref": "release/v4.6-integration",
+            "sha": "52c09bdc219fc9af89131ada0f4b4f196f0dda00",
+            "short": "52c09bdc21"
           }
         },
-        "generated_at": "2026-09-22T19:42:59.585658+00:00",
+        "generated_at": "2026-09-23T16:00:05.354108+00:00",
         "platform": "Linux",
         "provenance": {
           "build_flags": {
-            "available": true,
-            "build_dir": "/home/shrek/Secp256k1/Secp256K1fast/build_rel",
-            "flags": {
-              "CMAKE_BUILD_TYPE": "Release",
-              "CMAKE_CXX_COMPILER": "clang++-19",
-              "CMAKE_CXX_FLAGS": "",
-              "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
-              "CMAKE_C_COMPILER": "clang-19",
-              "CMAKE_C_FLAGS": "",
-              "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG"
-            },
-            "flags_hash": "93f0268349a55f05"
+            "available": false,
+            "reason": "no CMakeCache.txt found"
           },
-          "collected_at": "2026-09-22T19:42:59.585596+00:00",
+          "collected_at": "2026-09-23T16:00:05.354046+00:00",
           "git": {
-            "dirty": true,
-            "ref": "dev",
-            "sha": "0985ca2f04099ec45f9dd4a9c1e5eefb49117b14",
-            "short": "0985ca2f04"
+            "dirty": false,
+            "ref": "release/v4.6-integration",
+            "sha": "52c09bdc219fc9af89131ada0f4b4f196f0dda00",
+            "short": "52c09bdc21"
           },
           "platform": {
             "machine": "x86_64",
@@ -861,7 +839,7 @@
           },
           "version": "4.6.0"
         },
-        "run_id": "audit_gate-0985ca2f04-20260922T194259",
+        "run_id": "audit_gate-52c09bdc21-20260923T160005",
         "runner": "audit_gate",
         "schema_version": "1.0.0",
         "sections": [
@@ -934,7 +912,7 @@
               {
                 "check_id": "p0__secret-path_change_gate",
                 "severity": "pass",
-                "title": "No changed secret-bearing paths detected"
+                "title": "No uncommitted changes to evaluate"
               }
             ],
             "name": "P0: Secret-Path Change Gate",
@@ -1015,27 +993,12 @@
             "findings": [
               {
                 "check_id": "p6__graph_freshness",
-                "severity": "advisory:medium",
-                "title": "3 files modified/deleted since graph build (2026-09-22T19:35:14)"
-              },
-              {
-                "check_id": "p6__graph_freshness",
-                "severity": "info",
-                "title": "MODIFIED: docs/BUILD_OPTIONS.md"
-              },
-              {
-                "check_id": "p6__graph_freshness",
-                "severity": "info",
-                "title": "MODIFIED: docs/INCIDENT_DRILL_LOG.json"
-              },
-              {
-                "check_id": "p6__graph_freshness",
-                "severity": "info",
-                "title": "MODIFIED: docs/SECURITY_AUTONOMY_KPI.json"
+                "severity": "pass",
+                "title": "Graph is fresh (built: 2026-09-23T15:58:15)"
               }
             ],
             "name": "P6: Graph Freshness",
-            "verdict": "PASS with advisory"
+            "verdict": "PASS"
           },
           {
             "findings": [
@@ -1093,7 +1056,7 @@
               {
                 "check_id": "p8__test_documentation",
                 "severity": "advisory:medium",
-                "title": "66 CTest targets not in TEST_MATRIX.md: ${_name}_shim, bip324_kat_cuda, bip327_keyagg_vectors, bip327_sign_verify_vectors, bip327_tweak_sign"
+                "title": "62 CTest targets not in TEST_MATRIX.md: ${_name}_shim, bip324_kat_cuda, bip327_keyagg_vectors, bip327_sign_verify_vectors, bip327_tweak_sign"
               }
             ],
             "name": "P8: Test Documentation",
@@ -1255,7 +1218,7 @@
               {
                 "check_id": "p10__doc-code_pairing",
                 "severity": "pass",
-                "title": "3 changed files have matching docs"
+                "title": "No uncommitted changes"
               }
             ],
             "name": "P10: Doc-Code Pairing",
@@ -1266,12 +1229,12 @@
               {
                 "check_id": "p2__mutation_evidence_freshness",
                 "severity": "info",
-                "title": "Mutation report age: 161.5 days (threshold: 14)"
+                "title": "Mutation report age: 162.4 days (threshold: 14)"
               },
               {
                 "check_id": "p2__mutation_evidence_freshness",
                 "severity": "advisory:medium",
-                "title": "Mutation report is stale (161.5 > 14 days) \u2014 rerun recommended"
+                "title": "Mutation report is stale (162.4 > 14 days) \u2014 rerun recommended"
               }
             ],
             "name": "P2: Mutation Evidence Freshness",
@@ -1550,7 +1513,7 @@
               {
                 "check_id": "g-12__source_graph_quality",
                 "severity": "pass",
-                "title": "Source graph \"files\" has 1785 rows (threshold: 200)"
+                "title": "Source graph \"files\" has 1758 rows (threshold: 200)"
               }
             ],
             "name": "G-12: Source Graph Quality",
@@ -1566,27 +1529,27 @@
               {
                 "check_id": "g-13__integration_evidence_freshness",
                 "severity": "advisory:medium",
-                "title": "INT-SHIM-PARITY: PRE-ALERT: 3d until stale \u2014 re-verify soon"
+                "title": "INT-SHIM-PARITY: PRE-ALERT: 2d until stale \u2014 re-verify soon"
               },
               {
                 "check_id": "g-13__integration_evidence_freshness",
                 "severity": "advisory:medium",
-                "title": "INT-CROSS-LIBSECP [warning]: last_verified 106d ago (> 45d freshness SLO)"
+                "title": "INT-CROSS-LIBSECP [warning]: last_verified 107d ago (> 45d freshness SLO)"
               },
               {
                 "check_id": "g-13__integration_evidence_freshness",
                 "severity": "advisory:medium",
-                "title": "INT-DER-BLOCK704789 [warning]: last_verified 101d ago (> 60d freshness SLO)"
+                "title": "INT-DER-BLOCK704789 [warning]: last_verified 102d ago (> 60d freshness SLO)"
               },
               {
                 "check_id": "g-13__integration_evidence_freshness",
                 "severity": "advisory:medium",
-                "title": "INT-ECDSA-CACHE-SAMEX [warning]: last_verified 101d ago (> 60d freshness SLO)"
+                "title": "INT-ECDSA-CACHE-SAMEX [warning]: last_verified 102d ago (> 60d freshness SLO)"
               },
               {
                 "check_id": "g-13__integration_evidence_freshness",
                 "severity": "advisory:medium",
-                "title": "INT-SCHNORR-VERIFY [warning]: last_verified 101d ago (> 60d freshness SLO)"
+                "title": "INT-SCHNORR-VERIFY [warning]: last_verified 102d ago (> 60d freshness SLO)"
               },
               {
                 "check_id": "g-13__integration_evidence_freshness",
@@ -1638,7 +1601,7 @@
               {
                 "check_id": "g-15__fuzz_campaign_evidence",
                 "severity": "advisory:medium",
-                "title": "FUZZ-MUSIG2-FROST-STATEFUL: PRE-ALERT: 10d until campaign evidence stale \u2014 re-run"
+                "title": "FUZZ-MUSIG2-FROST-STATEFUL: PRE-ALERT: 9d until campaign evidence stale \u2014 re-run"
               },
               {
                 "check_id": "g-15__fuzz_campaign_evidence",
@@ -1664,22 +1627,22 @@
               {
                 "check_id": "g-16__gpu/hardware_evidence",
                 "severity": "advisory:medium",
-                "title": "GPU-CUDA-PUBLIC-DATA [warning]: last_verified 101d ago (> 90d SLO)"
+                "title": "GPU-CUDA-PUBLIC-DATA [warning]: last_verified 102d ago (> 90d SLO)"
               },
               {
                 "check_id": "g-16__gpu/hardware_evidence",
                 "severity": "advisory:medium",
-                "title": "GPU-OPENCL-PUBLIC-DATA [warning]: last_verified 101d ago (> 90d SLO)"
+                "title": "GPU-OPENCL-PUBLIC-DATA [warning]: last_verified 102d ago (> 90d SLO)"
               },
               {
                 "check_id": "g-16__gpu/hardware_evidence",
                 "severity": "advisory:medium",
-                "title": "GPU-METAL-PUBLIC-DATA [warning]: last_verified 101d ago (> 90d SLO)"
+                "title": "GPU-METAL-PUBLIC-DATA [warning]: last_verified 102d ago (> 90d SLO)"
               },
               {
                 "check_id": "g-16__gpu/hardware_evidence",
                 "severity": "info",
-                "title": "GPU-SCHNORR-SNARK-FALLBACK: documented residual RR-005 (RESIDUAL_RISK_REGISTER.md) \u2014 last_verified 144d ago (past 120d)"
+                "title": "GPU-SCHNORR-SNARK-FALLBACK: documented residual RR-005 (RESIDUAL_RISK_REGISTER.md) \u2014 last_verified 145d ago (past 120d)"
               },
               {
                 "check_id": "g-16__gpu/hardware_evidence",
@@ -1741,21 +1704,21 @@
           }
         ],
         "summary": {
-          "advisory": 74,
+          "advisory": 70,
           "blocking": 0,
-          "info": 58,
+          "info": 55,
           "sections": 34,
           "skipped_sections": 0,
-          "total_findings": 134,
-          "warnings": 16
+          "total_findings": 131,
+          "warnings": 15
         },
         "verdict": "PASS with advisory"
       },
       "passing": true,
       "required": true,
       "returncode": 0,
-      "stderr_sha256": "5fca80ff5a6c87e79f701018b94437bca747ee0d750a83ee0ad849edecaa8ea4",
-      "stdout_sha256": "3c2da713d713eed2c881682935ea4c6d60d824ef7c02f5d7089fb2ebde877a40"
+      "stderr_sha256": "a571e91a6c275eb8dc17e17c710b6a45bf5fc0e3c28ca4b43169321414935e25",
+      "stdout_sha256": "2dc3a32ced34b11f66161feb30a5185c4b90af1843f445b4301b68b0223200e5"
     },
     {
       "name": "audit_gap_report_strict",
@@ -2057,13 +2020,13 @@
         "gates_skipped": 0,
         "gates_total": 8,
         "overall_pass": true,
-        "timestamp": "2026-09-22T19:43:04.019455+00:00"
+        "timestamp": "2026-09-23T16:00:08.583780+00:00"
       },
       "passing": true,
       "required": true,
       "returncode": 0,
       "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stdout_sha256": "98b022c7f05d30a1830332115e2f536bfb14cef2785c772ca53b91942a262933"
+      "stdout_sha256": "15f1c46646513a8e929c02ec7bbb04ccfca7ef4c7d29ad5f80e4b20e189c9b6f"
     },
     {
       "name": "supply_chain_gate",
@@ -2109,22 +2072,22 @@
         "checks_total": 5,
         "failing_checks": [],
         "overall_pass": true,
-        "timestamp": "2026-09-22T19:43:04.127529+00:00"
+        "timestamp": "2026-09-23T16:00:08.697383+00:00"
       },
       "passing": true,
       "required": true,
       "returncode": 0,
       "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stdout_sha256": "afef05f2dc179c1706efce455008e45a08a6e2b18f8ef0c3dabda6ec1b5d47f4"
+      "stdout_sha256": "b8b59359f7d9bb7e91c8b2a8b11b8f42a1405428422ed5b96f8d050cccb8c814"
     }
   ],
-  "generated_at": "2026-09-22T19:43:04.142582+00:00",
+  "generated_at": "2026-09-23T16:00:08.712171+00:00",
   "git": {
-    "branch": "dev",
-    "commit": "0985ca2f04099ec45f9dd4a9c1e5eefb49117b14",
+    "branch": "release/v4.6-integration",
+    "commit": "52c09bdc219fc9af89131ada0f4b4f196f0dda00",
     "dirty": true
   },
-  "repo_root": "/home/shrek/Secp256k1/Secp256K1fast/libs/UltrafastSecp256k1",
+  "repo_root": "/home/shrek/Secp256k1/Secp256K1fast/libs/UltrafastSecp256k1/out/release46-integration",
   "runtime": {
     "machine": "x86_64",
     "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
