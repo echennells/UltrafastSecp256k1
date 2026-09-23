@@ -7,7 +7,10 @@ measured implementation is not. Repair three known boundaries while retaining
 byte-for-byte compatibility with the current implementation: ECDH Jacobian
 serialization, BIP352 CPU scan-key-derived point addition, and the generic
 portable no-`__int128` field multiplication/squaring fallback. The existing
-native 5x52 fast path and public ABI remain unchanged.
+native 5x52 fast path and public ABI remain unchanged. Correctness and
+non-regressing speed are both mandatory release conditions: a security repair
+that changes reference results or reproducibly slows an affected workload is
+redesigned or deferred, not silently accepted.
 
 This is a security-correctness design, not a blanket constant-time claim for
 all platforms or all BIP352 control flow. Promotion to `dev`, then `main`, and
@@ -108,10 +111,19 @@ an accidental ABI commitment.
    field oracles, UBSan/ASan, GCC and Clang, and the forced portable profile.
    Run existing project security, fast, and CI gates. A passing native 5x52
    check alone is insufficient for the portable claim.
-4. Record latency and throughput before/after per affected primitive and
-   public operation. A security fix is not rejected solely for an unmeasured
-   assumption about speed; any material regression is reported for an
-   explicit release decision rather than hidden.
+4. Before editing each path, capture a reproducible baseline for its affected
+   primitives, public operations, and the representative end-to-end engine
+   benchmark set. Compare before/after builds with the same compiler, flags,
+   machine, CPU affinity, input distributions and warm-up; interleave repeated
+   runs, and report distributions for latency and throughput rather than one
+   best number. A coarse CI smoke test that detects only large slowdowns does
+   not establish this gate. Treat a slowdown
+   that repeats beyond observed measurement noise as a regression, however
+   small. Increase samples when the result is ambiguous. If any affected
+   workload has a confirmed regression, optimize or revert that change and
+   remeasure; do not release it under a security exception. Show measurements
+   separately for native 5x52 and the forced portable profile so one cannot
+   conceal a slowdown in the other.
 5. Update security claims and release notes to match only measured coverage.
    Keep PR #432 draft until these gates and full CI pass. Do not bypass required
    code-owner review on protected `main` or claim release readiness from a
