@@ -1417,6 +1417,10 @@ if(BUILD_TESTING)
 
     add_test(NAME selftest COMMAND run_selftest)
 
+    add_executable(test_ct_point_io_standalone tests/test_ct_point_io.cpp)
+    target_link_libraries(test_ct_point_io_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME ct_point_io COMMAND test_ct_point_io_standalone)
+
     # Standalone affine batch add test (independent of full test runner)
     add_executable(test_batch_add_affine_standalone
         tests/test_batch_add_affine.cpp
