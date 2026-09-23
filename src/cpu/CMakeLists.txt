@@ -1438,6 +1438,12 @@ if(BUILD_TESTING)
         PRIVATE ${SECP256K1_LIB_NAME})
     add_test(NAME hamburg_ecmult_witness COMMAND test_hamburg_ecmult_witness_standalone)
 
+    add_executable(test_xonly_invalid_contract_standalone
+        tests/test_xonly_invalid_contract.cpp)
+    target_link_libraries(test_xonly_invalid_contract_standalone
+        PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME xonly_invalid_contract COMMAND test_xonly_invalid_contract_standalone)
+
     # Standalone affine batch add test (independent of full test runner)
     add_executable(test_batch_add_affine_standalone
         tests/test_batch_add_affine.cpp
