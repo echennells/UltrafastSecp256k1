@@ -93,18 +93,22 @@ int main() {
         check(ufsecp::lbtc::bip352_scan_prefixes(scan.data(), spend.data(), 1, point.data(), 1, &prefix),
               "BIP-352 reference prefix");
 
-        auto backend = secp256k1::gpu::create_backend(1);
-        check(backend != nullptr, "CUDA backend creation");
-        if (backend) {
-            check(backend->init(0) == secp256k1::gpu::GpuError::Ok, "CUDA backend initialization");
-            secp256k1::gpu::GpuBackend::TimingBreakdownMs timing{};
-            std::uint64_t timed_prefix{};
-            check(backend->bip352_scan_batch_multispend_timed(scan.data(), spend.data(), 1, point.data(), 1,
-                                                              &timed_prefix, &timing) == secp256k1::gpu::GpuError::Ok,
-                  "BIP-352 timed scan");
-            check(timed_prefix == prefix, "BIP-352 timed scan result");
-            check(timing.setup_ms > 0.0 && timing.h2d_ms > 0.0 && timing.kernel_ms > 0.0 && timing.d2h_ms > 0.0,
-                  "BIP-352 CUDA event timings");
+        // The common scan above may use OpenCL or Metal; CUDA timings only
+        // apply when a CUDA device is present as well.
+        if (secp256k1::gpu::is_available(1)) {
+            auto backend = secp256k1::gpu::create_backend(1);
+            check(backend != nullptr, "CUDA backend creation");
+            if (backend) {
+                check(backend->init(0) == secp256k1::gpu::GpuError::Ok, "CUDA backend initialization");
+                secp256k1::gpu::GpuBackend::TimingBreakdownMs timing{};
+                std::uint64_t timed_prefix{};
+                check(backend->bip352_scan_batch_multispend_timed(scan.data(), spend.data(), 1, point.data(), 1,
+                                                                  &timed_prefix, &timing) == secp256k1::gpu::GpuError::Ok,
+                      "BIP-352 timed scan");
+                check(timed_prefix == prefix, "BIP-352 timed scan result");
+                check(timing.setup_ms > 0.0 && timing.h2d_ms > 0.0 && timing.kernel_ms > 0.0 && timing.d2h_ms > 0.0,
+                      "BIP-352 CUDA event timings");
+            }
         }
 
         const std::array<std::uint32_t, 3> correlates{{7, 7, 8}};
@@ -121,6 +125,27 @@ int main() {
                                                 prefixes.data(), points.data(), 3, matches.data()),
               "BIP-352 column scan");
         check(matches[0] == 1 && matches[1] == 0 && matches[2] == 0, "BIP-352 column group matches");
+
+        // A matching spend must not conceal a malformed spend later in the
+        // same transaction. Compare the accelerated path with the CPU path in
+        // both orders; the all-zero compressed key is invalid.
+        const std::array<std::uint8_t, 8> expected_prefix{{0x3e, 0x9f, 0xce, 0x73, 0xd4, 0xe7, 0x7a, 0x48}};
+        for (int valid_index = 0; valid_index < 2; ++valid_index) {
+            std::array<std::uint8_t, 66> ordered_spends{};
+            std::memcpy(ordered_spends.data() + valid_index * 33, spend.data(), spend.size());
+            std::uint8_t cpu_match = 0xff;
+            check(!ufsecp::lbtc::bip352_scan_columns(scan.data(), ordered_spends.data(), 2,
+                                                     reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                     expected_prefix.data(), point.data(), 1, &cpu_match, 1),
+                  "BIP-352 CPU rejects invalid spend in either order");
+            check(cpu_match == 0, "BIP-352 CPU invalid spend clears match");
+            std::uint8_t gpu_match = 0xff;
+            check(!ufsecp::lbtc::bip352_scan_columns(scan.data(), ordered_spends.data(), 2,
+                                                     reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                     expected_prefix.data(), point.data(), 1, &gpu_match),
+                  "BIP-352 GPU rejects invalid spend in either order");
+            check(gpu_match == 0, "BIP-352 GPU invalid spend clears match");
+        }
 
         secp256k1::fast::Scalar scan_scalar;
         secp256k1::fast::Point input_point;

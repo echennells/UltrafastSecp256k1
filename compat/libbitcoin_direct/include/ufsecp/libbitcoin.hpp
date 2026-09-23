@@ -114,6 +114,47 @@ struct bip352_column_group {
     std::size_t rows;
 };
 
+// Serialize a finite secret-bearing Jacobian point for the BIP-352 hash.
+// Point::to_compressed() uses variable-time inversion; normalize here with
+// ct::* field operations instead. The caller owns/erases output. Side-channel
+// guarantees also depend on the selected CT field backend.
+[[nodiscard]] inline std::array<std::uint8_t, 33>
+bip352_shared_compressed(const secp256k1::fast::Point& point) noexcept {
+    using secp256k1::fast::FieldElement;
+    struct secret_coordinates {
+        FieldElement x, y, z, inverse, inverse2, inverse3;
+        ~secret_coordinates() { secp256k1::detail::secure_erase(this, sizeof(*this)); }
+    } coordinates{point.x_raw(), point.y_raw(), point.z_raw(), {}, {}, {}};
+    coordinates.inverse = secp256k1::ct::field_inv(coordinates.z);
+    coordinates.inverse2 = secp256k1::ct::field_sqr(coordinates.inverse);
+    coordinates.inverse3 = secp256k1::ct::field_mul(coordinates.inverse2, coordinates.inverse);
+    coordinates.x = secp256k1::ct::field_mul(coordinates.x, coordinates.inverse2);
+    coordinates.y = secp256k1::ct::field_mul(coordinates.y, coordinates.inverse3);
+    coordinates.x = secp256k1::ct::field_normalize(coordinates.x);
+    coordinates.y = secp256k1::ct::field_normalize(coordinates.y);
+
+    std::array<std::uint8_t, 33> compressed{};
+    compressed[0] = static_cast<std::uint8_t>(0x02u | (coordinates.y.limbs()[0] & 1u));
+    coordinates.x.to_bytes_into(compressed.data() + 1);
+    return compressed;
+}
+
+// Serialize the x coordinate of a finite secret-derived BIP-352 candidate.
+// As above, avoid the variable-time inversion in Point::x().
+[[nodiscard]] inline std::array<std::uint8_t, 32>
+bip352_candidate_x(const secp256k1::fast::Point& point) noexcept {
+    using secp256k1::fast::FieldElement;
+    struct secret_coordinates {
+        FieldElement x, z, inverse, inverse2;
+        ~secret_coordinates() { secp256k1::detail::secure_erase(this, sizeof(*this)); }
+    } coordinates{point.x_raw(), point.z_raw(), {}, {}};
+    coordinates.inverse = secp256k1::ct::field_inv(coordinates.z);
+    coordinates.inverse2 = secp256k1::ct::field_sqr(coordinates.inverse);
+    coordinates.x = secp256k1::ct::field_mul(coordinates.x, coordinates.inverse2);
+    coordinates.x = secp256k1::ct::field_normalize(coordinates.x);
+    return coordinates.x.to_bytes();
+}
+
 // CPU half of the unified BIP-352 column operation. The GPU hook and this
 // implementation have the same contract: adjacent equal correlates form one
 // transaction; only the first row of a matching group is marked.
@@ -172,7 +213,7 @@ struct bip352_column_group {
                 return false;
 
             std::array<std::uint8_t, 37> tagged_input{};
-            auto compressed = shared.to_compressed();
+            auto compressed = bip352_shared_compressed(shared);
             std::memcpy(tagged_input.data(), compressed.data(), 33);
             auto tweak_bytes =
                 secp256k1::detail::cached_tagged_hash(shared_secret_tag, tagged_input.data(), tagged_input.size());
@@ -196,7 +237,7 @@ struct bip352_column_group {
                 if (candidate.is_infinity()) {
                     good = false;
                 } else {
-                    const auto x = candidate.x().to_bytes();
+                    auto x = bip352_candidate_x(candidate);
                     for (std::size_t row = group.first; row < group.first + group.rows; ++row) {
                         if (std::memcmp(prefixes8 + row * 8, x.data(), 8) == 0) {
                             matches_out[group.first] = 1;
@@ -204,6 +245,7 @@ struct bip352_column_group {
                             break;
                         }
                     }
+                    secp256k1::detail::secure_erase(x.data(), x.size());
                 }
                 secp256k1::detail::secure_erase(&candidate, sizeof(candidate));
             }

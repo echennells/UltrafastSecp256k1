@@ -13,6 +13,39 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-23 — libbitcoin direct BIP-352 column scan boundary (#431)
+
+`ufsecp::lbtc::bip352_scan_columns` accepts the receiver's secret
+`scan_privkey32`. Its CPU fallback strictly parses the scalar and computes
+`scan * tweak_pubkey` with `ct::scalar_mul`, then computes the shared-secret
+tweak times G with `ct::generator_mul`. Public spend and tweak points are
+decompressed before use. Adjacent equal public correlates are grouped, and
+the candidate prefixes are compared with caller-supplied prefixes on the host.
+
+The new finite-point serializers normalize the secret-derived Jacobian shared
+point and candidate x coordinate using `ct::field_*` operations. An isolated
+native 5x52 coordinate-taint run of `test_lbtc_direct_verify --bip352-ct-only`
+reported **0 Valgrind errors** for those serializers. That measurement does
+not cover the complete scan or establish the same result for every field
+backend.
+
+This is **not an end-to-end constant-time claim for the column scan**: the
+CPU computes secret-derived candidates with `fast::Point::add` in
+`spend.add(offset)`; that addition remains a timing review blocker. The match
+loops also stop on a match or an invalid derived candidate, and the
+observable match result depends on the receiver's scan key. The operation
+also uses the batch worker pool for CPU groups; `max_threads == 1` requests
+serial execution. Neither the public-data verification timing evidence nor
+the CT evidence for the two scalar-multiplication primitives measures this
+complete adapter.
+
+The optional GPU hook calls the existing
+`GpuBackend::bip352_scan_batch_multispend` on CUDA, OpenCL, or Metal and
+compares its returned candidate prefixes on the host. It requires the
+documented trusted single-tenant GPU environment. This change adds no GPU
+kernel and supplies no new GPU timing evidence; it does not establish
+constant-time behavior for the whole GPU scan or its host matching loop.
+
 ### 2026-09-21 v4.6.0 addendum — the cache-directory fix moves no CT boundary
 
 The fixed-base cache relocation and the Pippenger shift guard (see

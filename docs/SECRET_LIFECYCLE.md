@@ -1,6 +1,33 @@
 # Secret Lifecycle Review
 
-**Last updated**: 2026-09-22 | **Version**: 4.6.0
+**Last updated**: 2026-09-23 | **Version**: 4.6.0
+
+### 2026-09-23 - libbitcoin direct BIP-352 column scan (#431)
+
+The new `ufsecp::lbtc::bip352_scan_columns` accepts a caller-owned
+`scan_privkey32`; ownership and erasure of those 32 input bytes remain with
+the caller. The CPU fallback strictly parses it into a local scalar, which
+an exit guard erases. Per-group shared points, derived tweak scalars and
+temporary hash bytes are explicitly erased on the normal path and on the
+handled invalid-tweak path. Group jobs capture the scan scalar by reference;
+they do not place a copy in persistent pool state, and the call waits for
+the jobs to finish before its scalar guard runs.
+
+The CPU scan **does use `batch_worker_pool()` for secret-bearing work**. Its
+threads can hold per-call key-derived intermediates while a scan runs. The
+pool's later `release_process_resources()` call joins threads but is not a
+secret-erasure API. Existing claims that this pool is verification-only apply
+to its use before this adapter was added, not to the adapter itself.
+
+The optional GPU hook passes the caller's scan key to the existing
+`bip352_scan_batch_multispend` backend, whose backend-specific key and device
+buffer erasure contract is recorded below. It groups public tweak points on
+the host and receives a vector of scan-key-derived candidate prefixes. A
+`CandidateGuard` erases the vector's allocated elements with `secure_erase`
+before `std::vector` releases storage, on success, backend failure, invalid
+candidate and exception exits after allocation. This new host-buffer erasure
+is in the adapter; the backend's separate device-buffer erasure contract is
+unchanged. The caller still owns and must erase `scan_privkey32` when done.
 
 ### 2026-09-22 - process-wide state can now be released (GitHub #430): what that frees, and what it does not
 
@@ -11,18 +38,19 @@ is secret material, and the release is not a zeroization mechanism:
 - **The generator tables hold multiples of G and H = 2^128·G** -- public
   constants, identical for every user of the curve. They are freed with plain
   `delete`; there is nothing to erase.
-- **The worker pool runs verification only.** Batch verify is variable-time over
-  public data (signatures, pubkeys, messages); no private key, nonce or signing
-  share ever reaches a pool worker. Joining the workers ends their
-  `thread_local` state, which is public-data verify caches.
+- **The worker pool also serves BIP-352 column scans after #431.** Batch verify
+  remains variable-time over public signatures, pubkeys and messages. A column
+  scan can give a worker access to the scan scalar and transient derived data
+  for the duration of its job. Joining workers ends their thread-local state;
+  it does not replace the scan call's own erasure obligations.
 
-So this change moves no secret lifetime and adds no erase obligation. It exists
+The #430 release API itself adds no erase obligation. It exists
 because the retained blocks were indistinguishable from a leak in the MSVC debug
 CRT and leak sanitizers, not because anything sensitive outlived its use.
 
-Unchanged and stated for completeness: nothing in the library keeps a secret in
-process-wide storage. Secret-bearing buffers stay on the stack of the signing
-call and are `secure_erase`d there, exactly as the entries below describe.
+The process-wide tables contain no secret. Signing-call erasure remains as
+described below; the later column-scan adapter has its own per-call secret
+lifetime and host-candidate erasure described above.
 
 ### 2026-09-21 - v4.6.0 addendum: the cache file on disk holds no secret, and its directory is now private
 

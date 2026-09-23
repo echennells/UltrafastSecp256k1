@@ -22,6 +22,15 @@
 #include <cstring>
 #include <vector>
 
+#if __has_include(<valgrind/memcheck.h>)
+#include <valgrind/memcheck.h>
+#define LBTC_SECRET_UNDEFINED(p, n) VALGRIND_MAKE_MEM_UNDEFINED(p, n)
+#define LBTC_SECRET_DEFINED(p, n) VALGRIND_MAKE_MEM_DEFINED(p, n)
+#else
+#define LBTC_SECRET_UNDEFINED(p, n) ((void)0)
+#define LBTC_SECRET_DEFINED(p, n) ((void)0)
+#endif
+
 namespace {
 std::uint64_t g_xs = 0x9E3779B97F4A7C15ull;
 std::uint8_t nb() { g_xs ^= g_xs << 13; g_xs ^= g_xs >> 7; g_xs ^= g_xs << 17; return static_cast<std::uint8_t>(g_xs); }
@@ -168,7 +177,43 @@ int decline_merkle_pair_hook(const std::uint8_t*, const std::uint8_t*, std::size
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Independent public serializer is the byte oracle. Taint only Jacobian
+    // coordinates: the finite-point flag and other metadata remain public.
+    // Run under Memcheck with --bip352-ct-only to isolate secret serialization.
+    for (std::uint64_t scalar = 1; scalar <= 8; ++scalar) {
+        const auto reference = secp256k1::fast::Point::generator().scalar_mul(
+            secp256k1::fast::Scalar::from_uint64(scalar));
+        const auto expected = reference.to_compressed();
+        const auto z = secp256k1::fast::FieldElement::from_uint64(scalar + 2);
+        const auto z2 = z.square();
+        auto projective = secp256k1::fast::Point::from_jacobian_coords(
+            reference.x() * z2, reference.y() * z2 * z, z, false);
+#if defined(SECP256K1_FAST_52BIT)
+        LBTC_SECRET_UNDEFINED(&projective.X52(), sizeof(projective.X52()));
+        LBTC_SECRET_UNDEFINED(&projective.Y52(), sizeof(projective.Y52()));
+        LBTC_SECRET_UNDEFINED(&projective.Z52(), sizeof(projective.Z52()));
+#else
+        LBTC_SECRET_UNDEFINED(&projective.X(), sizeof(projective.X()));
+        LBTC_SECRET_UNDEFINED(&projective.Y(), sizeof(projective.Y()));
+        LBTC_SECRET_UNDEFINED(&projective.z(), sizeof(projective.z()));
+#endif
+        auto actual = ufsecp::lbtc::detail::bip352_shared_compressed(projective);
+        auto actual_x = ufsecp::lbtc::detail::bip352_candidate_x(projective);
+        LBTC_SECRET_DEFINED(actual.data(), actual.size());
+        LBTC_SECRET_DEFINED(actual_x.data(), actual_x.size());
+        LBTC_SECRET_DEFINED(&projective, sizeof(projective));
+        check(actual == expected, "BIP352 secret Jacobian serialization matches public reference");
+        check(std::equal(actual_x.begin(), actual_x.end(), expected.begin() + 1),
+              "BIP352 secret candidate x matches public reference");
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--bip352-ct-only") == 0) {
+#if !__has_include(<valgrind/memcheck.h>)
+        std::puts("SKIP: BIP352 taint instrumentation requires Valgrind headers");
+        return 77;
+#endif
+        return fails == 0 ? 0 : 1;
+    }
     constexpr int M = 20000;
     constexpr int SERIAL_N = 5000;  // Crosses the 4096 bounded-chunk threshold.
 

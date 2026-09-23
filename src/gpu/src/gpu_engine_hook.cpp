@@ -33,6 +33,7 @@
  * ============================================================================ */
 
 #include "secp256k1/batch_verify.hpp"   /* GpuColumnsVerifyHook + installer */
+#include "secp256k1/detail/secure_erase.hpp"
 #include "gpu_backend.hpp"              /* GpuBackend, GpuError, backend_ids,
                                           is_available, create_backend (registry).
                                           NOT ufsecp_gpu.h: the libbitcoin-direct
@@ -405,21 +406,27 @@ int engine_lbtc_bip352_columns_hook(const std::uint8_t* scan_privkey32, const st
         if (groups.size() > std::numeric_limits<std::size_t>::max() / n_spend)
             return -1;
         std::vector<std::uint64_t> candidates(groups.size() * n_spend);
+        struct CandidateGuard {
+            std::vector<std::uint64_t>& values;
+            ~CandidateGuard() {
+                if (!values.empty())
+                    secp256k1::detail::secure_erase(values.data(), values.size() * sizeof(values[0]));
+            }
+        } candidate_guard{candidates};
         if (b->bip352_scan_batch_multispend(scan_privkey32, spend_pubkeys33, n_spend, grouped_tweaks.data(),
                                             groups.size(), candidates.data()) != secp256k1::gpu::GpuError::Ok)
             return -1;
+
+        // Every candidate must be valid, even when an earlier spend matched.
+        // Zero also aliases a rare valid x prefix, so let the CPU disambiguate.
+        for (const auto candidate : candidates)
+            if (candidate == 0)
+                return -1;
 
         for (std::size_t group_index = 0; group_index < groups.size(); ++group_index) {
             const auto& group = groups[group_index];
             for (std::size_t spend_index = 0; spend_index < n_spend; ++spend_index) {
                 const auto candidate = candidates[group_index * n_spend + spend_index];
-
-                // The backend contract uses zero for an invalid tweak/spend or
-                // an infinity candidate. A valid x prefix can also be zero, so
-                // decline instead of guessing; the unified API's CPU fallback
-                // disambiguates the rare case and preserves exact semantics.
-                if (candidate == 0)
-                    return -1;
 
                 for (std::size_t row = group.first; row < group.first + group.rows; ++row) {
                     std::uint64_t observed = 0;

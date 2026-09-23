@@ -152,6 +152,11 @@ if(SECP256K1_BUILD_LIBBITCOIN_TESTS)
         add_test(NAME lbtc_direct_gpu_columns_hook COMMAND test_lbtc_direct_gpu_columns_hook)
         set_tests_properties(lbtc_direct_gpu_columns_hook PROPERTIES
             LABELS "libbitcoin;direct;gpu;hook;columns")
+        if(SECP256K1_BUILD_OPENCL)
+            # Out-of-tree CTest runs may not be near the source kernels.
+            set_property(TEST lbtc_direct_gpu_columns_hook APPEND PROPERTY ENVIRONMENT
+                "UFSECP_OPENCL_KERNEL_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../src/opencl/kernels")
+        endif()
         message(STATUS "  libbitcoin direct GPU hook smoke: ON (lbtc_direct_gpu_columns_hook)")
     endif()
     message(STATUS "  libbitcoin direct test: ON (lbtc_direct_verify, lbtc_direct_operations)")
