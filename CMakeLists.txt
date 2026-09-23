@@ -929,6 +929,13 @@ if(SECP256K1_INSTALL)
     else()
         set(SECP256K1_PACKAGE_OPENCL FALSE)
     endif()
+
+    if(TARGET secp256k1_cuda_lib AND CMAKE_CUDA_COMPILER_LOADED AND
+        NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "None")
+        set(SECP256K1_PACKAGE_CUDA_RUNTIME TRUE)
+    else()
+        set(SECP256K1_PACKAGE_CUDA_RUNTIME FALSE)
+    endif()
     
     configure_package_config_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/secp256k1-fast-config.cmake.in"
