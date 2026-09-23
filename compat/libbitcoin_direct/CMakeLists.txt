@@ -33,7 +33,6 @@ target_include_directories(fastsecp256k1_libbitcoin INTERFACE
 )
 target_compile_features(fastsecp256k1_libbitcoin INTERFACE cxx_std_20)
 target_compile_definitions(fastsecp256k1_libbitcoin INTERFACE HAVE_ULTRAFAST)
-target_link_libraries(fastsecp256k1_libbitcoin INTERFACE ${_lbtc_engine})
 
 # GPU accelerator host library: when SECP256K1_BUILD_LIBBITCOIN_GPU=ON and at least one
 # GPU backend (CUDA/OpenCL/Metal) is compiled, the self-installing GpuColumnsVerifyHook
@@ -73,6 +72,10 @@ if(SECP256K1_BUILD_LIBBITCOIN_GPU)
         else()
             set(_lbtc_gpu_retain "LINKER:--undefined=secp256k1_gpu_columns_provider_anchor")
             set(_lbtc_gpu_retain_desc "--undefined (GNU-like)")
+            if(APPLE)
+                set(_lbtc_gpu_retain "LINKER:-u,_secp256k1_gpu_columns_provider_anchor")
+                set(_lbtc_gpu_retain_desc "-u (Apple)")
+            endif()
         endif()
         # Enable the seven libbitcoin public-data batch-op GPU trampolines in
         # gpu_engine_hook.cpp (guarded by SECP256K1_LBTC_GPU_OPS) and give that TU
@@ -85,6 +88,8 @@ if(SECP256K1_BUILD_LIBBITCOIN_GPU)
         # EngineLbtcOpsInstaller rides the same TU/anchor as the column provider.
         target_include_directories(secp256k1_gpu_host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_compile_definitions(secp256k1_gpu_host PRIVATE SECP256K1_LBTC_GPU_OPS)
+        target_compile_definitions(fastsecp256k1_libbitcoin INTERFACE
+            UFSECP_LBTC_HAS_GPU_PROVIDER=1)
         message(STATUS "  libbitcoin direct GPU: ON (SECP256K1_BUILD_LIBBITCOIN_GPU=ON; secp256k1_gpu_host linked, hook retained via targeted linker anchor retention [${_lbtc_gpu_retain_desc}] — transparent GPU column verify + public-data batch ops)")
     else()
         set(_lbtc_gpu_host "")
@@ -97,21 +102,18 @@ else()
     message(STATUS "  libbitcoin direct GPU: OFF (SECP256K1_BUILD_LIBBITCOIN_GPU=OFF — CPU-only column verify)")
 endif()
 
+target_link_libraries(fastsecp256k1_libbitcoin INTERFACE
+    ${_lbtc_gpu_host}
+    ${_lbtc_engine})
+if(_lbtc_gpu_retain)
+    target_link_options(fastsecp256k1_libbitcoin INTERFACE ${_lbtc_gpu_retain})
+endif()
+
 # Canonical libbitcoin integration test: direct ECDSA + Schnorr verify
 # (single + batch + columns + fail-closed). Registered as `lbtc_direct_verify`.
 if(SECP256K1_BUILD_LIBBITCOIN_TESTS)
     add_executable(test_lbtc_direct_verify tests/test_direct_verify.cpp)
-    # Link the interface target (headers + defines + C++20) and the engine
-    # directly so its objects/archive resolve at link time. When the GPU host
-    # is available, link it too so the self-installing hook accelerates column
-    # verify transparently (CPU fallback when no GPU runtime).
-    target_link_libraries(test_lbtc_direct_verify PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(test_lbtc_direct_verify PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(test_lbtc_direct_verify PRIVATE fastsecp256k1_libbitcoin)
     find_package(Threads QUIET)
     if(TARGET Threads::Threads)
         target_link_libraries(test_lbtc_direct_verify PRIVATE Threads::Threads)
@@ -121,13 +123,7 @@ if(SECP256K1_BUILD_LIBBITCOIN_TESTS)
 
     # libbitcoin direct integration test: signing, key operations, recovery, utilities.
     add_executable(test_lbtc_direct_operations tests/test_direct_operations.cpp)
-    target_link_libraries(test_lbtc_direct_operations PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(test_lbtc_direct_operations PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(test_lbtc_direct_operations PRIVATE fastsecp256k1_libbitcoin)
     find_package(Threads QUIET)
     if(TARGET Threads::Threads)
         target_link_libraries(test_lbtc_direct_operations PRIVATE Threads::Threads)
@@ -146,12 +142,9 @@ if(SECP256K1_BUILD_LIBBITCOIN_TESTS)
     if(_lbtc_gpu_host)
         add_executable(test_lbtc_direct_gpu_columns_hook tests/test_direct_gpu_columns_hook.cpp)
         target_link_libraries(test_lbtc_direct_gpu_columns_hook PRIVATE
-            fastsecp256k1_libbitcoin
-            ${_lbtc_gpu_host}
-            ${_lbtc_engine})
-        if(_lbtc_gpu_retain)
-            target_link_options(test_lbtc_direct_gpu_columns_hook PRIVATE ${_lbtc_gpu_retain})
-        endif()
+            fastsecp256k1_libbitcoin)
+        target_include_directories(test_lbtc_direct_gpu_columns_hook PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../src/gpu/include)
         find_package(Threads QUIET)
         if(TARGET Threads::Threads)
             target_link_libraries(test_lbtc_direct_gpu_columns_hook PRIVATE Threads::Threads)
@@ -164,54 +157,29 @@ if(SECP256K1_BUILD_LIBBITCOIN_TESTS)
     message(STATUS "  libbitcoin direct test: ON (lbtc_direct_verify, lbtc_direct_operations)")
 endif()
 
-# Canonical direct C++ benchmark. This intentionally links only the direct
-# interface target and the engine: no ufsecp C ABI, no shim, no ufsecp_lbtc bridge.
+# Canonical direct C++ benchmark.
 if(SECP256K1_BUILD_LIBBITCOIN_BENCH)
     add_executable(bench_lbtc_direct_batch bench/bench_direct_batch.cpp)
-    target_link_libraries(bench_lbtc_direct_batch PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(bench_lbtc_direct_batch PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(bench_lbtc_direct_batch PRIVATE fastsecp256k1_libbitcoin)
     find_package(Threads QUIET)
     if(TARGET Threads::Threads)
         target_link_libraries(bench_lbtc_direct_batch PRIVATE Threads::Threads)
     endif()
 
     add_executable(bench_lbtc_hash256_var bench/bench_hash256_var.cpp)
-    target_link_libraries(bench_lbtc_hash256_var PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(bench_lbtc_hash256_var PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(bench_lbtc_hash256_var PRIVATE fastsecp256k1_libbitcoin)
     if(TARGET Threads::Threads)
         target_link_libraries(bench_lbtc_hash256_var PRIVATE Threads::Threads)
     endif()
 
     add_executable(bench_lbtc_public_ops bench/bench_public_ops.cpp)
-    target_link_libraries(bench_lbtc_public_ops PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(bench_lbtc_public_ops PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(bench_lbtc_public_ops PRIVATE fastsecp256k1_libbitcoin)
     if(TARGET Threads::Threads)
         target_link_libraries(bench_lbtc_public_ops PRIVATE Threads::Threads)
     endif()
 
     add_executable(bench_lbtc_workloads bench/bench_workloads.cpp)
-    target_link_libraries(bench_lbtc_workloads PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(bench_lbtc_workloads PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(bench_lbtc_workloads PRIVATE fastsecp256k1_libbitcoin)
     if(TARGET Threads::Threads)
         target_link_libraries(bench_lbtc_workloads PRIVATE Threads::Threads)
     endif()
@@ -253,13 +221,7 @@ endif()
 # SECP256K1_BUILD_EXAMPLES surface.
 if(SECP256K1_BUILD_LIBBITCOIN_EXAMPLES)
     add_executable(example_lbtc_public_ops examples/public_ops_example.cpp)
-    target_link_libraries(example_lbtc_public_ops PRIVATE
-        fastsecp256k1_libbitcoin
-        ${_lbtc_gpu_host}
-        ${_lbtc_engine})
-    if(_lbtc_gpu_retain)
-        target_link_options(example_lbtc_public_ops PRIVATE ${_lbtc_gpu_retain})
-    endif()
+    target_link_libraries(example_lbtc_public_ops PRIVATE fastsecp256k1_libbitcoin)
     find_package(Threads QUIET)
     if(TARGET Threads::Threads)
         target_link_libraries(example_lbtc_public_ops PRIVATE Threads::Threads)

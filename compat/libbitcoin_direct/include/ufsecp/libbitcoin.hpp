@@ -18,7 +18,7 @@
 //   xonly   : 32-byte x-only public key
 //
 // Verify paths use variable-time arithmetic (all inputs public) — correct and
-// fastest. No secret material is handled here.
+// fastest.
 //
 // Signing paths use secp256k1::ct::* primitives (constant-time) for all
 // secret-bearing operations (private keys, nonces). This is mandatory and
@@ -33,29 +33,33 @@
 #ifndef UFSECP_LIBBITCOIN_DIRECT_HPP
 #define UFSECP_LIBBITCOIN_DIRECT_HPP
 
-#include "secp256k1/ecdsa.hpp"
-#include "secp256k1/schnorr.hpp"
-#include "secp256k1/point.hpp"
-#include "secp256k1/scalar.hpp"
-#include "secp256k1/field.hpp"
-#include "secp256k1/field_52.hpp"
-#include "secp256k1/batch_verify.hpp"
-#include "secp256k1/recovery.hpp"
-#include "secp256k1/taproot.hpp"
-#include "secp256k1/private_key.hpp"
-#include "secp256k1/ct/sign.hpp"
-#include "secp256k1/ct/point.hpp"
-#include "secp256k1/ct/scalar.hpp"
-#include "secp256k1/tagged_hash.hpp"
-#include "secp256k1/sha256.hpp"
-
-#include "ufsecp/lbtc_gpu_ops.hpp"
-
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <utility>
+#include <vector>
+
+#include "secp256k1/batch_verify.hpp"
+#include "secp256k1/ct/point.hpp"
+#include "secp256k1/ct/scalar.hpp"
+#include "secp256k1/ct/sign.hpp"
+#include "secp256k1/detail/batch_pool.hpp"
+#include "secp256k1/detail/secure_erase.hpp"
+#include "secp256k1/ecdsa.hpp"
+#include "secp256k1/field.hpp"
+#include "secp256k1/field_52.hpp"
+#include "secp256k1/point.hpp"
+#include "secp256k1/private_key.hpp"
+#include "secp256k1/recovery.hpp"
+#include "secp256k1/scalar.hpp"
+#include "secp256k1/schnorr.hpp"
+#include "secp256k1/sha256.hpp"
+#include "secp256k1/tagged_hash.hpp"
+#include "secp256k1/taproot.hpp"
+
+#include "ufsecp/lbtc_gpu_ops.hpp"
 
 namespace ufsecp::lbtc {
 
@@ -103,6 +107,137 @@ inline constexpr const char* fastsecp256k1_libbitcoin_target() noexcept {
         return v;
     };
     return secp256k1::fast::Scalar::from_limbs({rd(p), rd(p + 8), rd(p + 16), rd(p + 24)});
+}
+
+struct bip352_column_group {
+    std::size_t first;
+    std::size_t rows;
+};
+
+// CPU half of the unified BIP-352 column operation. The GPU hook and this
+// implementation have the same contract: adjacent equal correlates form one
+// transaction; only the first row of a matching group is marked.
+[[nodiscard]] inline bool bip352_scan_columns_cpu(const std::uint8_t scan_privkey32[32],
+                                                  const std::uint8_t* spend_pubkeys33, std::size_t n_spend,
+                                                  const std::uint8_t* correlates4, const std::uint8_t* prefixes8,
+                                                  const std::uint8_t* tweak_pubkeys33, std::size_t rows,
+                                                  std::uint8_t* matches_out, std::size_t max_threads) noexcept {
+    using secp256k1::fast::Point;
+    using secp256k1::fast::Scalar;
+
+    std::memset(matches_out, 0, rows);
+
+    try {
+        Scalar scan;
+        if (!Scalar::parse_bytes_strict_nonzero(scan_privkey32, scan))
+            return false;
+
+        struct scan_guard {
+            Scalar& value;
+            ~scan_guard() { secp256k1::detail::secure_erase(&value, sizeof(value)); }
+        } erase_scan{scan};
+
+        std::vector<Point> spends(n_spend);
+        for (std::size_t index = 0; index < n_spend; ++index)
+            if (!decompress(spend_pubkeys33 + index * 33, spends[index]))
+                return false;
+
+        std::vector<bip352_column_group> groups;
+        groups.reserve(rows);
+        for (std::size_t first = 0; first < rows;) {
+            const auto correlate = correlates4 + first * 4;
+            if (correlate[0] == 0xff && correlate[1] == 0xff && correlate[2] == 0xff && correlate[3] == 0xff)
+                return false;
+
+            std::size_t end = first + 1;
+            while (end < rows && std::memcmp(correlates4 + end * 4, correlate, 4) == 0) {
+                if (std::memcmp(tweak_pubkeys33 + first * 33, tweak_pubkeys33 + end * 33, 33) != 0)
+                    return false;
+                ++end;
+            }
+            groups.push_back({first, end - first});
+            first = end;
+        }
+
+        static const auto shared_secret_tag = secp256k1::detail::make_tag_midstate("BIP0352/SharedSecret");
+
+        const auto scan_group = [&](std::size_t index) noexcept {
+            const auto& group = groups[index];
+            Point point;
+            if (!decompress(tweak_pubkeys33 + group.first * 33, point))
+                return false;
+
+            Point shared = secp256k1::ct::scalar_mul(point, scan);
+            if (shared.is_infinity())
+                return false;
+
+            std::array<std::uint8_t, 37> tagged_input{};
+            auto compressed = shared.to_compressed();
+            std::memcpy(tagged_input.data(), compressed.data(), 33);
+            auto tweak_bytes =
+                secp256k1::detail::cached_tagged_hash(shared_secret_tag, tagged_input.data(), tagged_input.size());
+            Scalar tweak;
+            if (!Scalar::parse_bytes_strict_nonzero(tweak_bytes, tweak)) {
+                secp256k1::detail::secure_erase(compressed.data(), compressed.size());
+                secp256k1::detail::secure_erase(tagged_input.data(), tagged_input.size());
+                secp256k1::detail::secure_erase(tweak_bytes.data(), tweak_bytes.size());
+                secp256k1::detail::secure_erase(&shared, sizeof(shared));
+                return false;
+            }
+
+            Point offset = secp256k1::ct::generator_mul(tweak);
+            auto good = !offset.is_infinity();
+            auto matched = false;
+            for (const auto& spend : spends) {
+                if (!good || matched)
+                    break;
+
+                Point candidate = spend.add(offset);
+                if (candidate.is_infinity()) {
+                    good = false;
+                } else {
+                    const auto x = candidate.x().to_bytes();
+                    for (std::size_t row = group.first; row < group.first + group.rows; ++row) {
+                        if (std::memcmp(prefixes8 + row * 8, x.data(), 8) == 0) {
+                            matches_out[group.first] = 1;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                secp256k1::detail::secure_erase(&candidate, sizeof(candidate));
+            }
+
+            secp256k1::detail::secure_erase(&offset, sizeof(offset));
+            secp256k1::detail::secure_erase(&tweak, sizeof(tweak));
+            secp256k1::detail::secure_erase(tweak_bytes.data(), tweak_bytes.size());
+            secp256k1::detail::secure_erase(compressed.data(), compressed.size());
+            secp256k1::detail::secure_erase(tagged_input.data(), tagged_input.size());
+            secp256k1::detail::secure_erase(&shared, sizeof(shared));
+            return good;
+        };
+
+        auto& pool = secp256k1::detail::batch_worker_pool();
+        const auto available = pool.size();
+        const auto requested =
+            max_threads == 0 ? available : static_cast<unsigned>(std::min<std::size_t>(max_threads, available));
+        const auto by_work = static_cast<unsigned>(std::max<std::size_t>(1, groups.size() / 32));
+        const auto workers = std::min(requested, by_work);
+        const auto steal = std::max<std::size_t>(1, groups.size() / (std::max(1u, workers) * 4u));
+        const auto good = pool.run(groups.size(), steal, workers, [&](std::size_t first, std::size_t end) {
+            for (auto index = first; index < end; ++index)
+                if (!scan_group(index))
+                    return false;
+            return true;
+        });
+
+        if (!good)
+            std::memset(matches_out, 0, rows);
+        return good;
+    } catch (...) {
+        std::memset(matches_out, 0, rows);
+        return false;
+    }
 }
 
 } // namespace detail
@@ -207,6 +342,59 @@ inline constexpr const char* fastsecp256k1_libbitcoin_target() noexcept {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ─── BIP-352 receiver scan prefixes ──────────────────────────────────────
+// Feature-test macro for direct libbitcoin Silent Payments scanning.
+#define UFSECP_LBTC_HAS_BIP352_SCAN 1
+[[nodiscard]] inline bool bip352_scan_prefixes(const std::uint8_t scan_privkey32[32],
+                                               const std::uint8_t* spend_pubkeys33, std::size_t n_spend,
+                                               const std::uint8_t* tweak_pubkeys33, std::size_t n_tweaks,
+                                               std::uint64_t* prefix64_out) noexcept {
+    if (n_spend != 0 && n_tweaks > (SIZE_MAX / n_spend))
+        return false;
+    const std::size_t rows = n_spend * n_tweaks;
+    if (rows == 0)
+        return true;
+    if (scan_privkey32 == nullptr || spend_pubkeys33 == nullptr || tweak_pubkeys33 == nullptr ||
+        prefix64_out == nullptr)
+        return false;
+
+    if (auto hook = gpu_hook::g_lbtc_bip352_hook.load(std::memory_order_acquire))
+        return hook(scan_privkey32, spend_pubkeys33, n_spend, tweak_pubkeys33, n_tweaks, prefix64_out) == 0;
+
+    return false;
+}
+
+// Unified column scan: the optional GPU hook is an internal acceleration. A
+// missing or declining hook transparently falls back to the CPU implementation.
+// On success matches_out is fully initialized and only the first row of a
+// matching adjacent-correlate group is set. False means malformed input or a
+// cryptographic/computation failure, never merely "no GPU".
+#define UFSECP_LBTC_HAS_BIP352_SCAN_COLUMNS 1
+#define UFSECP_LBTC_HAS_BIP352_SCAN_COLUMNS_UNIFIED 1
+[[nodiscard]] inline bool bip352_scan_columns(const std::uint8_t scan_privkey32[32],
+                                              const std::uint8_t* spend_pubkeys33, std::size_t n_spend,
+                                              const std::uint8_t* correlates4, const std::uint8_t* prefixes8,
+                                              const std::uint8_t* tweak_pubkeys33, std::size_t rows,
+                                              std::uint8_t* matches_out, std::size_t max_threads = 0) noexcept {
+    if (rows == 0)
+        return true;
+    if (scan_privkey32 == nullptr || spend_pubkeys33 == nullptr || n_spend == 0 || correlates4 == nullptr ||
+        prefixes8 == nullptr || tweak_pubkeys33 == nullptr || matches_out == nullptr || n_spend > (SIZE_MAX / 33) ||
+        rows > (SIZE_MAX / 33) || rows > (SIZE_MAX / 8))
+        return false;
+
+    // max_threads == 1 is the serial execution hint used by libbitcoin when
+    // turbo is disabled. Otherwise the provider may accelerate the operation.
+    if (max_threads != 1)
+        if (auto hook = gpu_hook::g_lbtc_bip352_columns_hook.load(std::memory_order_acquire))
+            if (hook(scan_privkey32, spend_pubkeys33, n_spend, correlates4, prefixes8, tweak_pubkeys33, rows,
+                     matches_out) == 0)
+                return true;
+
+    return detail::bip352_scan_columns_cpu(scan_privkey32, spend_pubkeys33, n_spend, correlates4, prefixes8,
+                                           tweak_pubkeys33, rows, matches_out, max_threads);
+}
+
 // ECDSA Signing  (CT-backed — all secret-bearing paths use ct::* primitives)
 // ══════════════════════════════════════════════════════════════════════════════
 

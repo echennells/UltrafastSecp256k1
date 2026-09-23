@@ -106,7 +106,7 @@ target_include_directories(secp256k1_cuda_lib PRIVATE
 # STATIC library (HIP and CUDA branches above both add_library(... STATIC)).
 include(GNUInstallDirs)
 install(TARGETS secp256k1_cuda_lib
-    EXPORT ufsecpTargets
+    EXPORT ${SECP256K1_GPU_EXPORT_SET}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 

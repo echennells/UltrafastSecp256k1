@@ -619,6 +619,11 @@ if(SECP256K1_BUILD_BCH)
     add_subdirectory(src/bch)
 endif()
 
+if(SECP256K1_BUILD_LIBBITCOIN)
+    set(SECP256K1_GPU_EXPORT_SET secp256k1-fast-targets)
+else()
+    set(SECP256K1_GPU_EXPORT_SET ufsecpTargets)
+endif()
 
 if(SECP256K1_BUILD_CUDA)
     # On some platforms (notably Windows), nvcc requires an MSVC host compiler (cl.exe).
@@ -863,7 +868,6 @@ if(SECP256K1_INSTALL)
             PATTERN "bip352*" EXCLUDE
             PATTERN "chacha20*" EXCLUDE
             PATTERN "hkdf*" EXCLUDE
-            PATTERN "sha256*" EXCLUDE
             PATTERN "sha512*" EXCLUDE
             PATTERN "unicode*" EXCLUDE
             PATTERN "segwit*" EXCLUDE
@@ -905,6 +909,7 @@ if(SECP256K1_INSTALL)
     if(SECP256K1_BUILD_LIBBITCOIN AND TARGET fastsecp256k1_libbitcoin)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/compat/libbitcoin_direct/include/ufsecp/libbitcoin.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/compat/libbitcoin_direct/include/ufsecp/lbtc_gpu_ops.hpp"
             DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ufsecp
         )
         install(TARGETS fastsecp256k1_libbitcoin
@@ -918,6 +923,12 @@ if(SECP256K1_INSTALL)
         VERSION ${PROJECT_VERSION}
         COMPATIBILITY SameMajorVersion
     )
+
+    if(TARGET secp256k1_opencl)
+        set(SECP256K1_PACKAGE_OPENCL TRUE)
+    else()
+        set(SECP256K1_PACKAGE_OPENCL FALSE)
+    endif()
     
     configure_package_config_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/secp256k1-fast-config.cmake.in"
@@ -944,6 +955,48 @@ if(SECP256K1_INSTALL)
             FILES "${CMAKE_CURRENT_BINARY_DIR}/secp256k1-fast.pc"
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
         )
+
+        if(SECP256K1_BUILD_LIBBITCOIN AND
+            NOT TARGET secp256k1_cuda_lib)
+            set(_lbtc_pc_system_libs "-lpthread")
+            if(NOT MSVC AND NOT APPLE AND
+                NOT SECP256K1_ATOMICS_LINK_WITHOUT_LIBATOMIC)
+                string(PREPEND _lbtc_pc_system_libs "-latomic ")
+            endif()
+            set(SECP256K1_LIBBITCOIN_PC_LIBS
+                "-lfastsecp256k1 ${_lbtc_pc_system_libs}")
+            set(SECP256K1_LIBBITCOIN_PC_REQUIRES "")
+            if(SECP256K1_BUILD_LIBBITCOIN_GPU AND
+                TARGET secp256k1_gpu_host)
+                if(APPLE)
+                    set(_lbtc_pc_retain "-Wl,-u,_secp256k1_gpu_columns_provider_anchor")
+                else()
+                    set(_lbtc_pc_retain "-Wl,--undefined=secp256k1_gpu_columns_provider_anchor")
+                endif()
+                set(SECP256K1_LIBBITCOIN_PC_LIBS
+                    "${_lbtc_pc_retain} -lsecp256k1_gpu_host")
+                if(TARGET secp256k1_opencl)
+                    string(APPEND SECP256K1_LIBBITCOIN_PC_LIBS
+                        " -lsecp256k1_opencl")
+                    set(SECP256K1_LIBBITCOIN_PC_REQUIRES "OpenCL")
+                endif()
+                if(TARGET secp256k1_metal_lib)
+                    string(APPEND SECP256K1_LIBBITCOIN_PC_LIBS
+                        " -lsecp256k1_metal_lib -framework Metal -framework Foundation")
+                endif()
+                string(APPEND SECP256K1_LIBBITCOIN_PC_LIBS
+                    " -lfastsecp256k1 ${_lbtc_pc_system_libs}")
+            endif()
+            configure_file(
+                "${CMAKE_CURRENT_SOURCE_DIR}/secp256k1-fast-libbitcoin.pc.in"
+                "${CMAKE_CURRENT_BINARY_DIR}/secp256k1-fast-libbitcoin.pc"
+                @ONLY
+            )
+            install(
+                FILES "${CMAKE_CURRENT_BINARY_DIR}/secp256k1-fast-libbitcoin.pc"
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+            )
+        endif()
     endif()
 
     if(SECP256K1_INSTALL_CABI)
