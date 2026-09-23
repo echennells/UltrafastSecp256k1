@@ -42,6 +42,18 @@ and wired into the existing public API without changing external bytes.
 
 ### 1. Point normalization and serialization
 
+Today `ct::scalar_mul` returns `Point` by converting an internal
+`CTJacobianPoint` through `to_point()` and declassifying the result. Both
+the native 5x52 and generic 4x64 implementations already form a Jacobian
+result before that conversion. Expose an internal Jacobian-returning scalar
+multiplication entry point and retain the existing public `Point` wrapper
+unchanged. ECDH must consume the internal result directly; converting the
+public `Point` result back to `CTJacobianPoint` would retain the branch and
+declassification boundary. The BIP352 offset similarly needs an internal
+Jacobian-returning generator-multiplication path, with the public wrapper
+preserved. Compare these refactorings independently against the old wrappers
+and measure them; do not introduce duplicate scalar-multiplication algorithms.
+
 An internal `secp256k1/detail/ct_point_io.hpp`-level component accepts a
 `CTJacobianPoint` and produces only the needed fixed-size representations:
 `x32`, compressed `33` bytes, or `x||y` `64` bytes. It normalizes with
@@ -82,8 +94,10 @@ the carry/reduction bounds, including worst-case inputs, and confirm the
 compiler's generated control flow is compatible with the claimed
 constant-time property. Do not assume that a nominally fixed source loop is
 enough. Keep native 5x52 dispatch unchanged, and document the exact portable
-profile for which evidence exists. Existing no-`__int128` scalar-inversion
-limitations are a distinct issue and must not be represented as repaired.
+profile for which evidence exists. Correct the current blanket constant-time
+comments in `ct/field.hpp` and `ct_field.cpp` to state only measured platform
+coverage. Existing no-`__int128` scalar-inversion limitations are a distinct
+issue and must not be represented as repaired.
 
 ## Error handling and compatibility
 
