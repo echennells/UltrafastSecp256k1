@@ -149,6 +149,12 @@ cmake --build --preset cpu-release --target test_lbtc_direct_verify test_lbtc_di
 ctest --test-dir out/cpu-release -R '^lbtc_direct' --output-on-failure
 ```
 
+An installed package built with `SECP256K1_BUILD_CUDA=ON` exports its selected
+CUDA runtime as a transitive dependency. Downstream CMake consumers therefore
+need the matching CUDA Toolkit development package discoverable by
+`find_package(CUDAToolkit)`. CPU-only and HIP packages do not acquire this
+dependency.
+
 The legacy bridge/C ABI tests are compatibility-only and require
 `-DSECP256K1_BUILD_LIBBITCOIN_BRIDGE=ON`.
 

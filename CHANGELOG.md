@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Canonical libbitcoin BIP-352 column scans.** The bridge-free
+  `secp256k1::fastsecp256k1_libbitcoin` target now exposes one grouped scan
+  operation that preserves libbitcoin's correlate and prefix columns. The
+  operation selects an installed GPU provider internally and otherwise uses
+  its bounded CPU worker pool, including an explicit serial-execution hint.
+
+### Changed
+
+- **Grouped BIP-352 scans reuse the existing cross-backend GPU primitive.**
+  The provider compacts adjacent transaction rows to one tweak per correlate,
+  calls `bip352_scan_batch_multispend` once for the compact batch, and matches
+  its candidate prefixes on the host. CUDA, OpenCL, and Metal therefore share
+  one backend contract; no column-only GPU operation is required.
+
+### Fixed
+
+- **Installed CUDA packages now carry a complete link interface.** CUDA device
+  symbols are resolved in the static archive and the selected CUDA runtime is
+  exported through the generated CMake package, so C++-only consumers can link
+  `secp256k1::fastsecp256k1_libbitcoin` without unresolved CUDA symbols.
+
 ## [4.6.0] - 2026-09-21
 
 > **A security and correctness release, with a namespace break in the legacy C
