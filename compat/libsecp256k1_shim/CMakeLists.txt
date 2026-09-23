@@ -91,6 +91,12 @@ else()
 
 endif() # SECP256K1_BUILD_SHIM
 
+if(SECP256K1_BUILD_BENCH)
+    add_executable(bench_ecdh_gate bench/bench_ecdh_gate.cpp)
+    target_compile_features(bench_ecdh_gate PRIVATE cxx_std_20)
+    target_link_libraries(bench_ecdh_gate PRIVATE secp256k1_shim)
+endif()
+
 # -- Optional: self-contained shared ultrafast_secp256k1 (DLL / .so / .dylib) --
 # Builds ONE shared library that exports the libsecp256k1 C ABI (the secp256k1_*
 # symbols + <secp256k1.h>), but under OUR OWN file name so it never silently
