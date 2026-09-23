@@ -1244,6 +1244,9 @@ endif()
 # All use benchmark_harness.hpp (RDTSC/chrono, IQR, thread pinning).
 # =============================================================================
 if(SECP256K1_BUILD_BENCH)
+    add_executable(bench_hamburg_ecmult bench/bench_hamburg_ecmult.cpp)
+    target_link_libraries(bench_hamburg_ecmult PRIVATE ${SECP256K1_LIB_NAME})
+
     # Fixed-input native CT inverse primitive gate for before/after experiments.
     add_executable(bench_ct_inverse bench/bench_ct_inverse.cpp)
     target_link_libraries(bench_ct_inverse PRIVATE ${SECP256K1_LIB_NAME})

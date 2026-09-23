@@ -1112,6 +1112,14 @@ void unified_add_core(CTJacobianPoint* out,
     }
 }
 
+// This complete x-only addition runs once per multiplication but is large when
+// inlined. Keep it out of the hot Hamburg loop's instruction footprint.
+SECP256K1_NOINLINE static void unified_add_final_xonly(
+    CTJacobianPoint* out, const CTJacobianPoint& a,
+    const CTAffinePoint& b) noexcept {
+    unified_add_core<false, false>(out, a, b);
+}
+
 // Public wrapper (out-of-line for external callers, preserves all safety checks).
 void point_add_mixed_unified_into(CTJacobianPoint* out,
                                    const CTJacobianPoint& a,
@@ -1345,8 +1353,10 @@ CTGLVDecomposition ct_glv_decompose(const Scalar& k) noexcept {
 // Used by ecmult_const_xonly() to combine Z^-1 with the g-correction into a
 // single field inversion (libsecp secp256k1_ecmult_const_xonly technique).
 //
-// Returns CTJacobianPoint with infinity flag set if k==0 or p==infinity.
-// Output: {R.x, R.y, R.z} in Jacobian form; affine x = R.x * R.z^{-2}.
+// Input p==infinity sets the explicit infinity flag. For k==0, the complete
+// addition formula may instead encode infinity with Z==0 and an unset flag;
+// callers must not infer non-infinity from the flag alone.
+// For Z!=0, affine x = R.x * R.z^{-2}.
 static CTJacobianPoint scalar_mul_jac(const Point& p, const Scalar& k) noexcept;
 
 // --- CT GLV make_v helper ----------------------------------------------------
@@ -1377,6 +1387,8 @@ SECP256K1_INLINE static Scalar ct_glv_make_v(const Scalar& k_abs, std::uint64_t 
 // BYPASSES the SECP_ASSERT_ON_CURVE check — safe for effective-affine points
 // on secp256k1-isomorphic curves (a=0 → same group law, different b).
 // Used by ecmult_const_xonly where P_eff = (g·xn, g²) is NOT on secp256k1.
+// A zero scalar may leave Z==0 with infinity==0; the x-only caller's zero
+// denominator maps that case to its documented zero result.
 static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
                                                const Scalar& k) noexcept {
     constexpr unsigned GROUP_SIZE = 5;
@@ -1456,9 +1468,10 @@ static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
     SECP256K1_DECLASSIFY(pre_a, sizeof(pre_a));
     SECP256K1_DECLASSIFY(pre_a_lam, sizeof(pre_a_lam));
 
-    // HAMBURG=true: K_CONST guarantees m_val (S1+S2) ≠ 0 for all intermediate
-    // additions in this isomorphic-curve path (~18 ns × 52 calls ≈ 936 ns saved).
-    // Dedicated to ellswift_xdh — scalar_mul_jac (CT signing) keeps HAMBURG=false.
+    // HAMBURG=true is valid through group 1 and for the first addition in
+    // group 0. The second addition in group 0 can have S1+S2=0, so it must
+    // use the complete formula. The loop index is public and fixed; no
+    // scalar-dependent branch is introduced.
     CTJacobianPoint R;
     CTAffinePoint t;
 
@@ -1482,8 +1495,12 @@ static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
         table_lookup_core<false>(&t, pre_a, TABLE_SIZE, bits1, GROUP_SIZE);
         unified_add_core<false, true>(&R, R, t);  // HAMBURG: K_CONST → no degenerate
         table_lookup_core<false>(&t, pre_a_lam, TABLE_SIZE, bits2, GROUP_SIZE);
-        unified_add_core<false, true>(&R, R, t);  // HAMBURG: K_CONST → no degenerate
+        if (group != 0) {
+            unified_add_core<false, true>(&R, R, t);  // non-final groups only
+        }
     }
+    // The final group's second lookup remains in t after the fixed loop.
+    unified_add_final_xonly(&R, R, t);
 
     R.z.mul_assign(global_z);
     return R;
