@@ -1244,6 +1244,10 @@ endif()
 # All use benchmark_harness.hpp (RDTSC/chrono, IQR, thread pinning).
 # =============================================================================
 if(SECP256K1_BUILD_BENCH)
+    # Fixed-input native CT inverse primitive gate for before/after experiments.
+    add_executable(bench_ct_inverse bench/bench_ct_inverse.cpp)
+    target_link_libraries(bench_ct_inverse PRIVATE ${SECP256K1_LIB_NAME})
+
     # CT (Constant-Time) layer benchmark -- fast:: vs ct:: overhead comparison
     add_executable(bench_ct bench/bench_ct.cpp)
     target_link_libraries(bench_ct PRIVATE ${SECP256K1_LIB_NAME})
@@ -1420,6 +1424,10 @@ if(BUILD_TESTING)
     add_executable(test_ct_point_io_standalone tests/test_ct_point_io.cpp)
     target_link_libraries(test_ct_point_io_standalone PRIVATE ${SECP256K1_LIB_NAME})
     add_test(NAME ct_point_io COMMAND test_ct_point_io_standalone)
+
+    add_executable(test_ct_inverse_gate_standalone tests/test_ct_inverse_gate.cpp)
+    target_link_libraries(test_ct_inverse_gate_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME ct_inverse_gate COMMAND test_ct_inverse_gate_standalone)
 
     # Standalone affine batch add test (independent of full test runner)
     add_executable(test_batch_add_affine_standalone
