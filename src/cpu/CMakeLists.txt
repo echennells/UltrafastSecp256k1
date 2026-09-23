@@ -1429,6 +1429,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_ct_inverse_gate_standalone PRIVATE ${SECP256K1_LIB_NAME})
     add_test(NAME ct_inverse_gate COMMAND test_ct_inverse_gate_standalone)
 
+    add_executable(test_hamburg_ecmult_witness_standalone
+        tests/test_hamburg_ecmult_witness.cpp)
+    target_link_libraries(test_hamburg_ecmult_witness_standalone
+        PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME hamburg_ecmult_witness COMMAND test_hamburg_ecmult_witness_standalone)
+
     # Standalone affine batch add test (independent of full test runner)
     add_executable(test_batch_add_affine_standalone
         tests/test_batch_add_affine.cpp
