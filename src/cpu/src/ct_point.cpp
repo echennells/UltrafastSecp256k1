@@ -34,6 +34,7 @@
 
 #include "secp256k1/config.hpp"  // SECP256K1_FAST_52BIT, SECP256K1_INLINE
 #include "secp256k1/ct/point.hpp"
+#include "secp256k1/detail/ct_point_internal.hpp"
 #include "secp256k1/detail/secure_erase.hpp"
 #include "secp256k1/ct/field.hpp"
 #include "secp256k1/ct/scalar.hpp"
@@ -1599,9 +1600,14 @@ static CTJacobianPoint scalar_mul_jac(const Point& p, const Scalar& k) noexcept 
     return R;
 }
 
+namespace detail {
+CTJacobianPoint scalar_mul_jacobian(const Point& p, const Scalar& k) noexcept {
+    return scalar_mul_jac(p, k);
+}
+} // namespace detail
+
 Point scalar_mul(const Point& p, const Scalar& k) noexcept {
-    // Delegate to the Jacobian-output variant, then normalize.
-    CTJacobianPoint R = scalar_mul_jac(p, k);
+    CTJacobianPoint R = detail::scalar_mul_jacobian(p, k);
     Point result = R.to_point();
     SECP256K1_DECLASSIFY(&result, sizeof(result));
     return result;
@@ -3010,7 +3016,7 @@ CTGLVDecomposition ct_glv_decompose(const Scalar& k) noexcept {
 // Hamburg signed-digit comb + GLV. GROUP_SIZE=5, TABLE_SIZE=16, GROUPS=26.
 // Cost: 125 dbl + 52 unified_add + 52 signed_lookups(16).
 
-Point scalar_mul(const Point& p, const Scalar& k) noexcept {
+static CTJacobianPoint scalar_mul_jac_4x64(const Point& p, const Scalar& k) noexcept {
     constexpr unsigned GROUP_SIZE = 5;
     constexpr unsigned TABLE_SIZE = 1u << (GROUP_SIZE - 1);  // 16
     constexpr unsigned GROUPS = 26;
@@ -3146,6 +3152,17 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept {
 
     R.z = field_mul(R.z, global_z);
 
+    return R;
+}
+
+namespace detail {
+CTJacobianPoint scalar_mul_jacobian(const Point& p, const Scalar& k) noexcept {
+    return scalar_mul_jac_4x64(p, k);
+}
+} // namespace detail
+
+Point scalar_mul(const Point& p, const Scalar& k) noexcept {
+    CTJacobianPoint R = detail::scalar_mul_jacobian(p, k);
     Point result = R.to_point();
     SECP256K1_DECLASSIFY(&result, sizeof(result));
     return result;
