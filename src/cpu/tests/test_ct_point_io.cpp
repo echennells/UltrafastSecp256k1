@@ -138,6 +138,8 @@ int main() {
     for (const auto& [scalar, name] : named) {
         if (!check_raw_result(generator, scalar, name)) return 1;
         if (!check_raw_result(doubled, scalar, name)) return 1;
+        if (!check_serializers(secp256k1::ct::detail::scalar_mul_jacobian(doubled, scalar),
+                               doubled.scalar_mul(scalar), name)) return 1;
     }
 
     std::uint64_t state = 0x9e3779b97f4a7c15ULL;
@@ -155,6 +157,8 @@ int main() {
         }
         if (!check_raw_result(generator, scalar, "deterministic random scalar")) return 1;
         if (!check_raw_result(doubled, scalar, "deterministic random scalar/non-affine peer")) return 1;
+        if (!check_serializers(secp256k1::ct::detail::scalar_mul_jacobian(doubled, scalar),
+                               doubled.scalar_mul(scalar), "random non-affine multiple")) return 1;
     }
 
     std::puts("PASS: raw Jacobian scalar multiplication matches public and fast references");

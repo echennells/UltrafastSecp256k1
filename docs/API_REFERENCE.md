@@ -370,9 +370,9 @@ and the pool has **no** automatic destruction because its destructor joins
 threads — at static-destruction time on Windows that runs during DLL unload while
 the loader lock is held, and joining there deadlocks.
 
-If you never run a leak check, nothing here concerns you and there is nothing to
-call. If you do — the MSVC debug CRT, Boost.Test's `_CRTDBG_LEAK_CHECK_DF`,
-ASan/LSan — that retained state is reported as live blocks at exit
+If you keep the library loaded until process exit and never run a leak check,
+there is nothing to call. If you do run one — the MSVC debug CRT, Boost.Test's
+`_CRTDBG_LEAK_CHECK_DF`, ASan/LSan — that retained state is reported as live blocks at exit
 (GitHub issue [#430](https://github.com/shrec/UltrafastSecp256k1/issues/430):
 259 blocks, ~1.32 MB, one-time and bounded rather than accumulating). Release it
 explicitly instead of carrying a suppression:
@@ -398,6 +398,10 @@ batch worker threads. Do not call it from `DllMain`, from a static destructor, o
 from anything else running under the Windows loader lock — that is the deadlock
 the pool avoids by having no destructor in the first place. Call it from your own
 code, on a thread you control, e.g. at the end of `main()`.
+For a dynamically loaded library, stop all use and call
+`release_process_resources()` (or `ufsecp_release_process_resources()`) before
+`FreeLibrary()` or the platform's library-unload operation, while the library is
+still loaded; do not re-enter it between release and unload.
 
 **Not a one-way door.** The next call into the library rebuilds what it needs, so
 this is safe to call at a quiet point and keep running.

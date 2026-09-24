@@ -41,6 +41,7 @@
 #include "secp256k1/ct/ops.hpp"
 #include "secp256k1/field_52.hpp"
 #include "secp256k1/glv.hpp"
+#include "ct_xonly_internal.hpp"
 
 #include <mutex>
 
@@ -1642,7 +1643,8 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept {
 //   4. x = R.x / (R.z² * g * xd)              (one field inversion)
 //
 // Why this works (secp256k1 has a=0):
-//   - P_eff lies on Y² = X³ + g⁶·7 (isomorphic to secp256k1 via the u=g twist)
+//   - P_eff lies on Y² = X³ + 7·(g·xd)³, isomorphic to secp256k1 only when
+//     g·xd is a nonzero square in the field.
 //   - Since a=0, all doubling/addition formulas are twist-invariant
 //   - The Jacobian scalar multiply computes q*P_eff on this isomorphic curve
 //   - The back-mapping: x_secp = x_eff / (g * xd) after Jacobian normalization
@@ -1651,19 +1653,18 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept {
 // the peer's ELL64 encoding), so the table build is variable-time OK.
 //
 // xd = FE52::one() when xn is already the full x-coordinate (not a fraction).
-FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& xd_fe,
-                                 const Scalar& q) noexcept {
-    FE52 xn = FE52::from_fe(xn_fe);
-    FE52 xd = FE52::from_fe(xd_fe);
-
-    // 1. g = xn³ + 7*xd³
+static inline FE52 xonly_curve_g(const FE52& xn, const FE52& xd) noexcept {
     FE52 const xn2 = xn.square();
     FE52 const xn3 = xn2 * xn;
     FE52 const xd2 = xd.square();
     FE52 xd3       = xd2 * xd;
     xd3.mul_int_assign(7);          // 7 * xd³
-    FE52 const g   = xn3 + xd3;    // g = xn³ + 7·xd³
+    return xn3 + xd3;               // g = xn³ + 7·xd³
+}
 
+static inline FieldElement ecmult_const_xonly_core(const FE52& xn, const FE52& xd,
+                                                    const FE52& g,
+                                                    const Scalar& q) noexcept {
     // 2. P_eff = (g·xn, g²) — affine point on the isomorphic curve
     FE52 const px52 = g * xn;
     FE52 const py52 = g.square();
@@ -1673,8 +1674,6 @@ FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& x
     //    scalar_mul_jac_fe52_z1 uses jac52_double_z1_to directly, avoiding
     //    SECP_ASSERT_ON_CURVE which would fire for non-secp256k1 points.
     CTJacobianPoint R = scalar_mul_jac_fe52_z1(px52, py52, q);
-
-    if (R.infinity != 0) return FieldElement::zero();
 
     // 4. x = R.x / (R.z² * g * xd) — single combined inversion
     //    Avoids two separate inversions (vs. normalizing R then dividing by g*xd).
@@ -1703,9 +1702,32 @@ FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& x
     // saving lands end to end: ElligatorSwift XDH -8.23%, session handshake
     // -4.35%. See issue #398 and KB FE52-INVERSE-CT-DOMINATED.
     FE52 const denom_inv = FE52::from_fe(ct::field_inv(denom.to_fe()));
-    FE52 const x52   = R.x * denom_inv;
+    FE52 const x52 = R.x * denom_inv;
 
     return x52.to_fe();
+}
+
+namespace detail {
+FieldElement ecmult_const_xonly_trusted(const FieldElement& xn_fe,
+                                        const FieldElement& xd_fe,
+                                        const Scalar& q) noexcept {
+    const FE52 xn = FE52::from_fe(xn_fe);
+    const FE52 xd = FE52::from_fe(xd_fe);
+    return ecmult_const_xonly_core(xn, xd, xonly_curve_g(xn, xd), q);
+}
+} // namespace detail
+
+FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& xd_fe,
+                                const Scalar& q) noexcept {
+    const FE52 xn = FE52::from_fe(xn_fe);
+    const FE52 xd = FE52::from_fe(xd_fe);
+    if (xd.is_zero()) return FieldElement::zero();
+
+    const FE52 g = xonly_curve_g(xn, xd);
+    // g·xd = xd⁴·((xn/xd)³ + 7). Jacobi tests the public peer x only; q must
+    // never flow into this variable-time check.
+    if ((g * xd).jacobi_var() != 1) return FieldElement::zero();
+    return ecmult_const_xonly_core(xn, xd, g, q);
 }
 
 // --- CT Prebuilt Tables API --------------------------------------------------
@@ -3422,8 +3444,9 @@ Point generator_mul(const Scalar& k) noexcept {
 
 // --- ecmult_const_xonly fallback (4x64 path) ---------------------------------
 // Uses sqrt since we lack the FE52 Jacobian-output optimisation.
-FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
-                                 const Scalar& q) noexcept {
+namespace detail {
+FieldElement ecmult_const_xonly_trusted(const FieldElement& xn, const FieldElement& xd,
+                                        const Scalar& q) noexcept {
     // Compute x = xn / xd  (for BIP-324 ECDH, xd == one so this is xn directly)
     FieldElement x;
     if (xd == FieldElement::one()) {
@@ -3443,6 +3466,17 @@ FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
     Point res = scalar_mul(P, q);
     if (res.is_infinity()) return FieldElement::zero();
     return res.x();
+}
+} // namespace detail
+
+FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
+                                const Scalar& q) noexcept {
+    if (xd == FieldElement::zero()) return FieldElement::zero();
+    const FieldElement xn3 = field_mul(field_sqr(xn), xn);
+    const FieldElement xd3 = field_mul(field_sqr(xd), xd);
+    if (field_add(xn3, field_mul(B7, xd3)) == FieldElement::zero())
+        return FieldElement::zero();
+    return detail::ecmult_const_xonly_trusted(xn, xd, q);
 }
 
 #endif // SECP256K1_FAST_52BIT

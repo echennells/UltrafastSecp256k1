@@ -17,30 +17,41 @@ inline std::uint64_t serialize_jacobian(const CTJacobianPoint& point,
                                         std::array<std::uint8_t, N>& out) noexcept {
     static_assert(N == 32 || N == 33 || N == 64);
 #if defined(SECP256K1_FAST_52BIT)
-    FieldElement x = point.x.to_fe();
-    FieldElement z = point.z.to_fe();
+    // Invert through the CT field API, then keep the remaining arithmetic and
+    // serialization in the native 5x52 representation. Converting all three
+    // coordinates to 4x64 cost more than the fixed-work normalization needs.
+    FE52 x = point.x;
+    FE52 z = point.z;
+    FieldElement z_fe = z.to_fe();
+    FieldElement zi_fe = field_inv(z_fe);
+    FE52 zi = FE52::from_fe(zi_fe);
+    FE52 zi2 = zi.square();
+    FE52 ax = x * zi2;
+    const std::uint64_t valid = is_zero_mask(point.infinity) & ~field_is_zero(z_fe);
 #else
     FieldElement x = point.x;
     FieldElement z = point.z;
-#endif
     FieldElement zi = field_inv(z);
     FieldElement zi2 = field_sqr(zi);
     FieldElement ax = field_mul(x, zi2);
+    const std::uint64_t valid = is_zero_mask(point.infinity) & ~field_is_zero(z);
+#endif
     std::array<std::uint8_t, 32> xb{};
     ax.to_bytes_into(xb.data());
-    const std::uint64_t valid = is_zero_mask(point.infinity) & ~field_is_zero(z);
     const auto keep = static_cast<std::uint8_t>(valid);
 
     if constexpr (N == 32) {
         for (std::size_t i = 0; i < 32; ++i) out[i] = xb[i] & keep;
     } else {
 #if defined(SECP256K1_FAST_52BIT)
-        FieldElement y = point.y.to_fe();
+        FE52 y = point.y;
+        FE52 zi3 = zi2 * zi;
+        FE52 ay = y * zi3;
 #else
         FieldElement y = point.y;
-#endif
         FieldElement zi3 = field_mul(zi2, zi);
         FieldElement ay = field_mul(y, zi3);
+#endif
         std::array<std::uint8_t, 32> yb{};
         ay.to_bytes_into(yb.data());
         if constexpr (N == 33) {
@@ -63,6 +74,10 @@ inline std::uint64_t serialize_jacobian(const CTJacobianPoint& point,
     secp256k1::detail::secure_erase(&zi, sizeof(zi));
     secp256k1::detail::secure_erase(&z, sizeof(z));
     secp256k1::detail::secure_erase(&x, sizeof(x));
+#if defined(SECP256K1_FAST_52BIT)
+    secp256k1::detail::secure_erase(&zi_fe, sizeof(zi_fe));
+    secp256k1::detail::secure_erase(&z_fe, sizeof(z_fe));
+#endif
     return valid;
 }
 

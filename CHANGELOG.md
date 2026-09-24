@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.0] - 2026-09-23
+## [4.6.0] - 2026-09-24
 
 > **A security and correctness release, with a namespace break in the legacy C
 > API.** The `ufsecp_*` C ABI is untouched --
@@ -156,6 +156,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Standard Test Vectors goes 10/10 -> 11/11.
 
 ### Fixed
+
+- **ECDH serializes secret-derived Jacobian results directly.** The three C++
+  ECDH variants and the libsecp256k1 shim use the internal Jacobian result and
+  fixed-size point serializers instead of general `Point` affine conversion.
+  Existing output bytes and shim callback return values are preserved.
+  Scope guards erase shared-point and serialization scratch; the shim also
+  erases parsed secret-key material and default-hash scratch on exit. Custom
+  callbacks remain outside the library's constant-time claim.
+
+- **Public x-only multiplication enforces its invalid-input contract.**
+  `ct::ecmult_const_xonly` rejects invalid curve lifts and zero denominators
+  with a zero result. BIP-324 and ElligatorSwift XDH use a private trusted
+  entry point only for decoder-produced coordinates that already guarantee
+  a valid curve lift and nonzero denominator. The validation is on public
+  coordinates; no new public API or cross-platform constant-time guarantee
+  is introduced.
 
 - **Installed CUDA packages carry the selected runtime dependency.** CUDA
   device symbols are resolved in the static archive and the generated CMake

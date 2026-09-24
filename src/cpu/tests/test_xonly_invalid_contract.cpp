@@ -1,4 +1,6 @@
 #include "secp256k1/ct/point.hpp"
+#include "secp256k1/bip324.hpp"
+#include "secp256k1/ellswift.hpp"
 
 #include <array>
 #include <cstdint>
@@ -84,7 +86,55 @@ int main() {
     // x=5 has no secp256k1 lift. A zero denominator is never a valid fraction.
     ok = expect_x(FieldElement::from_uint64(5), one, seven, zero_bytes,
                   "invalid off-curve x=5") && ok;
+    ok = expect_x(FieldElement::from_uint64(15), three, seven, zero_bytes,
+                  "invalid scaled off-curve x=5") && ok;
     ok = expect_x(generator.x(), zero, seven, zero_bytes,
                   "invalid zero denominator") && ok;
+
+#if defined(SECP256K1_BIP324)
+    // Both XDH routes may use the trusted x-only entry only because their
+    // decoders turn every 64-byte encoding into a valid secp256k1 x.
+    bool decoder_ok = true;
+    for (std::uint32_t i = 0; i < 32; ++i) {
+        std::array<std::uint8_t, 64> ell_a{};
+        std::array<std::uint8_t, 64> ell_b{};
+        for (std::size_t j = 0; j < ell_a.size(); ++j) {
+            ell_a[j] = static_cast<std::uint8_t>(i * 13 + j * 37);
+            ell_b[j] = static_cast<std::uint8_t>(i * 29 + j * 19 + 1);
+        }
+        const auto sk = Scalar::from_uint64(i + 1);
+        for (int initiating = 0; initiating <= 1; ++initiating) {
+            const auto* peer_ell = initiating ? ell_b.data() : ell_a.data();
+            const auto [xn, xd] = secp256k1::ellswift_decode_frac(peer_ell);
+            if (xd == zero) {
+                std::printf("FAIL: ElligatorSwift fraction %u role %d has zero denominator\n",
+                            i, initiating);
+                decoder_ok = false;
+                continue;
+            }
+            const auto x = xn * xd.inverse();
+            const auto y2 = x.square() * x + FieldElement::from_uint64(7);
+            const auto y = y2.sqrt();
+            if (x != secp256k1::ellswift_decode(peer_ell) ||
+                y.square() != y2) {
+                std::printf("FAIL: ElligatorSwift fraction %u role %d has no matching curve lift\n",
+                            i, initiating);
+                decoder_ok = false;
+                continue;
+            }
+            const auto direct_xdh = secp256k1::ellswift_xdh(
+                ell_a.data(), ell_b.data(), sk, initiating != 0);
+            const auto fraction_xdh = secp256k1::bip324::xdh(
+                ell_a.data(), ell_b.data(), sk, initiating != 0);
+            if (direct_xdh != fraction_xdh) {
+                std::printf("FAIL: decoder-backed XDH routes differ at %u role %d\n",
+                            i, initiating);
+                decoder_ok = false;
+            }
+        }
+    }
+    if (decoder_ok) std::puts("PASS: decoder preconditions and XDH route equality");
+    ok = decoder_ok && ok;
+#endif
     return ok ? 0 : 1;
 }
