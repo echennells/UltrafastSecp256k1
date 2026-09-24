@@ -251,11 +251,14 @@ static const FileAudit AUDITS[] = {
         /* required  */ { "ct::generator_mul", "ct::scalar_inverse", "secure_erase" },
         /* prohibited */ { "fast::generator_mul", "fast::scalar_mul", "fast::point_mul" }
     },
-    // ecdh.cpp: ECDH uses CT for secret scalar multiply
+    // ecdh.cpp: ECDH uses the CT Jacobian scalar-multiply primitive.  Keep
+    // this check on the actual secret-bearing primitive rather than the
+    // public Point-returning wrapper: ECDH deliberately stays Jacobian until
+    // fixed-size serialization so it does not materialize an affine Point.
     {
         "ecdh.cpp",
         "src/cpu/src/ecdh.cpp",
-        /* required  */ { "ct::scalar_mul" },
+        /* required  */ { "ct::detail::scalar_mul_jacobian" },
         /* prohibited */ { "fast::scalar_mul" }
     },
     // bip32.cpp: Child key derivation must use CT for scalar addition

@@ -1,6 +1,30 @@
 # Secret Lifecycle Review
 
-**Last updated**: 2026-09-23 | **Version**: 4.6.0
+**Last updated**: 2026-09-24 | **Version**: 4.6.0
+
+### 2026-09-24 - raw Jacobian ECDH and erase-on-exit scratch
+
+The C++ ECDH variants now hold the shared result in a local
+`CTJacobianPoint`, guarded by `secure_erase` on every exit after creation.
+Compressed-point and x-coordinate hash-input buffers also have exit guards.
+The fixed-size serializers erase their local coordinates, inverse powers and
+byte arrays before returning; they do not convert through a public `Point`.
+Only after serialization is the result-valid mask declassified for rejection.
+Returned digest/raw-secret bytes are intentional outputs, not erased scratch.
+
+The shim guards its copied secret-key bytes, parsed scalar, raw Jacobian and
+`xy64` callback-input buffer, including parse failure and callback return.
+Its default callback also guards the compressed hash input and digest scratch.
+A custom callback owns any copies it retains and is outside the library's CT
+claim; caller-owned input/output storage remains the caller's responsibility.
+This describes explicit named-storage erasure, not a guarantee about every
+compiler-generated register or spill copy.
+
+`ct_point_io`, the ECDH fixtures in `selftest`, `secp256k1_shim_test`, and
+`regression_ecdh_xy64_erase` check output preservation and rejection behavior;
+they do not by themselves prove post-return memory erasure. The serializer and
+ECDH taint-probe targets are documented in [`CT_VERIFICATION.md`](CT_VERIFICATION.md).
+This documentation update claims no fresh full Valgrind/dudect campaign.
 
 ### 2026-09-23 - libbitcoin direct BIP-352 column scan (#431)
 
@@ -1110,9 +1134,12 @@ Erases: `shared_x` (ECDH raw), `kdf` (64B enc+mac keys), `eph_privkey`, `eph_byt
 
 Erases: entropy buffers after mnemonic generation and seed derivation.
 
-### ECDH (`src/cpu/src/ecdh.cpp`) -- 2 calls
+### ECDH (`src/cpu/src/ecdh.cpp` and internal point-IO helper)
 
-Erases: compressed point representation, `x_bytes` after shared secret derivation.
+Erases: guarded raw Jacobian result and compressed/x-coordinate hash inputs;
+the serializer separately erases coordinate, inverse-power and byte scratch.
+The returned digest or raw secret remains caller-owned. See the 2026-09-24
+entry for shim callback and erasure limits.
 
 ---
 
@@ -1129,7 +1156,7 @@ Erases: compressed point representation, `x_bytes` after shared secret derivatio
 | FROST nonces (d, ei) | Function-local | `frost.cpp` | Cleared on return |
 | FROST signing share | Key pkg member | C ABI wrapper | Cleared on return |
 | FROST signer-set scratch | Derived/public transcript data | `frost.cpp` | Reduced in 2026-04-14 refactor |
-| ECDH shared secret | Function-local | `ecdh.cpp` + C ABI | CT mul |
+| ECDH shared secret | Function-local scratch; output caller-owned | `ecdh.cpp` guards + internal point-IO; shim guards | Raw CT Jacobian mul + fixed-size serialization; profile limits above |
 | ECIES derived keys | Function-local | `ecies.cpp` | AES-CBC key schedule |
 | BIP-32 chain code | Derived state | C ABI wrapper | HMAC-SHA512 |
 | BIP-39 entropy | Function-local | `bip39.cpp` | Zeroized after use |

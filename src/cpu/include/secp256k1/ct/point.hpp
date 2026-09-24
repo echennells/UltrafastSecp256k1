@@ -205,6 +205,8 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept;
 //
 // Pass xd = FieldElement::one() when xn is already the full x-coordinate.
 // Returns FieldElement::zero() on degenerate inputs (q==0, invalid point).
+// xn/xd are public peer coordinates: the native invalid-lift check may take
+// variable time in them. Multiplication keeps the secret scalar q on its CT path.
 FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
                                  const Scalar& q) noexcept;
 

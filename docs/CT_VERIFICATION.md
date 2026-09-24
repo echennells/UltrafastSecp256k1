@@ -13,6 +13,42 @@
 > required-tool FAIL or a single PASS + SKIP is **inconclusive, never a pass**.
 > Run: `python3 ci/check_ct_evidence_status.py --json`.
 
+### 2026-09-24 — ECDH point-IO and public x-only validation boundaries
+
+The three C++ ECDH variants and the libsecp256k1 ECDH shim now consume
+`ct::detail::scalar_mul_jacobian` directly. The secret-derived shared point
+stays in `CTJacobianPoint`; `point_to_x32`, `point_to_compressed33`, and
+`point_to_xy64` serialize it without the public `Point` conversion and its
+declassification. The fixed-size serializers compute and mask their output
+before the caller declassifies the result-valid mask and branches on it.
+Public peer validation may vary with the public point; the private scalar
+remains on the existing CT multiplication path. Custom shim hash callbacks
+consume secret bytes and are outside the library's CT claim.
+
+Public `ct::ecmult_const_xonly` validates public `xn`/`xd`, including zero
+denominator and invalid-lift rejection. Its native Jacobi check is explicitly
+variable-time on those public coordinates, never on the secret scalar. The
+private `ct::detail::ecmult_const_xonly_trusted` route is used only by BIP-324
+and ElligatorSwift decoders that establish a valid lift and nonzero denominator;
+it adds no public API or permission to skip validation for arbitrary callers.
+
+Focused byte/rejection coverage is in `ct_point_io`, `selftest`
+(`tests/test_ecdh_recovery_taproot.cpp`), `secp256k1_shim_test`,
+`regression_ecdh_xy64_erase`, and `xonly_invalid_contract`. It includes
+non-affine peers, fixed reference bytes, invalid inputs, and custom callback
+bytes/return values. The `test_ct_point_io_standalone` target provides
+`SECP256K1_CT_SERIALIZER_PROBE` and its old-conversion negative control.
+`test_regression_ecdh_xy64_erase_standalone` provides
+`SECP256K1_ECDH_CPP_TAINT_PROBE` and `SECP256K1_ECDH_SHIM_TAINT_PROBE`;
+re-tainting the new internal boundary also requires the library build define
+`SECP256K1_CT_ECDH_TAINT_PROBE` and runtime `SECP256K1_ECDH_NEW_PATH_PROBE`.
+All taint builds need active `SECP256K1_CT_VALGRIND` markers.
+
+These are scoped regression tests and probe entry points, not a newly completed
+Valgrind/dudect or all-platform campaign. The generic portable field-kernel
+limitations and earlier ladder-taint findings are not closed by this update.
+No performance guarantee or end-to-end BIP-352 CT claim is added.
+
 ### 2026-09-23 — libbitcoin direct BIP-352 column scan boundary (#431)
 
 `ufsecp::lbtc::bip352_scan_columns` accepts the receiver's secret
@@ -611,9 +647,9 @@ operation recorded by the graph.
 | `ufsecp_bip39_to_seed` | `PBKDF2-SHA512(mnemonic, passphrase)` |
 | `ufsecp_btc_message_sign` | `btc_message_sign(msg, sk)` |
 | `ufsecp_coin_hd_derive` | `coin_hd_derive(coin, xprv, path)` |
-| `ufsecp_ecdh` | `ct::scalar_mul(pubkey, sk)` |
-| `ufsecp_ecdh_raw` | `ct::scalar_mul + raw output` |
-| `ufsecp_ecdh_xonly` | `ct::scalar_mul + x-only output` |
+| `ufsecp_ecdh` | `ct::detail::scalar_mul_jacobian + point_to_compressed33 + SHA256` |
+| `ufsecp_ecdh_raw` | `ct::detail::scalar_mul_jacobian + point_to_x32` |
+| `ufsecp_ecdh_xonly` | `ct::detail::scalar_mul_jacobian + point_to_x32 + SHA256` |
 | `ufsecp_ecdsa_adaptor_adapt` | `ecdsa_adaptor_adapt` |
 | `ufsecp_ecdsa_adaptor_sign` | `ct::ecdsa_adaptor_sign(sk)` |
 | `ufsecp_ecdsa_sign` | `ct::ecdsa_sign(msg, sk)` |
@@ -782,7 +818,7 @@ The Metal CT layer uses Metal Shading Language (MSL) with:
 |-----------|---------------|-----------------|
 | `ct::scalar_mul(P, k)` | GLV + signed-digit, fixed iteration count | Strong |
 | `ct::generator_mul(k)` | Hamburg comb, precomputed table | Strong |
-| `ct::ecmult_const_xonly(xn, xd, q)` | Delegates to `scalar_mul_jac` (same CT path); q is secret, P_eff is public | Strong |
+| `ct::ecmult_const_xonly(xn, xd, q)` | Variable-time validation of public xn/xd, then existing secret-q CT ladder | Profile-scoped; see 2026-09-24 addendum and retained taint limitations |
 | `ct::field_mul` | Same arithmetic as FAST, no early-exit | Strong |
 | `ct::field_inv` | Fixed iteration SafeGCD or exponentiation chain | Strong |
 | `ct::point_add_complete` | Complete addition formula (handles all cases) | Strong |
@@ -1049,7 +1085,7 @@ FROST and MuSig2 remain broader experimental protocol surfaces, and the repo tra
 - [ ] **field_select**: Confirm compiler emits no branch (inspect assembly)
 - [ ] **ct::scalar_mul**: Fixed iteration count (26 groups x 5 doublings + 52 adds)
 - [ ] **ct::scalar_mul**: Table lookup scans ALL entries (no early-exit)
-- [ ] **ct::ecmult_const_xonly**: delegates to `scalar_mul_jac`; `q` is secret, `xn`/`xd` are public; one combined field inversion at end is CT (data-independent)
+- [ ] **ct::ecmult_const_xonly**: validate public `xn`/`xd` before the existing secret-`q` ladder; audit the combined field inverse and generated ladder separately. Decoder-only trusted calls require a valid lift and nonzero denominator; see the 2026-09-24 scope limits.
 - [ ] **ct::generator_mul**: Fixed COMB_SPACING × COMB_BLOCKS iterations, no conditional skip
 - [ ] **ct::generator_mul table add**: uses incomplete mixed-add (add_affine_fast_ct) — safe because all table entries are fixed G multiples (degenerate probability ~2^-128)
 - [ ] **ct::point_add_complete**: Handles P+P, P+O, O+P, P+(-P) without branching

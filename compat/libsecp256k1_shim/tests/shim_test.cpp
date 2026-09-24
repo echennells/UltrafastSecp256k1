@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cassert>
+#include <array>
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -466,6 +467,54 @@ static void test_ecdh(secp256k1_context* ctx) {
           "ecdh bob");
 
     CHECK(memcmp(shared_alice, shared_bob, 32) == 0, "ECDH shared secret matches");
+
+    // The peer is 2*G and the secret is 19, so the callback sees 38*G.
+    unsigned char two[32] = {};
+    unsigned char nineteen[32] = {};
+    two[31] = 2;
+    nineteen[31] = 19;
+    secp256k1_pubkey doubled{};
+    CHECK(secp256k1_ec_pubkey_create(ctx, &doubled, two) == 1,
+          "ECDH doubled peer created");
+    const std::array<unsigned char, 32> expected_default = {
+        0xbd,0x5b,0x49,0x2c,0x16,0xbb,0x81,0xac,0xab,0x6e,0xf3,0x7d,0xfc,0x39,0x8b,0x71,
+        0xf5,0x72,0x73,0x18,0x5f,0x97,0xf5,0xa6,0x75,0xc9,0x00,0xdc,0x09,0x8b,0xf7,0x58,
+    };
+    const std::array<unsigned char, 64> expected_xy = {
+        0xb6,0x99,0xa3,0x0e,0x6e,0x18,0x4c,0xdf,0xa8,0x8a,0xc1,0x6c,0x7d,0x80,0xbf,0xfd,
+        0x38,0xe2,0xe1,0xfc,0x70,0x58,0x21,0xea,0x69,0xcd,0x5f,0xdf,0x16,0x91,0xff,0xf7,
+        0xd5,0x05,0x70,0x0c,0x51,0xd8,0x60,0xce,0x5a,0x09,0x6e,0xe6,0x37,0xeb,0xed,0x3b,
+        0xd9,0xd7,0x26,0x81,0x26,0xc7,0x6a,0x16,0xb7,0x45,0xbc,0x31,0x8a,0x51,0xab,0x04,
+    };
+    std::array<unsigned char, 32> fixed_output{};
+    CHECK(secp256k1_ecdh(ctx, fixed_output.data(), &doubled, nineteen, nullptr, nullptr) == 1,
+          "ECDH fixed default hash succeeds");
+    CHECK(fixed_output == expected_default, "ECDH default hash matches pre-change bytes");
+
+    struct CapturedXY { std::array<unsigned char, 64> bytes{}; } captured;
+    auto capture = [](unsigned char* output, const unsigned char* x32,
+                      const unsigned char* y32, void* opaque) -> int {
+        auto& dst = *static_cast<CapturedXY*>(opaque);
+        std::memcpy(dst.bytes.data(), x32, 32);
+        std::memcpy(dst.bytes.data() + 32, y32, 32);
+        std::memcpy(output, x32, 32);
+        return 7;
+    };
+    CHECK(secp256k1_ecdh(ctx, fixed_output.data(), &doubled, nineteen,
+                         capture, &captured) == 7,
+          "ECDH preserves custom callback return 7");
+    CHECK(captured.bytes == expected_xy, "ECDH callback receives exact x32 and y32");
+    CHECK(std::memcmp(fixed_output.data(), expected_xy.data(), 32) == 0,
+          "ECDH callback output is preserved");
+
+    unsigned char zero[32] = {};
+    CHECK(secp256k1_ecdh(ctx, fixed_output.data(), &doubled, zero, nullptr, nullptr) == 0,
+          "ECDH rejects zero scalar");
+    secp256k1_pubkey off_curve{};
+    off_curve.data[31] = 1;
+    off_curve.data[63] = 1;
+    CHECK(secp256k1_ecdh(ctx, fixed_output.data(), &off_curve, nineteen, nullptr, nullptr) == 0,
+          "ECDH rejects off-curve peer");
 }
 
 static void test_tagged_hash(secp256k1_context* ctx) {

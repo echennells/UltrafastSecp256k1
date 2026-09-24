@@ -34,12 +34,14 @@
 
 #include "secp256k1/config.hpp"  // SECP256K1_FAST_52BIT, SECP256K1_INLINE
 #include "secp256k1/ct/point.hpp"
+#include "secp256k1/detail/ct_point_internal.hpp"
 #include "secp256k1/detail/secure_erase.hpp"
 #include "secp256k1/ct/field.hpp"
 #include "secp256k1/ct/scalar.hpp"
 #include "secp256k1/ct/ops.hpp"
 #include "secp256k1/field_52.hpp"
 #include "secp256k1/glv.hpp"
+#include "ct_xonly_internal.hpp"
 
 #include <mutex>
 
@@ -1111,6 +1113,14 @@ void unified_add_core(CTJacobianPoint* out,
     }
 }
 
+// This complete x-only addition runs once per multiplication but is large when
+// inlined. Keep it out of the hot Hamburg loop's instruction footprint.
+SECP256K1_NOINLINE static void unified_add_final_xonly(
+    CTJacobianPoint* out, const CTJacobianPoint& a,
+    const CTAffinePoint& b) noexcept {
+    unified_add_core<false, false>(out, a, b);
+}
+
 // Public wrapper (out-of-line for external callers, preserves all safety checks).
 void point_add_mixed_unified_into(CTJacobianPoint* out,
                                    const CTJacobianPoint& a,
@@ -1344,8 +1354,10 @@ CTGLVDecomposition ct_glv_decompose(const Scalar& k) noexcept {
 // Used by ecmult_const_xonly() to combine Z^-1 with the g-correction into a
 // single field inversion (libsecp secp256k1_ecmult_const_xonly technique).
 //
-// Returns CTJacobianPoint with infinity flag set if k==0 or p==infinity.
-// Output: {R.x, R.y, R.z} in Jacobian form; affine x = R.x * R.z^{-2}.
+// Input p==infinity sets the explicit infinity flag. For k==0, the complete
+// addition formula may instead encode infinity with Z==0 and an unset flag;
+// callers must not infer non-infinity from the flag alone.
+// For Z!=0, affine x = R.x * R.z^{-2}.
 static CTJacobianPoint scalar_mul_jac(const Point& p, const Scalar& k) noexcept;
 
 // --- CT GLV make_v helper ----------------------------------------------------
@@ -1376,6 +1388,8 @@ SECP256K1_INLINE static Scalar ct_glv_make_v(const Scalar& k_abs, std::uint64_t 
 // BYPASSES the SECP_ASSERT_ON_CURVE check — safe for effective-affine points
 // on secp256k1-isomorphic curves (a=0 → same group law, different b).
 // Used by ecmult_const_xonly where P_eff = (g·xn, g²) is NOT on secp256k1.
+// A zero scalar may leave Z==0 with infinity==0; the x-only caller's zero
+// denominator maps that case to its documented zero result.
 static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
                                                const Scalar& k) noexcept {
     constexpr unsigned GROUP_SIZE = 5;
@@ -1455,9 +1469,10 @@ static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
     SECP256K1_DECLASSIFY(pre_a, sizeof(pre_a));
     SECP256K1_DECLASSIFY(pre_a_lam, sizeof(pre_a_lam));
 
-    // HAMBURG=true: K_CONST guarantees m_val (S1+S2) ≠ 0 for all intermediate
-    // additions in this isomorphic-curve path (~18 ns × 52 calls ≈ 936 ns saved).
-    // Dedicated to ellswift_xdh — scalar_mul_jac (CT signing) keeps HAMBURG=false.
+    // HAMBURG=true is valid through group 1 and for the first addition in
+    // group 0. The second addition in group 0 can have S1+S2=0, so it must
+    // use the complete formula. The loop index is public and fixed; no
+    // scalar-dependent branch is introduced.
     CTJacobianPoint R;
     CTAffinePoint t;
 
@@ -1481,8 +1496,12 @@ static CTJacobianPoint scalar_mul_jac_fe52_z1(const FE52& px, const FE52& py,
         table_lookup_core<false>(&t, pre_a, TABLE_SIZE, bits1, GROUP_SIZE);
         unified_add_core<false, true>(&R, R, t);  // HAMBURG: K_CONST → no degenerate
         table_lookup_core<false>(&t, pre_a_lam, TABLE_SIZE, bits2, GROUP_SIZE);
-        unified_add_core<false, true>(&R, R, t);  // HAMBURG: K_CONST → no degenerate
+        if (group != 0) {
+            unified_add_core<false, true>(&R, R, t);  // non-final groups only
+        }
     }
+    // The final group's second lookup remains in t after the fixed loop.
+    unified_add_final_xonly(&R, R, t);
 
     R.z.mul_assign(global_z);
     return R;
@@ -1599,9 +1618,14 @@ static CTJacobianPoint scalar_mul_jac(const Point& p, const Scalar& k) noexcept 
     return R;
 }
 
+namespace detail {
+CTJacobianPoint scalar_mul_jacobian(const Point& p, const Scalar& k) noexcept {
+    return scalar_mul_jac(p, k);
+}
+} // namespace detail
+
 Point scalar_mul(const Point& p, const Scalar& k) noexcept {
-    // Delegate to the Jacobian-output variant, then normalize.
-    CTJacobianPoint R = scalar_mul_jac(p, k);
+    CTJacobianPoint R = detail::scalar_mul_jacobian(p, k);
     Point result = R.to_point();
     SECP256K1_DECLASSIFY(&result, sizeof(result));
     return result;
@@ -1619,7 +1643,8 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept {
 //   4. x = R.x / (R.z² * g * xd)              (one field inversion)
 //
 // Why this works (secp256k1 has a=0):
-//   - P_eff lies on Y² = X³ + g⁶·7 (isomorphic to secp256k1 via the u=g twist)
+//   - P_eff lies on Y² = X³ + 7·(g·xd)³, isomorphic to secp256k1 only when
+//     g·xd is a nonzero square in the field.
 //   - Since a=0, all doubling/addition formulas are twist-invariant
 //   - The Jacobian scalar multiply computes q*P_eff on this isomorphic curve
 //   - The back-mapping: x_secp = x_eff / (g * xd) after Jacobian normalization
@@ -1628,19 +1653,18 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept {
 // the peer's ELL64 encoding), so the table build is variable-time OK.
 //
 // xd = FE52::one() when xn is already the full x-coordinate (not a fraction).
-FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& xd_fe,
-                                 const Scalar& q) noexcept {
-    FE52 xn = FE52::from_fe(xn_fe);
-    FE52 xd = FE52::from_fe(xd_fe);
-
-    // 1. g = xn³ + 7*xd³
+static inline FE52 xonly_curve_g(const FE52& xn, const FE52& xd) noexcept {
     FE52 const xn2 = xn.square();
     FE52 const xn3 = xn2 * xn;
     FE52 const xd2 = xd.square();
     FE52 xd3       = xd2 * xd;
     xd3.mul_int_assign(7);          // 7 * xd³
-    FE52 const g   = xn3 + xd3;    // g = xn³ + 7·xd³
+    return xn3 + xd3;               // g = xn³ + 7·xd³
+}
 
+static inline FieldElement ecmult_const_xonly_core(const FE52& xn, const FE52& xd,
+                                                    const FE52& g,
+                                                    const Scalar& q) noexcept {
     // 2. P_eff = (g·xn, g²) — affine point on the isomorphic curve
     FE52 const px52 = g * xn;
     FE52 const py52 = g.square();
@@ -1650,8 +1674,6 @@ FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& x
     //    scalar_mul_jac_fe52_z1 uses jac52_double_z1_to directly, avoiding
     //    SECP_ASSERT_ON_CURVE which would fire for non-secp256k1 points.
     CTJacobianPoint R = scalar_mul_jac_fe52_z1(px52, py52, q);
-
-    if (R.infinity != 0) return FieldElement::zero();
 
     // 4. x = R.x / (R.z² * g * xd) — single combined inversion
     //    Avoids two separate inversions (vs. normalizing R then dividing by g*xd).
@@ -1680,9 +1702,32 @@ FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& x
     // saving lands end to end: ElligatorSwift XDH -8.23%, session handshake
     // -4.35%. See issue #398 and KB FE52-INVERSE-CT-DOMINATED.
     FE52 const denom_inv = FE52::from_fe(ct::field_inv(denom.to_fe()));
-    FE52 const x52   = R.x * denom_inv;
+    FE52 const x52 = R.x * denom_inv;
 
     return x52.to_fe();
+}
+
+namespace detail {
+FieldElement ecmult_const_xonly_trusted(const FieldElement& xn_fe,
+                                        const FieldElement& xd_fe,
+                                        const Scalar& q) noexcept {
+    const FE52 xn = FE52::from_fe(xn_fe);
+    const FE52 xd = FE52::from_fe(xd_fe);
+    return ecmult_const_xonly_core(xn, xd, xonly_curve_g(xn, xd), q);
+}
+} // namespace detail
+
+FieldElement ecmult_const_xonly(const FieldElement& xn_fe, const FieldElement& xd_fe,
+                                const Scalar& q) noexcept {
+    const FE52 xn = FE52::from_fe(xn_fe);
+    const FE52 xd = FE52::from_fe(xd_fe);
+    if (xd.is_zero()) return FieldElement::zero();
+
+    const FE52 g = xonly_curve_g(xn, xd);
+    // g·xd = xd⁴·((xn/xd)³ + 7). Jacobi tests the public peer x only; q must
+    // never flow into this variable-time check.
+    if ((g * xd).jacobi_var() != 1) return FieldElement::zero();
+    return ecmult_const_xonly_core(xn, xd, g, q);
 }
 
 // --- CT Prebuilt Tables API --------------------------------------------------
@@ -3010,7 +3055,7 @@ CTGLVDecomposition ct_glv_decompose(const Scalar& k) noexcept {
 // Hamburg signed-digit comb + GLV. GROUP_SIZE=5, TABLE_SIZE=16, GROUPS=26.
 // Cost: 125 dbl + 52 unified_add + 52 signed_lookups(16).
 
-Point scalar_mul(const Point& p, const Scalar& k) noexcept {
+static CTJacobianPoint scalar_mul_jac_4x64(const Point& p, const Scalar& k) noexcept {
     constexpr unsigned GROUP_SIZE = 5;
     constexpr unsigned TABLE_SIZE = 1u << (GROUP_SIZE - 1);  // 16
     constexpr unsigned GROUPS = 26;
@@ -3146,6 +3191,17 @@ Point scalar_mul(const Point& p, const Scalar& k) noexcept {
 
     R.z = field_mul(R.z, global_z);
 
+    return R;
+}
+
+namespace detail {
+CTJacobianPoint scalar_mul_jacobian(const Point& p, const Scalar& k) noexcept {
+    return scalar_mul_jac_4x64(p, k);
+}
+} // namespace detail
+
+Point scalar_mul(const Point& p, const Scalar& k) noexcept {
+    CTJacobianPoint R = detail::scalar_mul_jacobian(p, k);
     Point result = R.to_point();
     SECP256K1_DECLASSIFY(&result, sizeof(result));
     return result;
@@ -3388,8 +3444,9 @@ Point generator_mul(const Scalar& k) noexcept {
 
 // --- ecmult_const_xonly fallback (4x64 path) ---------------------------------
 // Uses sqrt since we lack the FE52 Jacobian-output optimisation.
-FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
-                                 const Scalar& q) noexcept {
+namespace detail {
+FieldElement ecmult_const_xonly_trusted(const FieldElement& xn, const FieldElement& xd,
+                                        const Scalar& q) noexcept {
     // Compute x = xn / xd  (for BIP-324 ECDH, xd == one so this is xn directly)
     FieldElement x;
     if (xd == FieldElement::one()) {
@@ -3409,6 +3466,17 @@ FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
     Point res = scalar_mul(P, q);
     if (res.is_infinity()) return FieldElement::zero();
     return res.x();
+}
+} // namespace detail
+
+FieldElement ecmult_const_xonly(const FieldElement& xn, const FieldElement& xd,
+                                const Scalar& q) noexcept {
+    if (xd == FieldElement::zero()) return FieldElement::zero();
+    const FieldElement xn3 = field_mul(field_sqr(xn), xn);
+    const FieldElement xd3 = field_mul(field_sqr(xd), xd);
+    if (field_add(xn3, field_mul(B7, xd3)) == FieldElement::zero())
+        return FieldElement::zero();
+    return detail::ecmult_const_xonly_trusted(xn, xd, q);
 }
 
 #endif // SECP256K1_FAST_52BIT

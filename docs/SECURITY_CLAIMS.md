@@ -2,6 +2,34 @@
 
 **UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-24 - ECDH serialization and x-only input contracts
+
+The C++ ECDH variants and shim keep the secret-derived shared point in the
+raw CT Jacobian representation and use fixed-size point serializers, not
+`Point` affine conversion. Public peer validation may branch on public
+coordinates; the secret scalar retains the existing CT multiplication route.
+The result-valid mask is declassified only after serialization and output
+masking. Valid-input ECDH bytes, rejection results, and shim callback inputs
+and return values retain their contracts; custom hash callbacks are outside
+the library's constant-time guarantee.
+
+`ct::ecmult_const_xonly` rejects zero denominators and invalid curve lifts.
+Native validation is variable-time on public `xn`/`xd`, not on secret `q`.
+BIP-324 and ElligatorSwift alone use the private trusted entry with
+decoder-produced valid coordinates and nonzero denominator; no unchecked
+public API is introduced. Scope guards erase the named shared-point/buffer
+storage and shim parsed-key/default-hash scratch on every exit after creation;
+the serializer erases its own coordinate and byte scratch before return.
+Returned secrets and caller-owned inputs remain the caller's responsibility.
+
+The focused contract tests are `ct_point_io`, `selftest`'s ECDH fixtures,
+`secp256k1_shim_test`, `regression_ecdh_xy64_erase`, and
+`xonly_invalid_contract`. The serializer and ECDH taint-probe targets and
+required marker defines are listed in [`CT_VERIFICATION.md`](CT_VERIFICATION.md).
+Their presence and byte checks are not a new full Valgrind/dudect verdict,
+portable-backend certification, or speed claim. Existing portable-field,
+ladder-taint, and BIP-352 adapter limitations remain separate obligations.
+
 ### 2026-09-23 - libbitcoin direct BIP-352 column scan (#431)
 
 `ufsecp::lbtc::bip352_scan_columns` is a secret-bearing C++ adapter:

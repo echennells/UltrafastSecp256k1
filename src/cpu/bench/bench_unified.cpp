@@ -1905,6 +1905,13 @@ int main(int argc, char** argv) {
         print_row("ecdh_compute (SHA256 shared secret)", u_ecdh);
 
         idx = 0;
+        double u_ecdh_xonly = bench_ns([&]() {
+            auto s = ecdh_compute_xonly(privkeys[idx % POOL], pubkeys[(idx + 1) % POOL]);
+            bench::DoNotOptimize(s); ++idx;
+        }, N_VERIFY);
+        print_row("ecdh_compute_xonly (SHA256 x-coordinate)", u_ecdh_xonly);
+
+        idx = 0;
         u_ecdh_raw = bench_ns([&]() {
             auto s = ecdh_compute_raw(privkeys[idx % POOL], pubkeys[(idx + 1) % POOL]);
             bench::DoNotOptimize(s); ++idx;
