@@ -159,14 +159,14 @@ libfastsecp256k1.3.14.0.dylib       -> current version
 ### Stable ABI Surface
 
 All functions declared with `UFSECP_API` in `include/ufsecp/ufsecp.h` are part of
-the stable ABI. There are **164** such functions (the authoritative list is every
+the stable ABI. There are **165** such functions (the authoritative list is every
 `UFSECP_API`-marked declaration in the header; counts and example names below are
 verified against it by `ci/check_abi_count.py`). Functions carry the `ufsecp_`
 prefix in the header (e.g. `ufsecp_ctx_create`); the short names are used here.
 
 | Category | Count | Example functions |
 |----------|-------|-----------|
-| Context & lifecycle | 7 | `ctx_create`, `ctx_clone`, `ctx_destroy`, `ctx_size`, `context_randomize`, `last_error`, `last_error_msg` |
+| Context & lifecycle | 8 | `ctx_create`, `ctx_clone`, `ctx_destroy`, `ctx_size`, `context_randomize`, `last_error`, `last_error_msg`, `release_process_resources` |
 | Secret key | 4 | `seckey_verify`, `seckey_negate`, `seckey_tweak_add`, `seckey_tweak_mul` |
 | Public key | 9 | `pubkey_create`, `pubkey_create_uncompressed`, `pubkey_parse`, `pubkey_xonly`, `pubkey_add`, `pubkey_negate`, `pubkey_tweak_add`, `pubkey_tweak_mul`, `pubkey_combine` |
 | ECDSA (sign/verify/recover/batch/adaptor) | 15 | `ecdsa_sign`, `ecdsa_verify`, `ecdsa_sig_to_der`, `ecdsa_sig_from_der`, `ecdsa_sign_recoverable`, `ecdsa_recover`, `ecdsa_sign_batch`, `ecdsa_batch_verify`, `ecdsa_batch_verify_mt`, `ecdsa_verify_opaque_rows`, `ecdsa_verify_opaque_rows_mt`, `ecdsa_adaptor_sign`, `ecdsa_adaptor_adapt` |
@@ -245,18 +245,18 @@ build installs (`secp256k1-fast` on the standard root build).
 
 | Binding | Minimum ABI | Notes |
 |---------|-------------|-------|
-| Python (ctypes) | 4 | Targets ABI v4 (164 stable C functions) |
-| Rust (FFI) | 4 | Targets ABI v4 (164 stable C functions) |
-| Go (CGo) | 4 | Targets ABI v4 (164 stable C functions) |
-| C# (P/Invoke) | 4 | Targets ABI v4 (164 stable C functions) |
-| Java (JNI) | 4 | Targets ABI v4 (164 stable C functions) |
-| Swift | 4 | Targets ABI v4 (164 stable C functions) |
-| Dart (FFI) | 4 | Targets ABI v4 (164 stable C functions) |
-| React Native | 4 | Targets ABI v4 (164 stable C functions) |
-| Node.js (NAPI) | 4 | Targets ABI v4 (164 stable C functions) |
-| Node.js (WASM) | 4 | Targets ABI v4 (164 stable C functions) |
-| Ruby (FFI) | 4 | Targets ABI v4 (164 stable C functions) |
-| Kotlin (JNI) | 4 | Targets ABI v4 (164 stable C functions) |
+| Python (ctypes) | 4 | Targets ABI v4 (165 stable C functions) |
+| Rust (FFI) | 4 | Targets ABI v4 (165 stable C functions) |
+| Go (CGo) | 4 | Targets ABI v4 (165 stable C functions) |
+| C# (P/Invoke) | 4 | Targets ABI v4 (165 stable C functions) |
+| Java (JNI) | 4 | Targets ABI v4 (165 stable C functions) |
+| Swift | 4 | Targets ABI v4 (165 stable C functions) |
+| Dart (FFI) | 4 | Targets ABI v4 (165 stable C functions) |
+| React Native | 4 | Targets ABI v4 (165 stable C functions) |
+| Node.js (NAPI) | 4 | Targets ABI v4 (165 stable C functions) |
+| Node.js (WASM) | 4 | Targets ABI v4 (165 stable C functions) |
+| Ruby (FFI) | 4 | Targets ABI v4 (165 stable C functions) |
+| Kotlin (JNI) | 4 | Targets ABI v4 (165 stable C functions) |
 
 All bindings target `UFSECP_ABI_VERSION == 4` (the current MAJOR); every binding's
 `EXPECTED_ABI` constant is gated to 4 by `ci/check_abi_version_sync.py` (the fix for

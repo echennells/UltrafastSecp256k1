@@ -33,6 +33,10 @@
 #include <cstdint>
 #include <array>
 #include <atomic>
+#include <cstdlib>
+
+#include "secp256k1/ecdh.hpp"
+#include "secp256k1/ct/ops.hpp"
 
 static int g_pass = 0, g_fail = 0;
 #include "audit_check.hpp"
@@ -159,6 +163,35 @@ static bool shim_available = false;
 
 int test_regression_ecdh_xy64_erase_run() {
     g_pass = 0; g_fail = 0;
+#if __has_include("secp256k1_ecdh.h")
+    if (std::getenv("SECP256K1_ECDH_CPP_TAINT_PROBE") != nullptr) {
+        auto peer = secp256k1::fast::Point::generator().dbl();
+        auto key = secp256k1::fast::Scalar::from_uint64(19);
+        auto compressed = secp256k1::ecdh_compute(key, peer);
+        auto xhash = secp256k1::ecdh_compute_xonly(key, peer);
+        auto raw = secp256k1::ecdh_compute_raw(key, peer);
+        SECP256K1_DECLASSIFY(compressed.data(), compressed.size());
+        SECP256K1_DECLASSIFY(xhash.data(), xhash.size());
+        SECP256K1_DECLASSIFY(raw.data(), raw.size());
+        std::printf("ECDH C++ taint probe: %02x %02x %02x\n",
+                    compressed[0], xhash[0], raw[0]);
+        return compressed[0] == 0xbd && xhash[0] == 0xfb && raw[0] == 0xb6 ? 0 : 1;
+    }
+    if (std::getenv("SECP256K1_ECDH_SHIM_TAINT_PROBE") != nullptr) {
+        auto* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+        unsigned char two[32] = {}, nineteen[32] = {}, output[32] = {};
+        two[31] = 2;
+        nineteen[31] = 19;
+        secp256k1_pubkey peer{};
+        int const pubkey_ok = secp256k1_ec_pubkey_create(ctx, &peer, two);
+        int const rc = pubkey_ok == 1
+            ? secp256k1_ecdh(ctx, output, &peer, nineteen, nullptr, nullptr) : 0;
+        SECP256K1_DECLASSIFY(output, sizeof(output));
+        secp256k1_context_destroy(ctx);
+        std::printf("ECDH shim taint probe: rc=%d first=%02x\n", rc, output[0]);
+        return rc == 1 && output[0] == 0xbd ? 0 : 1;
+    }
+#endif
     std::printf("[regression_ecdh_xy64_erase] SEC-002: xy64 erase correctness verification\n");
 
     if (!shim_available) {

@@ -1,6 +1,33 @@
 # FFI Hostile-Caller Coverage
 
-**Last updated**: 2026-07-15 | **Version**: 4.6.0
+**Last updated**: 2026-09-22 | **Version**: 4.6.0
+
+### 2026-09-22 - `ufsecp_release_process_resources` hostile-caller contract (GitHub #430, paired with `include/ufsecp/ufsecp.h`)
+
+New C ABI entry point `void ufsecp_release_process_resources(void)`. It takes no
+arguments, so there is no pointer, length or key for a hostile caller to feed; the
+surface is call ordering:
+
+- **Called before the library was ever used**: no-op. PRR-1.
+- **Called twice in a row**, from the pristine or the used state: no-op the second
+  time, no double free (the pointer is swapped to null under the construction
+  mutex before the delete). PRR-1, PRR-4, PRR-7.
+- **Any library call afterwards**: rebuilds lazily and returns the same results as
+  before the release. PRR-5, PRR-6, PRR-7.
+- **Called while another thread is inside the library**: undefined, and documented
+  as such in the header. The worker threads are joined, so a caller doing this
+  from inside a batch-verify callback would deadlock on itself; a concurrent
+  verify could observe the generator table being freed. Not guarded, on purpose:
+  a guard would cost every verify call a lock to protect a teardown path.
+- **Called from `DllMain` or a static destructor**: may deadlock on the Windows
+  loader lock (it joins threads). Documented; this is the exact reason the pool
+  has no automatic destruction.
+- **Independence from contexts**: does not touch any `ufsecp_ctx`, and
+  `ufsecp_ctx_destroy` does not call it -- destroying one context must not free
+  state another is using.
+
+`docs/ABI_NEGATIVE_TEST_MANIFEST` requires only `success_smoke` for a
+zero-argument function; covered by PRR-7.
 
 ### 2026-07-15 - `ufsecp_gpu_bip352_scan_batch_multispend` hostile-caller contract (GitHub issue #335, paired with `include/ufsecp/ufsecp_gpu.h`)
 

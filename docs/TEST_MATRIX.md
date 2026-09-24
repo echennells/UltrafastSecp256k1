@@ -57,7 +57,7 @@ lags behind the generated validation surfaces, prefer the generated counts.
 | `test_frost_kat.cpp` | -- | FROST t-of-n threshold signing known-answer tests |
 | `test_wycheproof_ecdsa.cpp` | -- | Wycheproof ECDSA: Google Project Wycheproof test vectors |
 | `test_wycheproof_ecdh.cpp` | -- | Wycheproof ECDH: Google Project Wycheproof test vectors |
-| `unified_audit_runner.cpp` | 478 modules (202 non-exploit + 276 exploit PoCs) | Unified audit: all current modules in single binary (includes GPU null-guard paths) |
+| `unified_audit_runner.cpp` | 479 modules (203 non-exploit + 276 exploit PoCs) | Unified audit: all current modules in single binary (includes GPU null-guard paths) |
 
 ### CPU Unit Tests (`src/cpu/tests/`)
 
@@ -106,14 +106,14 @@ lags behind the generated validation surfaces, prefer the generated counts.
 |------|---------|-------|
 | `opencl/tests/test_opencl.cpp` | OpenCL | Kernel correctness |
 | `opencl/tests/opencl_extended_test.cpp` | OpenCL | Extended operations |
-| `opencl/src/opencl_audit_runner.cpp` | OpenCL | Unified GPU audit ( 478 modules, 8 sections) |
+| `opencl/src/opencl_audit_runner.cpp` | OpenCL | Unified GPU audit ( 479 modules, 8 sections) |
 | `metal/tests/test_metal_host.cpp` | Metal | Metal shader correctness |
-| `metal/src/metal_audit_runner.mm` | Metal | `secp256k1_metal_audit`: unified GPU audit ( 478 modules, 8 sections) |
+| `metal/src/metal_audit_runner.mm` | Metal | `secp256k1_metal_audit`: unified GPU audit ( 479 modules, 8 sections) |
 | `src/cuda/src/test_ct_smoke.cu` | CUDA | CT smoke tests incl. ZK knowledge + DLEQ prove/verify (9 tests) |
 | `src/cuda/src/gpu_ct_leakage_probe.cu` | CUDA | Fixed-vs-random device-cycle Welch t-test on CT generator and signing kernels with JSON evidence output |
 | `src/cuda/src/test_suite.cu` | CUDA | `cuda_selftest`: kernel correctness, field + scalar + point ops |
 | `src/cuda/src/test_windows_macro_compat.cu` | CUDA/MSVC | `cuda_windows_macro_compat`: compile regression for Windows SDK `small` macro collisions in the public CUDA header |
-| `src/cuda/src/gpu_audit_runner.cu` | CUDA | `gpu_audit`: unified GPU audit ( 478 modules, 8 sections) |
+| `src/cuda/src/gpu_audit_runner.cu` | CUDA | `gpu_audit`: unified GPU audit ( 479 modules, 8 sections) |
 
 | `metal/app/metal_test.mm` | Metal | `secp256k1_metal_test`: shader correctness, compute pipeline |
 | `metal/app/bench_metal.mm` | Metal | `secp256k1_metal_bench_full`: comprehensive Metal benchmark |
@@ -1178,6 +1178,17 @@ ctest --test-dir build-audit -R "exploit" --output-on-failure
   back to the current working directory, and leaves a caller-named file alone.
   Reported by evoskuil: a 255 MB `cache_w18.bin` was being left in whatever
   directory the process ran in (section memory_safety, advisory=false)
+- `regression_process_resource_release` — `audit/test_regression_process_resource_release.cpp`:
+  pins that `secp256k1::release_process_resources()` frees the fused dual-mul
+  generator tables and joins the batch worker pool, that it is idempotent from
+  both the pristine and the used state, and that the library rebuilds correctly
+  afterwards -- the rebuilt `a*G + b*P` must be byte-identical to the pre-release
+  answer AND match an independent two-scalar-mul computation, so a self-consistent
+  but corrupt rebuild still fails. PRR-7 covers the
+  `ufsecp_release_process_resources()` C ABI wrapper. Reported by evoskuil
+  (GitHub #430): 259 blocks / ~1.32 MB were reported live at exit by the MSVC
+  debug CRT with no way for an embedder to release them (section memory_safety,
+  advisory=false)
 - `regression_tls_segment_alignment` — `audit/test_regression_tls_segment_alignment.cpp`:
   reads its own ELF program headers and asserts `PT_TLS p_align >= 64`. Below
   that, Android arm64 Bionic refuses to load the executable at all

@@ -26,6 +26,7 @@
 #include "secp256k1/ct/point.hpp"
 #include "secp256k1/precompute.hpp"
 #include "secp256k1/detail/secure_erase.hpp"
+#include "ct_xonly_internal.hpp"
 #include <cstring>
 #include <stdexcept>
 
@@ -586,7 +587,9 @@ std::array<std::uint8_t, 32> ellswift_xdh(
     // NOTE: the isomorphic-curve approach avoids the ~48,000 ns 4x64 sqrt that
     // a direct lift_x + ct::scalar_mul path would require, hence the x-only path
     // is ~10,000 ns faster than the naive lift-then-multiply approach.
-    auto ecdh_x_fe = ct::ecmult_const_xonly(their_x, FieldElement::one(), our_privkey);
+    // xswiftec_fwd returns a valid secp256k1 x for every encoding; xd=1.
+    auto ecdh_x_fe = ct::detail::ecmult_const_xonly_trusted(
+        their_x, FieldElement::one(), our_privkey);
     if (ecdh_x_fe == FieldElement::zero()) {
         return std::array<std::uint8_t, 32>{};
     }

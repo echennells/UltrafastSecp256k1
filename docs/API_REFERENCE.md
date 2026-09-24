@@ -359,6 +359,60 @@ if (!passed) {
 
 ---
 
+#### Process-wide resources
+
+Two things in this library are built on first use and then kept for the life of
+the process: the fused dual-mul generator tables (built on the first verify that
+needs them) and the batch-verify worker pool (one thread per hardware thread).
+
+Both are deliberate. An immortal table has no static-destruction-order hazard,
+and the pool has **no** automatic destruction because its destructor joins
+threads — at static-destruction time on Windows that runs during DLL unload while
+the loader lock is held, and joining there deadlocks.
+
+If you keep the library loaded until process exit and never run a leak check,
+there is nothing to call. If you do run one — the MSVC debug CRT, Boost.Test's
+`_CRTDBG_LEAK_CHECK_DF`, ASan/LSan — that retained state is reported as live blocks at exit
+(GitHub issue [#430](https://github.com/shrec/UltrafastSecp256k1/issues/430):
+259 blocks, ~1.32 MB, one-time and bounded rather than accumulating). Release it
+explicitly instead of carrying a suppression:
+
+```cpp
+#include <secp256k1/process_resources.hpp>
+
+int main() {
+    // ... use the library ...
+
+    secp256k1::release_process_resources();   // frees the tables, joins the pool
+    assert(!secp256k1::process_resources_active());
+}
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `release_process_resources` | `() noexcept -> void` | Free every process-wide table and stop the batch worker pool. Idempotent; a no-op if the library was never used |
+| `process_resources_active` | `() noexcept -> bool` | True while any table is built or the pool is running — so the release can be asserted, not assumed |
+
+**Preconditions.** No other thread may be inside the library: this joins the
+batch worker threads. Do not call it from `DllMain`, from a static destructor, or
+from anything else running under the Windows loader lock — that is the deadlock
+the pool avoids by having no destructor in the first place. Call it from your own
+code, on a thread you control, e.g. at the end of `main()`.
+For a dynamically loaded library, stop all use and call
+`release_process_resources()` (or `ufsecp_release_process_resources()`) before
+`FreeLibrary()` or the platform's library-unload operation, while the library is
+still loaded; do not re-enter it between release and unload.
+
+**Not a one-way door.** The next call into the library rebuilds what it needs, so
+this is safe to call at a quiet point and keep running.
+
+C callers use `ufsecp_release_process_resources()`; it releases the same state.
+
+Not covered: the ESP32/STM32 generator table, which is function-local on those
+targets. They have no debug CRT and no leak sanitizer to report it to.
+
+---
+
 ### ECDSA (RFC 6979)
 
 **Namespace:** `secp256k1`
@@ -613,6 +667,36 @@ int  context_randomize(seed32);
 **Batch APIs:**
 - `ecdsa_verify_batch` / `ecdsa_verify_columns` — rows `[hash32|pub33|sig64]` @ stride, or parallel spans
 - `schnorr_verify_batch` / `schnorr_verify_columns` — rows `[msg32|xonly32|sig64]` @ stride, or parallel spans
+
+**BIP-352 receiver scanning:**
+
+```cpp
+// Prefix matrix, row-major by tweak then spend key. This lower-level helper
+// requires an installed GPU provider and returns false when none is available.
+bool bip352_scan_prefixes(const uint8_t scan_privkey32[32],
+                          const uint8_t* spend_pubkeys33, size_t n_spend,
+                          const uint8_t* tweak_pubkeys33, size_t n_tweaks,
+                          uint64_t* prefix64_out) noexcept;
+
+// Unified grouped scan. The provider chooses GPU or bounded CPU execution.
+// max_threads: 0=auto, 1=serial/no GPU, N=CPU worker cap when GPU declines.
+bool bip352_scan_columns(const uint8_t scan_privkey32[32],
+                         const uint8_t* spend_pubkeys33, size_t n_spend,
+                         const uint8_t* correlates4,
+                         const uint8_t* prefixes8,
+                         const uint8_t* tweak_pubkeys33, size_t rows,
+                         uint8_t* matches_out,
+                         size_t max_threads = 0) noexcept;
+```
+
+`bip352_scan_columns` treats adjacent equal four-byte correlates as one
+transaction group. Every row in a group must carry the same compressed tweak
+point. On a match it sets only the group's first `matches_out` byte; every
+other byte remains zero. The function returns `false` and zeroes all match
+bytes for malformed groups, invalid keys, cryptographic failure, or worker
+cancellation. A missing or declining GPU provider is not an error: the same
+operation continues on the CPU. The scan private key and derived secret
+material are erased by both implementations before return.
 
 **Public-data batch ops (validate / commitment / hashing):** all `[[nodiscard]] inline bool` in `ufsecp::lbtc`, all **variable-time / public-data** (no secret is ever touched). Each is ONE surface — internal GPU acceleration via the EXISTING `GpuBackend` virtuals + deterministic CPU fallback, no CPU/GPU split, no GPU status code, no caller chunking, no C ABI.
 
@@ -2233,6 +2317,13 @@ ufsecp_set_cache_dir("/var/lib/myapp/ufsecp_cache");
 
 // Destroy (NULL-safe)
 ufsecp_ctx_destroy(ctx);
+
+// Free the library's process-wide lazily-built state: the fused dual-mul
+// generator tables and the batch worker pool (joins its threads). Idempotent,
+// process-global, and independent of ufsecp_ctx_destroy. Not a one-way door --
+// the next call rebuilds what it needs. Call it from your own code, never from
+// DllMain or a static destructor. See "Process-wide resources" below.
+ufsecp_release_process_resources();
 ```
 
 | Function | Signature | Description |
@@ -2245,6 +2336,7 @@ ufsecp_ctx_destroy(ctx);
 | `ufsecp_ctx_size` | `(void) -> size_t` | Compiled ctx struct size |
 | `ufsecp_set_cache_dir` | `(const char* dir\|NULL) -> error_t` | Set fixed-base cache directory (replaces config.ini); NULL/"" = CWD. Process-global |
 | `ufsecp_context_randomize` | `(ctx, seed32[32]\|NULL) -> error_t` | Install scalar blinding (thread-local); NULL clears |
+| `ufsecp_release_process_resources` | `(void) -> void` | Free process-wide tables + stop the batch worker pool. Idempotent; not bound to any ctx. Requires no other thread inside the library |
 
 <a id="c-abi-private-key-operations"></a>
 ### Private Key Operations

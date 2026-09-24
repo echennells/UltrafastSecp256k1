@@ -41,6 +41,23 @@ if(_GPU_LANG STREQUAL "CUDA")
     # undefined references to __cudaRegisterLinkedBinary_* at link time
     # (CUDA 12+ / Blackwell / Ada and later architectures).
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
+    # CMake adds the selected CUDA runtime automatically when it links a
+    # target that contains CUDA sources. That implicit dependency is not
+    # preserved when this static archive is installed and later consumed by
+    # a C++-only target (such as libbitcoin-system), so name it explicitly on
+    # the archive's public link interface. The package config finds the
+    # corresponding imported target before loading our exported targets.
+    find_package(CUDAToolkit REQUIRED)
+    if(CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
+        set(_SECP256K1_CUDA_RUNTIME_TARGET CUDA::cudart_static)
+    elseif(CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "Shared")
+        set(_SECP256K1_CUDA_RUNTIME_TARGET CUDA::cudart)
+    elseif(NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "None")
+        message(FATAL_ERROR
+            "Unsupported CMAKE_CUDA_RUNTIME_LIBRARY value: "
+            "${CMAKE_CUDA_RUNTIME_LIBRARY}")
+    endif()
 endif()
 set(CMAKE_CXX_STANDARD 17)
 
@@ -68,7 +85,16 @@ else()
     )
     set_target_properties(secp256k1_cuda_lib PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+        # Resolve this archive's device symbols inside the archive itself so
+        # installed C++-only consumers do not need to run a CUDA device-link
+        # step. Without this, they inherit an undefined
+        # __cudaRegisterLinkedBinary_* symbol from secp256k1.cu.o.
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
         POSITION_INDEPENDENT_CODE ON)
+    if(_SECP256K1_CUDA_RUNTIME_TARGET)
+        target_link_libraries(secp256k1_cuda_lib INTERFACE
+            $<INSTALL_INTERFACE:${_SECP256K1_CUDA_RUNTIME_TARGET}>)
+    endif()
 endif()
 
 # Issue #335 acceptance repair (round 11): these were PUBLIC, unwrapped
@@ -106,7 +132,7 @@ target_include_directories(secp256k1_cuda_lib PRIVATE
 # STATIC library (HIP and CUDA branches above both add_library(... STATIC)).
 include(GNUInstallDirs)
 install(TARGETS secp256k1_cuda_lib
-    EXPORT ufsecpTargets
+    EXPORT ${SECP256K1_GPU_EXPORT_SET}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 

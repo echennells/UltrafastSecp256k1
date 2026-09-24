@@ -22,6 +22,15 @@
 #include <cstring>
 #include <vector>
 
+#if __has_include(<valgrind/memcheck.h>)
+#include <valgrind/memcheck.h>
+#define LBTC_SECRET_UNDEFINED(p, n) VALGRIND_MAKE_MEM_UNDEFINED(p, n)
+#define LBTC_SECRET_DEFINED(p, n) VALGRIND_MAKE_MEM_DEFINED(p, n)
+#else
+#define LBTC_SECRET_UNDEFINED(p, n) ((void)0)
+#define LBTC_SECRET_DEFINED(p, n) ((void)0)
+#endif
+
 namespace {
 std::uint64_t g_xs = 0x9E3779B97F4A7C15ull;
 std::uint8_t nb() { g_xs ^= g_xs << 13; g_xs ^= g_xs >> 7; g_xs ^= g_xs << 17; return static_cast<std::uint8_t>(g_xs); }
@@ -168,7 +177,43 @@ int decline_merkle_pair_hook(const std::uint8_t*, const std::uint8_t*, std::size
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Independent public serializer is the byte oracle. Taint only Jacobian
+    // coordinates: the finite-point flag and other metadata remain public.
+    // Run under Memcheck with --bip352-ct-only to isolate secret serialization.
+    for (std::uint64_t scalar = 1; scalar <= 8; ++scalar) {
+        const auto reference = secp256k1::fast::Point::generator().scalar_mul(
+            secp256k1::fast::Scalar::from_uint64(scalar));
+        const auto expected = reference.to_compressed();
+        const auto z = secp256k1::fast::FieldElement::from_uint64(scalar + 2);
+        const auto z2 = z.square();
+        auto projective = secp256k1::fast::Point::from_jacobian_coords(
+            reference.x() * z2, reference.y() * z2 * z, z, false);
+#if defined(SECP256K1_FAST_52BIT)
+        LBTC_SECRET_UNDEFINED(&projective.X52(), sizeof(projective.X52()));
+        LBTC_SECRET_UNDEFINED(&projective.Y52(), sizeof(projective.Y52()));
+        LBTC_SECRET_UNDEFINED(&projective.Z52(), sizeof(projective.Z52()));
+#else
+        LBTC_SECRET_UNDEFINED(&projective.X(), sizeof(projective.X()));
+        LBTC_SECRET_UNDEFINED(&projective.Y(), sizeof(projective.Y()));
+        LBTC_SECRET_UNDEFINED(&projective.z(), sizeof(projective.z()));
+#endif
+        auto actual = ufsecp::lbtc::detail::bip352_shared_compressed(projective);
+        auto actual_x = ufsecp::lbtc::detail::bip352_candidate_x(projective);
+        LBTC_SECRET_DEFINED(actual.data(), actual.size());
+        LBTC_SECRET_DEFINED(actual_x.data(), actual_x.size());
+        LBTC_SECRET_DEFINED(&projective, sizeof(projective));
+        check(actual == expected, "BIP352 secret Jacobian serialization matches public reference");
+        check(std::equal(actual_x.begin(), actual_x.end(), expected.begin() + 1),
+              "BIP352 secret candidate x matches public reference");
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--bip352-ct-only") == 0) {
+#if !__has_include(<valgrind/memcheck.h>)
+        std::puts("SKIP: BIP352 taint instrumentation requires Valgrind headers");
+        return 77;
+#endif
+        return fails == 0 ? 0 : 1;
+    }
     constexpr int M = 20000;
     constexpr int SERIAL_N = 5000;  // Crosses the 4096 bounded-chunk threshold.
 
@@ -1062,6 +1107,123 @@ int main() {
         int parity = (internal_compressed[0] == 0x03) ? 1 : 0;
         check(ufsecp::lbtc::taproot_tweak_add_check(output_xonly, parity, internal_xonly,
               merkle_root, 32), "taproot_tweak_add_check with merkle root");
+    }
+
+    {
+        const auto hook = +[](const std::uint8_t*, const std::uint8_t*, std::size_t, const std::uint8_t*, std::size_t,
+                              std::uint64_t* out) {
+            out[0] = 0x3e9fce73d4e77a48ull;
+            return 0;
+        };
+        const auto columns_hook = +[](const std::uint8_t*, const std::uint8_t*, std::size_t, const std::uint8_t*,
+                                      const std::uint8_t*, const std::uint8_t*, std::size_t, std::uint8_t* matches) {
+            matches[0] = 1;
+            return 0;
+        };
+        std::array<std::uint8_t, 32> scan{};
+        std::array<std::uint8_t, 33> spend{}, point{};
+        std::array<std::uint64_t, 1> prefixes{};
+
+        const auto saved = ufsecp::lbtc::gpu_hook::install_lbtc_bip352_hook(nullptr);
+        check(!ufsecp::lbtc::bip352_scan_prefixes(scan.data(), spend.data(), 1, point.data(), 1, prefixes.data()),
+              "bip352 unavailable declines");
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_hook(hook);
+        check(ufsecp::lbtc::bip352_scan_prefixes(scan.data(), spend.data(), 1, point.data(), 1, prefixes.data()),
+              "bip352 hook succeeds");
+        check(prefixes.front() == 0x3e9fce73d4e77a48ull, "bip352 hook writes prefix");
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_hook(saved);
+
+        std::array<std::uint32_t, 1> correlates{};
+        std::array<std::uint8_t, 8> column_prefixes{};
+        std::array<std::uint8_t, 1> matches{};
+        const auto columns_saved = ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(columns_hook);
+        check(ufsecp::lbtc::bip352_scan_columns(scan.data(), spend.data(), 1,
+                                                reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                column_prefixes.data(), point.data(), 1, matches.data()),
+              "column bip352 hook succeeds");
+        check(matches.front() == 1, "column bip352 hook writes match");
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(columns_saved);
+
+        check(ufsecp::lbtc::bip352_scan_prefixes(nullptr, nullptr, 0, nullptr, 0, nullptr),
+              "bip352 empty batch is a no-op");
+    }
+
+    {
+        const std::array<std::uint8_t, 32> scan{{0x0f, 0x69, 0x4e, 0x06, 0x80, 0x28, 0xa7, 0x17, 0xf8, 0xaf, 0x6b,
+                                                 0x94, 0x11, 0xf9, 0xa1, 0x33, 0xdd, 0x35, 0x65, 0x25, 0x87, 0x14,
+                                                 0xcc, 0x22, 0x65, 0x94, 0xb3, 0x4d, 0xb9, 0x0c, 0x1f, 0x2c}};
+        const std::array<std::uint8_t, 33> spend{{0x02, 0x5c, 0xc9, 0x85, 0x6d, 0x6f, 0x83, 0x75, 0x35, 0x0e, 0x12,
+                                                  0x39, 0x78, 0xda, 0xac, 0x20, 0x0c, 0x26, 0x0c, 0xb5, 0xb5, 0xae,
+                                                  0x83, 0x10, 0x6c, 0xab, 0x90, 0x48, 0x4d, 0xcd, 0x8f, 0xcf, 0x36}};
+        const std::array<std::uint8_t, 33> point{{0x02, 0x4a, 0xc2, 0x53, 0xc2, 0x16, 0x53, 0x2e, 0x96, 0x19, 0x88,
+                                                  0xe2, 0xa8, 0xce, 0x26, 0x6a, 0x44, 0x7c, 0x89, 0x4c, 0x78, 0x1e,
+                                                  0x52, 0xef, 0x6c, 0xee, 0x90, 0x23, 0x61, 0xdb, 0x96, 0x00, 0x04}};
+        const std::array<std::uint8_t, 8> prefix{{0x3e, 0x9f, 0xce, 0x73, 0xd4, 0xe7, 0x7a, 0x48}};
+        const std::array<std::uint32_t, 1> correlates{{7}};
+        std::array<std::uint8_t, 1> matches{{0xff}};
+
+        const auto saved = ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(nullptr);
+        check(ufsecp::lbtc::bip352_scan_columns(scan.data(), spend.data(), 1,
+                                                reinterpret_cast<const std::uint8_t*>(correlates.data()), prefix.data(),
+                                                point.data(), 1, matches.data()),
+              "column bip352 CPU fallback succeeds");
+        check(matches[0] == 1, "column bip352 CPU fallback writes group-start match");
+
+        const auto decline = +[](const std::uint8_t*, const std::uint8_t*, std::size_t, const std::uint8_t*,
+                                 const std::uint8_t*, const std::uint8_t*, std::size_t, std::uint8_t* out) {
+            out[0] = 0;
+            return -1;
+        };
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(decline);
+        matches[0] = 0xff;
+        check(ufsecp::lbtc::bip352_scan_columns(scan.data(), spend.data(), 1,
+                                                reinterpret_cast<const std::uint8_t*>(correlates.data()), prefix.data(),
+                                                point.data(), 1, matches.data()),
+              "column bip352 provider decline falls back");
+        check(matches[0] == 1, "column bip352 fallback overwrites declined provider output");
+
+        const auto handled_miss = +[](const std::uint8_t*, const std::uint8_t*, std::size_t, const std::uint8_t*,
+                                      const std::uint8_t*, const std::uint8_t*, std::size_t, std::uint8_t* out) {
+            out[0] = 0;
+            return 0;
+        };
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(handled_miss);
+        matches[0] = 0xff;
+        check(ufsecp::lbtc::bip352_scan_columns(scan.data(), spend.data(), 1,
+                                                reinterpret_cast<const std::uint8_t*>(correlates.data()), prefix.data(),
+                                                point.data(), 1, matches.data(), 1),
+              "column bip352 serial hint succeeds");
+        check(matches[0] == 1, "column bip352 serial hint bypasses accelerator");
+
+        const std::array<std::uint32_t, 3> grouped_correlates{{7, 7, 8}};
+        std::array<std::uint8_t, 24> grouped_prefixes{};
+        std::copy(prefix.begin(), prefix.end(), grouped_prefixes.begin() + 8);
+        std::array<std::uint8_t, 99> grouped_points{};
+        for (std::size_t row = 0; row < grouped_correlates.size(); ++row)
+            std::copy(point.begin(), point.end(), grouped_points.begin() + row * point.size());
+        std::array<std::uint8_t, 3> grouped_matches{{0xff, 0xff, 0xff}};
+        check(ufsecp::lbtc::bip352_scan_columns(
+                  scan.data(), spend.data(), 1, reinterpret_cast<const std::uint8_t*>(grouped_correlates.data()),
+                  grouped_prefixes.data(), grouped_points.data(), grouped_correlates.size(), grouped_matches.data(), 1),
+              "column bip352 CPU grouped scan succeeds");
+        check(grouped_matches[0] == 1 && grouped_matches[1] == 0 && grouped_matches[2] == 0,
+              "column bip352 CPU marks only matching group start");
+
+        std::array<std::uint32_t, 2> malformed_correlates{{7, 7}};
+        std::array<std::uint8_t, 16> malformed_prefixes{};
+        std::copy(prefix.begin(), prefix.end(), malformed_prefixes.begin());
+        std::array<std::uint8_t, 66> malformed_points{};
+        std::copy(point.begin(), point.end(), malformed_points.begin());
+        std::copy(point.begin(), point.end(), malformed_points.begin() + 33);
+        malformed_points[33] = 0x03;
+        std::array<std::uint8_t, 2> malformed_matches{{0xff, 0xff}};
+        check(!ufsecp::lbtc::bip352_scan_columns(
+                  scan.data(), spend.data(), 1, reinterpret_cast<const std::uint8_t*>(malformed_correlates.data()),
+                  malformed_prefixes.data(), malformed_points.data(), 2, malformed_matches.data(), 1),
+              "column bip352 CPU rejects mismatched group points");
+        check(malformed_matches[0] == 0 && malformed_matches[1] == 0, "column bip352 CPU failure is fail-closed");
+
+        ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(saved);
     }
 
     // ─── Fail-closed: zero pubkey to verify ─────────────────────────

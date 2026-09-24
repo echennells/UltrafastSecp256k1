@@ -205,6 +205,7 @@ endif()
 if(SECP256K1_BUILD_OPENCL AND TARGET secp256k1_opencl)
     target_include_directories(secp256k1_gpu_host PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../opencl/include
+        ${OpenCL_INCLUDE_DIR}
     )
 endif()
 
@@ -281,6 +282,6 @@ set_target_properties(secp256k1_gpu_host PROPERTIES
 # ci/check_release_package_contents.py --gpu-export-closure.
 include(GNUInstallDirs)
 install(TARGETS secp256k1_gpu_host
-    EXPORT ufsecpTargets
+    EXPORT ${SECP256K1_GPU_EXPORT_SET}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )

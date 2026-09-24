@@ -21,6 +21,7 @@
 #include "secp256k1/scalar.hpp"
 #include "secp256k1/field.hpp"
 #include "secp256k1/musig2.hpp"
+#include "secp256k1/detail/ct_point_internal.hpp"
 
 using namespace secp256k1;
 using fast::Scalar;
@@ -138,6 +139,43 @@ static void test_ecdh_infinity() {
 
     auto secret = ecdh_compute(sk, pk_inf);
     check(secp256k1::ct::ct_is_zero(secret), "ECDH: infinity pubkey returns zero");
+}
+
+static void test_ecdh_fixed_bytes_and_rejections() {
+    (void)std::printf("[ECDH] Fixed pre-change bytes and validation...\n");
+    const auto key = Scalar::from_uint64(19);
+    const auto peer = Point::generator().dbl();
+    check(peer.z() != fast::FieldElement::one(), "ECDH fixture peer is non-affine");
+    check(ecdh_compute(key, peer) == hex32(
+        "bd5b492c16bb81acab6ef37dfc398b71f57273185f97f5a675c900dc098bf758"),
+        "ECDH compressed hash matches pre-change fixture");
+    check(ecdh_compute_xonly(key, peer) == hex32(
+        "fba83c69df3ce7b00f5503ffb192c2429f2bb97c69b4cc0f0813386e33441df0"),
+        "ECDH x hash matches pre-change fixture");
+    check(ecdh_compute_raw(key, peer) == hex32(
+        "b699a30e6e184cdfa88ac16c7d80bffd38e2e1fc705821ea69cd5fdf1691fff7"),
+        "ECDH raw x matches pre-change fixture");
+
+    const auto invalid = Point::from_affine(fast::FieldElement::one(),
+                                            fast::FieldElement::one());
+    const auto invalid_projective = Point::from_jacobian_coords(
+        peer.X(), peer.Y() + fast::FieldElement::one(), peer.z(), false);
+    const auto zero_z = Point::from_jacobian_coords(
+        fast::FieldElement::zero(), fast::FieldElement::zero(),
+        fast::FieldElement::zero(), false);
+    const auto zero = Scalar::zero();
+    for (auto compute : {ecdh_compute, ecdh_compute_xonly, ecdh_compute_raw}) {
+        check(compute(zero, peer) == std::array<std::uint8_t, 32>{},
+              "ECDH variant rejects zero scalar");
+        check(compute(key, Point::infinity()) == std::array<std::uint8_t, 32>{},
+              "ECDH variant rejects infinity peer");
+        check(compute(key, invalid) == std::array<std::uint8_t, 32>{},
+              "ECDH variant rejects off-curve peer");
+        check(compute(key, invalid_projective) == std::array<std::uint8_t, 32>{},
+              "ECDH variant rejects non-affine off-curve peer");
+        check(compute(key, zero_z) == std::array<std::uint8_t, 32>{},
+              "ECDH variant rejects malformed zero-Z peer");
+    }
 }
 
 // ===============================================================================
@@ -723,6 +761,18 @@ static void test_wycheproof_recovery_edge_cases() {
 // ===============================================================================
 
 int test_ecdh_recovery_taproot_run() {
+    if (std::getenv("SECP256K1_ECDH_OLD_PATH_PROBE") != nullptr) {
+        // This is the exact secret-result conversion/serialization shape used
+        // by the old ECDH path. Re-tainting after multiplication isolates the
+        // downstream boundary from the multiplication itself.
+        auto raw = ct::detail::scalar_mul_jacobian(
+            Point::generator().dbl(), Scalar::from_uint64(19));
+        SECP256K1_CLASSIFY(&raw, sizeof(raw));
+        auto compressed = raw.to_point().to_compressed();
+        SECP256K1_DECLASSIFY(compressed.data(), compressed.size());
+        (void)std::printf("ECDH old-path probe: %02x\n", compressed[0]);
+        return 0;
+    }
     (void)std::printf("===============================================================\n");
     (void)std::printf("  UltrafastSecp256k1 -- v3.2.0 Feature Tests\n");
     (void)std::printf("===============================================================\n\n");
@@ -733,6 +783,7 @@ int test_ecdh_recovery_taproot_run() {
     test_ecdh_raw();
     test_ecdh_zero_key();
     test_ecdh_infinity();
+    test_ecdh_fixed_bytes_and_rejections();
 
     (void)std::printf("\n");
 

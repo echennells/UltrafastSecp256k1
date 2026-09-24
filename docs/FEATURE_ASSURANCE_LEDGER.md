@@ -35,8 +35,9 @@
 | `ufsecp_last_error_msg` | Y | - | - | N/A | N/A | - | N/A | N/A |
 | `ufsecp_ctx_size` | Y | - | - | N/A | N/A | - | N/A | N/A |
 | `ufsecp_context_randomize` | Y | Y | Y (null ctx, null seed) | N/A | N/A | CT blinding | N/A | N/A |
+| `ufsecp_release_process_resources` | Y | - | Y (idempotent: called twice from both the pristine and the used state) | N/A | N/A | - | N/A | Frees the dual-mul generator tables and joins the batch worker pool (GH#430) |
 
-**Test files:** `audit/test_ffi_round_trip.cpp`, `audit/test_adversarial_protocol.cpp` (`test_i6_context_randomize`)
+**Test files:** `audit/test_ffi_round_trip.cpp`, `audit/test_adversarial_protocol.cpp` (`test_i6_context_randomize`), `audit/test_regression_process_resource_release.cpp` (PRR-1..7)
 
 ---
 

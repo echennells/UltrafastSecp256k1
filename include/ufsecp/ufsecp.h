@@ -155,6 +155,33 @@ UFSECP_API ufsecp_error_t ufsecp_set_cache_dir(const char* dir);
 UFSECP_API ufsecp_error_t ufsecp_context_randomize(ufsecp_ctx*    ctx,
                                                     const uint8_t* seed32);
 
+/** Free the library's process-wide lazily-built state.
+ *
+ *  Two things are built on first use and then kept for the life of the process:
+ *  the fused dual-mul generator tables (built on the first verify that needs
+ *  them) and the batch-verify worker pool (one thread per hardware thread).
+ *  Both are deliberate -- an immortal table has no static-destruction-order
+ *  hazard, and the pool has NO automatic destruction because its destructor
+ *  joins threads, which deadlocks if it runs while the Windows loader lock is
+ *  held during DLL unload.
+ *
+ *  What is not deliberate is how that looks from outside: an embedder under the
+ *  MSVC debug CRT or a leak sanitizer sees those blocks reported as live at
+ *  exit, indistinguishable from a real leak, and their threads still running.
+ *  This entry point hands them back explicitly.
+ *
+ *  Idempotent, and a no-op if the library was never used. NOT a one-way door:
+ *  the next call into the library rebuilds whatever it needs.
+ *
+ *  Process-global, not bound to any ufsecp_ctx, and independent of
+ *  ufsecp_ctx_destroy() -- destroying a context does not and must not free
+ *  state another context may still be using.
+ *
+ *  PRECONDITION: no other thread may be inside the library. This joins the
+ *  batch worker threads. Do NOT call it from DllMain or from a static
+ *  destructor; call it from your own code, e.g. at the end of main(). */
+UFSECP_API void ufsecp_release_process_resources(void);
+
 /* ===========================================================================
  * Private key utilities
  * =========================================================================== */

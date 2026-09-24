@@ -1,7 +1,7 @@
 // ============================================================================
 // ufsecp/lbtc_gpu_ops.hpp — engine-owned GPU-offload hook contract for the
-// libbitcoin public-data batch ops (xonly/pubkey/taproot-commitment validate
-// + tagged_hash / tagged_hash_var / hash256 / hash256_var / merkle_pair_hash).
+// libbitcoin batch ops (xonly/pubkey/taproot-commitment validate + tagged_hash
+// / tagged_hash_var / hash256 / hash256_var / merkle_pair_hash / BIP-352 scan).
 // ============================================================================
 // This is the ONE shared contract between the header-only CPU surface
 // (<ufsecp/libbitcoin.hpp>) and the GPU-host provider (src/gpu/src/
@@ -14,9 +14,9 @@
 // surface because src/cpu/src/batch_verify.cpp is not a writable target here):
 //   * The fn-ptr storage lives here as C++17 `inline std::atomic<...>` variables
 //     (single shared external-linkage definition, no .cpp needed).
-//   * <ufsecp/libbitcoin.hpp> consults each hook (acquire load). When the hook
-//     is null (CPU-only build — the GPU host is not linked) OR returns a decline
-//     (-1), the header runs its deterministic CPU fallback.
+//   * <ufsecp/libbitcoin.hpp> consults each hook (acquire load). Other adapters
+//     fall back to CPU on decline; the BIP-352 adapter returns the decline to
+//     its caller.
 //   * gpu_engine_hook.cpp (compiled only under SECP256K1_LBTC_GPU_OPS, i.e. the
 //     direct-GPU profile) installs one trampoline per op, each calling the
 //     matching EXISTING GpuBackend virtual and translating GpuError ->
@@ -32,13 +32,18 @@
 //   hash ops (tagged_hash / tagged_hash_var / hash256 / hash256_var):
 //       0 -> handled: every out32 row written with the correct hash.
 //      -1 -> decline -> CPU fallback recomputes every row.
+//   BIP-352 scan:
+//       0 -> handled: every prefix64 row written. For the column operation,
+//            matches_out is fully initialized and only the first row of each
+//            matching adjacent-correlate group is set.
+//      -1 -> decline; the public direct API transparently falls back to CPU.
 //   An operational backend error is ALWAYS a decline (-1), NEVER an all-zero /
 //   consensus-invalid result buffer (fatal-not-invalid).
 //
-// These hooks operate on PUBLIC on-chain data (x-only / compressed pubkeys,
-// taproot commitment tuples, tagged-hash messages, hash256/merkle preimages). No
-// secret key, nonce, signing share, or ECDH scalar is ever routed through this
-// path — variable-time on both the GPU and CPU sides is the correct choice.
+// Except for the two BIP-352 hooks, these hooks operate exclusively on public
+// on-chain data. The BIP-352 hooks are deliberately secret-bearing:
+// scan_privkey32 is a receiver scan secret and requires the trusted
+// single-tenant GPU environment documented by the engine security model.
 // ============================================================================
 #ifndef UFSECP_LBTC_GPU_OPS_HPP
 #define UFSECP_LBTC_GPU_OPS_HPP
@@ -92,6 +97,15 @@ using sighash_descriptor_hash_fn = int (*)(const std::uint8_t* descriptor,
                                             std::size_t count,
                                             std::uint8_t* out32);
 
+using bip352_scan_fn = int (*)(const std::uint8_t* scan_privkey32, const std::uint8_t* spend_pubkeys33,
+                               std::size_t n_spend, const std::uint8_t* tweak_pubkeys33, std::size_t n_tweaks,
+                               std::uint64_t* prefix64_out);
+
+using bip352_scan_columns_fn = int (*)(const std::uint8_t* scan_privkey32, const std::uint8_t* spend_pubkeys33,
+                                       std::size_t n_spend, const std::uint8_t* correlates4,
+                                       const std::uint8_t* prefixes8, const std::uint8_t* tweak_pubkeys33,
+                                       std::size_t rows, std::uint8_t* matches_out);
+
 // -- Shared fn-ptr storage (C++17 inline vars: one definition across all TUs) -
 inline std::atomic<xonly_validate_fn>    g_lbtc_xonly_hook{nullptr};
 inline std::atomic<pubkey_validate_fn>   g_lbtc_pubkey_hook{nullptr};
@@ -102,6 +116,8 @@ inline std::atomic<hash256_fn>           g_lbtc_hash256_hook{nullptr};
 inline std::atomic<hash256_var_fn>       g_lbtc_hash256_var_hook{nullptr};
 inline std::atomic<merkle_pair_hash_fn>  g_lbtc_merkle_pair_hook{nullptr};
 inline std::atomic<sighash_descriptor_hash_fn> g_lbtc_sighash_hook{nullptr};
+inline std::atomic<bip352_scan_fn> g_lbtc_bip352_hook{nullptr};
+inline std::atomic<bip352_scan_columns_fn> g_lbtc_bip352_columns_hook{nullptr};
 
 // -- Installers (thread-safe store, return the previous value) ---------------
 inline xonly_validate_fn install_lbtc_xonly_hook(xonly_validate_fn fn) noexcept {
@@ -132,6 +148,14 @@ inline merkle_pair_hash_fn install_lbtc_merkle_pair_hook(merkle_pair_hash_fn fn)
 
 inline sighash_descriptor_hash_fn install_lbtc_sighash_hook(sighash_descriptor_hash_fn fn) noexcept {
     return g_lbtc_sighash_hook.exchange(fn, std::memory_order_release);
+}
+
+inline bip352_scan_fn install_lbtc_bip352_hook(bip352_scan_fn fn) noexcept {
+    return g_lbtc_bip352_hook.exchange(fn, std::memory_order_release);
+}
+
+inline bip352_scan_columns_fn install_lbtc_bip352_columns_hook(bip352_scan_columns_fn fn) noexcept {
+    return g_lbtc_bip352_columns_hook.exchange(fn, std::memory_order_release);
 }
 
 // ----------------------------------------------------------------------------

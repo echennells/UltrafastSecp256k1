@@ -24,6 +24,7 @@
 #include "secp256k1/sha256.hpp"
 #include "secp256k1/ct/point.hpp"
 #include "secp256k1/detail/secure_erase.hpp"
+#include "ct_xonly_internal.hpp"
 #include <cstring>
 
 #include "secp256k1/detail/csprng.hpp"
@@ -312,7 +313,8 @@ std::array<std::uint8_t,32> xdh(
 
     // CT scalar multiply via x-only path: no sqrt, one combined inverse.
     // Passes fraction (xn:xd) directly — avoids the inverse in xd→x conversion.
-    auto px = ct::ecmult_const_xonly(xn, xd, sk);
+    // ellswift_decode_frac guarantees xd!=0 and a valid secp256k1 lift.
+    auto px = ct::detail::ecmult_const_xonly_trusted(xn, xd, sk);
 
     if (px == fast::FieldElement::zero()) return {};
 

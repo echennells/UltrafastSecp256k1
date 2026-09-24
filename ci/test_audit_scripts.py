@@ -900,6 +900,56 @@ def check_stamp_changelog_no_duplicate() -> None:
         fail(tag, str(exc))
 
 
+def check_canonical_data_date_is_stable() -> None:
+    """Release regression: build_canonical_data.py must not dirty the tree with a
+    date bump alone.
+
+    release.yml's sync-docs job runs this script on the tagged commit and reads a
+    non-empty `git diff` as "the developer forgot to stamp the CHANGELOG": it
+    commits, force-moves the release tag off main onto that commit, and the retag
+    re-triggers Release -- whose CAAS gate then fails, because the evidence bundle
+    still records the pre-stamp SHA. So a run that derives an identical set of
+    numbers must leave the file byte-identical; a run that derives a different
+    number must still refresh the date.
+    """
+    tag = "REL:canonical_data_date_stable"
+    try:
+        mod = _load_ci_module("build_canonical_data.py", "_t_build_canonical_data")
+        real_out, real_build, real_argv = mod.OUT, mod.build, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mod.OUT = Path(tmpdir) / "canonical_data.json"
+                sys.argv = ["build_canonical_data.py"]
+                stored = {"version": "4.6.0", "last_updated": "2026-09-21", "total_modules": 478}
+                mod.OUT.write_text(json.dumps(stored, indent=2) + "\n", encoding="utf-8")
+
+                # Same numbers, later day: the date must not move.
+                mod.build = lambda: dict(stored, last_updated="2026-12-31")
+                if mod.main() != 0:
+                    fail(tag, "main() returned non-zero on an unchanged rebuild")
+                    return
+                after = json.loads(mod.OUT.read_text(encoding="utf-8"))
+                if after.get("last_updated") != "2026-09-21":
+                    fail(tag, f"date moved on an unchanged rebuild: {after.get('last_updated')!r} "
+                              "-- this force-moves the release tag off main")
+                    return
+
+                # A real change: the date must move with it.
+                mod.build = lambda: dict(stored, last_updated="2026-12-31", total_modules=479)
+                if mod.main() != 0:
+                    fail(tag, "main() returned non-zero on a changed rebuild")
+                    return
+                after = json.loads(mod.OUT.read_text(encoding="utf-8"))
+                if after.get("total_modules") != 479 or after.get("last_updated") != "2026-12-31":
+                    fail(tag, f"changed rebuild did not refresh the date: {after!r}")
+                    return
+        finally:
+            mod.OUT, mod.build, sys.argv = real_out, real_build, real_argv
+        ok(tag, "an unchanged rebuild keeps last_updated; a changed rebuild refreshes it")
+    except Exception as exc:
+        fail(tag, str(exc))
+
+
 def check_preflight_step_count() -> None:
     """Verify preflight.py uses contiguous [i/N] step markers."""
     tag = "STEPS"
@@ -4642,6 +4692,34 @@ def check_windows_cuda_contract_fixtures() -> None:
                     f"main build was cut at 45 twice during the v4.6.0 merge"
                 )
 
+    # benchmark.yml's Linux job builds from the same cold ccache on main, and it
+    # then has a full bench_unified suite to run on top of the build. The v4.6.0
+    # merge logged "Cache not found for input keys: ccache-bench-...", spent
+    # 2252s in Build, and was cut mid-suite at 45m22s -- a red Benchmark
+    # Dashboard on the release commit. The warm dev run of the same tree hit the
+    # cache and finished in 40m, which is the whole point: the branch that is
+    # always cold is the branch a release is cut from.
+    try:
+        import yaml as _yaml
+        bench = _yaml.safe_load((LIB_ROOT / ".github" / "workflows" / "benchmark.yml")
+                                .read_text(encoding="utf-8"))
+    except Exception as exc:
+        failures.append(f"benchmark.yml does not parse as YAML: {exc}")
+    else:
+        bench_job = (bench.get("jobs") or {}).get("benchmark")
+        if not isinstance(bench_job, dict):
+            failures.append("benchmark.yml has no 'benchmark' job")
+        else:
+            tmo = bench_job.get("timeout-minutes")
+            if not isinstance(tmo, int):
+                failures.append("benchmark.yml job benchmark has no integer timeout-minutes")
+            elif tmo < 60:
+                failures.append(
+                    f"benchmark.yml job benchmark timeout-minutes={tmo} is below 60; "
+                    f"a cold main build plus the bench suite was cut at 45 during the "
+                    f"v4.6.0 merge"
+                )
+
     # Every NOSONAR marker must sit on a line that carries CODE.
     #
     # SonarCloud honours NOSONAR only on the SAME line as the issue. A marker
@@ -4974,6 +5052,7 @@ def main() -> int:
     check_caas_integrity_json_purity()
     check_research_monitor_resilience()
     check_stamp_changelog_no_duplicate()
+    check_canonical_data_date_is_stable()
     check_p21_semantic_requirement_map()
     check_audit_sla_pre_alert_and_block()
     check_audit_sla_build_report_not_tracked()

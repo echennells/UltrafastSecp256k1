@@ -141,8 +141,69 @@ private:
     bool                      stop_ = false;
 };
 
-// Single shared instance for the whole program (defined in batch_verify.cpp).
-BatchWorkerPool& batch_worker_pool();
+// Single shared instance for the whole program, lazily created on the first
+// batch-verify _mt call and reused thereafter (no per-call thread spawn).
+//
+// NEVER DESTROYED AUTOMATICALLY (heap, no static destructor): the destructor joins
+// the worker threads, and at static-destruction time on Windows that runs during DLL
+// unload while the loader lock is held -- joining threads there deadlocks (the workers
+// need the loader lock to exit). With no destructor registered, the OS reclaims the
+// threads and memory at process exit. This is the portable (MSVC + libstdc++ +
+// libc++) choice and avoids static-destruction-order hazards as well.
+//
+// That retention is what GitHub issue #430 sees: an embedder under the MSVC debug CRT
+// (or a leak sanitizer) gets the pool object, its thread vector and the workers'
+// thread_local state reported as live blocks at exit, indistinguishable from a real
+// leak. So the pool is now explicitly releasable -- release_batch_worker_pool() below
+// -- while still having no automatic destruction. The embedder calls it from their own
+// code, on a thread they choose, where the loader lock is not held; that is exactly the
+// context a static destructor could never give us.
+//
+// These live in the header as inline definitions rather than in batch_verify.cpp
+// because that translation unit is conditional (SECP256K1_BUILD_PIPPENGER), while
+// process_resources.cpp, which calls the release, is not. Inline gives exactly one
+// instance across the program, which is what "single shared pool" requires.
+//
+// The pointer is atomic rather than a magic static so the release can null it: the hot
+// path stays a single acquire load, the same cost class as the magic-static guard, and
+// the construction mutex is taken only on the first call after a release.
+inline std::atomic<BatchWorkerPool*> g_batch_worker_pool{nullptr};
+inline std::mutex                    g_batch_worker_pool_init_m;
+
+inline BatchWorkerPool& batch_worker_pool() {
+    if (BatchWorkerPool* p = g_batch_worker_pool.load(std::memory_order_acquire)) return *p;
+    std::lock_guard<std::mutex> lk(g_batch_worker_pool_init_m);
+    BatchWorkerPool* p = g_batch_worker_pool.load(std::memory_order_relaxed);
+    if (!p) {
+        p = new BatchWorkerPool();
+        g_batch_worker_pool.store(p, std::memory_order_release);
+    }
+    return *p;
+}
+
+// True while the pool exists, i.e. while its worker threads are running.
+inline bool batch_worker_pool_active() noexcept {
+    return g_batch_worker_pool.load(std::memory_order_acquire) != nullptr;
+}
+
+// Stop and join the workers and free the pool. Idempotent, and a no-op if the pool was
+// never created. The next batch_worker_pool() call builds a fresh one.
+//
+// PRECONDITION: no thread may be inside a batch-verify call. This joins the worker
+// threads, so it must not run while a job is in flight, and it must not run on a thread
+// that holds the Windows loader lock (DllMain, a static destructor) -- joining there
+// deadlocks, which is the whole reason the pool has no automatic destruction. Reach it
+// through secp256k1::release_process_resources() rather than calling it directly.
+inline void release_batch_worker_pool() noexcept {
+    BatchWorkerPool* p = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_batch_worker_pool_init_m);
+        p = g_batch_worker_pool.exchange(nullptr, std::memory_order_acq_rel);
+    }
+    // Deleted OUTSIDE the init mutex: ~BatchWorkerPool joins the workers, and holding
+    // the construction lock across a join is a needless second place to deadlock.
+    delete p;
+}
 
 }  // namespace detail
 }  // namespace secp256k1

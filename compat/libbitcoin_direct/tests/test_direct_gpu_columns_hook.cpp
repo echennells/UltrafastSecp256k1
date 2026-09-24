@@ -24,14 +24,16 @@
 //
 // Test-data generation uses CT-backed ufsecp::lbtc::* entrypoints so this file
 // emits no deprecated non-CT signing/keypair warnings.
-#include "ufsecp/libbitcoin.hpp"
-#include "secp256k1/batch_verify.hpp"
-
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
+
+#include "secp256k1/batch_verify.hpp"
+
+#include "gpu_backend.hpp"
+#include "ufsecp/libbitcoin.hpp"
 
 namespace {
 std::uint64_t g_xs = 0x243F6A8885A308D3ull;
@@ -68,6 +70,112 @@ int main() {
           "GpuColumnsAvailableHook self-installed at startup by secp256k1_gpu_host (provider TU retained)");
     check(secp256k1::gpu_columns_available() == ufsecp::lbtc::gpu_available(),
           "secp256k1::gpu_columns_available() and ufsecp::lbtc::gpu_available() agree");
+
+    auto startup_bip352_hook = ufsecp::lbtc::gpu_hook::install_lbtc_bip352_hook(nullptr);
+    ufsecp::lbtc::gpu_hook::install_lbtc_bip352_hook(startup_bip352_hook);
+    check(startup_bip352_hook != nullptr, "BIP-352 hook self-installed at startup by secp256k1_gpu_host");
+    auto startup_bip352_columns_hook = ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(nullptr);
+    ufsecp::lbtc::gpu_hook::install_lbtc_bip352_columns_hook(startup_bip352_columns_hook);
+    check(startup_bip352_columns_hook != nullptr,
+          "column BIP-352 hook self-installed at startup by secp256k1_gpu_host");
+
+    if (ufsecp::lbtc::gpu_available()) {
+        const std::array<std::uint8_t, 32> scan{{0x0f, 0x69, 0x4e, 0x06, 0x80, 0x28, 0xa7, 0x17, 0xf8, 0xaf, 0x6b,
+                                                 0x94, 0x11, 0xf9, 0xa1, 0x33, 0xdd, 0x35, 0x65, 0x25, 0x87, 0x14,
+                                                 0xcc, 0x22, 0x65, 0x94, 0xb3, 0x4d, 0xb9, 0x0c, 0x1f, 0x2c}};
+        const std::array<std::uint8_t, 33> spend{{0x02, 0x5c, 0xc9, 0x85, 0x6d, 0x6f, 0x83, 0x75, 0x35, 0x0e, 0x12,
+                                                  0x39, 0x78, 0xda, 0xac, 0x20, 0x0c, 0x26, 0x0c, 0xb5, 0xb5, 0xae,
+                                                  0x83, 0x10, 0x6c, 0xab, 0x90, 0x48, 0x4d, 0xcd, 0x8f, 0xcf, 0x36}};
+        const std::array<std::uint8_t, 33> point{{0x02, 0x4a, 0xc2, 0x53, 0xc2, 0x16, 0x53, 0x2e, 0x96, 0x19, 0x88,
+                                                  0xe2, 0xa8, 0xce, 0x26, 0x6a, 0x44, 0x7c, 0x89, 0x4c, 0x78, 0x1e,
+                                                  0x52, 0xef, 0x6c, 0xee, 0x90, 0x23, 0x61, 0xdb, 0x96, 0x00, 0x04}};
+        std::uint64_t prefix{};
+        check(ufsecp::lbtc::bip352_scan_prefixes(scan.data(), spend.data(), 1, point.data(), 1, &prefix),
+              "BIP-352 reference prefix");
+
+        // The common scan above may use OpenCL or Metal; CUDA timings only
+        // apply when a CUDA device is present as well.
+        if (secp256k1::gpu::is_available(1)) {
+            auto backend = secp256k1::gpu::create_backend(1);
+            check(backend != nullptr, "CUDA backend creation");
+            if (backend) {
+                check(backend->init(0) == secp256k1::gpu::GpuError::Ok, "CUDA backend initialization");
+                secp256k1::gpu::GpuBackend::TimingBreakdownMs timing{};
+                std::uint64_t timed_prefix{};
+                check(backend->bip352_scan_batch_multispend_timed(scan.data(), spend.data(), 1, point.data(), 1,
+                                                                  &timed_prefix, &timing) == secp256k1::gpu::GpuError::Ok,
+                      "BIP-352 timed scan");
+                check(timed_prefix == prefix, "BIP-352 timed scan result");
+                check(timing.setup_ms > 0.0 && timing.h2d_ms > 0.0 && timing.kernel_ms > 0.0 && timing.d2h_ms > 0.0,
+                      "BIP-352 CUDA event timings");
+            }
+        }
+
+        const std::array<std::uint32_t, 3> correlates{{7, 7, 8}};
+        std::array<std::uint8_t, 24> prefixes{};
+        for (int byte = 0; byte < 8; ++byte)
+            prefixes[8 + byte] = static_cast<std::uint8_t>(prefix >> (56 - byte * 8));
+        std::array<std::uint8_t, 99> points{};
+        std::memcpy(points.data(), point.data(), point.size());
+        std::memcpy(points.data() + 33, point.data(), point.size());
+        std::memcpy(points.data() + 66, point.data(), point.size());
+        std::array<std::uint8_t, 3> matches{};
+        check(ufsecp::lbtc::bip352_scan_columns(scan.data(), spend.data(), 1,
+                                                reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                prefixes.data(), points.data(), 3, matches.data()),
+              "BIP-352 column scan");
+        check(matches[0] == 1 && matches[1] == 0 && matches[2] == 0, "BIP-352 column group matches");
+
+        // A matching spend must not conceal a malformed spend later in the
+        // same transaction. Compare the accelerated path with the CPU path in
+        // both orders; the all-zero compressed key is invalid.
+        const std::array<std::uint8_t, 8> expected_prefix{{0x3e, 0x9f, 0xce, 0x73, 0xd4, 0xe7, 0x7a, 0x48}};
+        for (int valid_index = 0; valid_index < 2; ++valid_index) {
+            std::array<std::uint8_t, 66> ordered_spends{};
+            std::memcpy(ordered_spends.data() + valid_index * 33, spend.data(), spend.size());
+            std::uint8_t cpu_match = 0xff;
+            check(!ufsecp::lbtc::bip352_scan_columns(scan.data(), ordered_spends.data(), 2,
+                                                     reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                     expected_prefix.data(), point.data(), 1, &cpu_match, 1),
+                  "BIP-352 CPU rejects invalid spend in either order");
+            check(cpu_match == 0, "BIP-352 CPU invalid spend clears match");
+            std::uint8_t gpu_match = 0xff;
+            check(!ufsecp::lbtc::bip352_scan_columns(scan.data(), ordered_spends.data(), 2,
+                                                     reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                     expected_prefix.data(), point.data(), 1, &gpu_match),
+                  "BIP-352 GPU rejects invalid spend in either order");
+            check(gpu_match == 0, "BIP-352 GPU invalid spend clears match");
+        }
+
+        secp256k1::fast::Scalar scan_scalar;
+        secp256k1::fast::Point input_point;
+        check(secp256k1::fast::Scalar::parse_bytes_strict_nonzero(scan.data(), scan_scalar) &&
+                  ufsecp::lbtc::detail::decompress(point.data(), input_point),
+              "BIP-352 infinity fixture parse");
+        const auto shared = input_point.scalar_mul(scan_scalar);
+        auto serialized = shared.to_compressed();
+        std::array<std::uint8_t, 37> tagged_input{};
+        std::memcpy(tagged_input.data(), serialized.data(), serialized.size());
+        const auto hash = secp256k1::tagged_hash("BIP0352/SharedSecret", tagged_input.data(), tagged_input.size());
+        secp256k1::fast::Scalar tweak;
+        check(secp256k1::fast::Scalar::parse_bytes_strict(hash.data(), tweak), "BIP-352 infinity fixture tweak");
+        const auto inverse = secp256k1::fast::Point::generator().scalar_mul(tweak).negate().to_compressed();
+        std::array<std::uint8_t, 66> spends{};
+        std::memcpy(spends.data(), inverse.data(), inverse.size());
+        std::memcpy(spends.data() + 33, spend.data(), spend.size());
+        matches.fill(0);
+        check(!ufsecp::lbtc::bip352_scan_columns(scan.data(), spends.data(), 2,
+                                                 reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                 prefixes.data(), points.data(), 3, matches.data()),
+              "BIP-352 infinity candidate rejected");
+        check(matches[0] == 0, "BIP-352 infinity candidate fails closed");
+
+        points[33] ^= 1;
+        check(!ufsecp::lbtc::bip352_scan_columns(scan.data(), spend.data(), 1,
+                                                 reinterpret_cast<const std::uint8_t*>(correlates.data()),
+                                                 prefixes.data(), points.data(), 3, matches.data()),
+              "BIP-352 mismatched group rejected");
+    }
 
     // (2) Transparent accelerated path: a small valid ECDSA + Schnorr column batch
     // through the unified engine surface. With the hook installed the engine

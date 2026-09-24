@@ -231,6 +231,7 @@ int test_regression_opencl_kernel_closure_run();     // OpenCL scan-only embed i
 int test_regression_metal_buffer_binding_order_run(); // Metal dispatch order == kernel [[buffer(N)]] order
 int test_regression_precompute_noop_reconfigure_run();// identical configure_fixed_base must not rebuild the table
 int test_regression_fixed_base_cache_lifecycle_run(); // fixed-base cache: no CWD litter, cache_dir honoured on write
+int test_regression_process_resource_release_run();  // release_process_resources() frees the retained tables + pool (#430)
 int test_regression_tls_segment_alignment_run();      // PT_TLS p_align >= 64 (Android arm64 loadability)
 int test_regression_ct_scalar_inverse_zero_run();   // SEC-001: CT scalar_inverse zero-branch removal (2026-05-21)
 int test_regression_ct_ops_run();                   // SEC-002/007/008/010, CT-004/005: CT ops regressions (consolidated 2026-06-09 — was split across two byte-identical files)
@@ -1765,6 +1766,8 @@ static const AuditModule ALL_MODULES[] = {
     { "regression_tls_segment_alignment", "The linked image's PT_TLS segment is aligned to >= 64 bytes, which Android arm64 Bionic requires to load an executable at all (TLS-ALIGN-1..2)", "memory_safety", test_regression_tls_segment_alignment_run, false },
     // === 2026-09-07 fixed-base disk cache lifecycle (evoskuil: cache_w18.bin left behind) ===
     { "regression_fixed_base_cache_lifecycle", "Fixed-base precompute cache writes nothing by default, honours a configured cache_dir on the FIRST write (not only on read), never falls back to the CWD, and leaves a caller-named file alone (FBC-1..4)", "memory_safety", test_regression_fixed_base_cache_lifecycle_run, false },
+    // === 2026-09-22 process-wide resource teardown (#430, evoskuil: 259 blocks live at exit) ===
+    { "regression_process_resource_release", "release_process_resources() frees the fused dual-mul generator tables and joins the batch worker pool, is idempotent from both the pristine and the used state, and the library rebuilds correctly afterwards -- the rebuilt a*G + b*P is byte-identical AND matches an independent two-scalar-mul answer, and the ufsecp_release_process_resources() C ABI wrapper reaches the same machinery (PRR-1..7)", "memory_safety", test_regression_process_resource_release_run, false },
     // === 2026-09-07 Metal shader include closure (macOS runtime-compile fallback) ===
     { "regression_metal_shader_closure", "Metal shader include closure is complete and fully copied: every quoted include of secp256k1_kernels.metal resolves, SHADER_FILES covers the whole closure, and the loader keeps no hardcoded header list (MSC-1..4)", "memory_safety", test_regression_metal_shader_closure_run, false },
     // === 2026-09-21 OpenCL scan-only embed closure (#415, the OpenCL twin of #335) ===

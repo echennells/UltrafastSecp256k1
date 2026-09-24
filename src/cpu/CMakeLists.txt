@@ -29,6 +29,7 @@ set(SECP256K1_SOURCES
     src/scalar.cpp
     src/point.cpp
     src/precompute.cpp
+    src/process_resources.cpp  # explicit teardown for process-wide tables + the batch pool (GH#430)
     src/field_asm.cpp      # Tier 2: BMI2 intrinsics (runtime detection)
     src/glv.cpp            # GLV endomorphism optimization
     src/selftest.cpp       # Self-test with known arithmetic vectors
@@ -1243,6 +1244,13 @@ endif()
 # All use benchmark_harness.hpp (RDTSC/chrono, IQR, thread pinning).
 # =============================================================================
 if(SECP256K1_BUILD_BENCH)
+    add_executable(bench_hamburg_ecmult bench/bench_hamburg_ecmult.cpp)
+    target_link_libraries(bench_hamburg_ecmult PRIVATE ${SECP256K1_LIB_NAME})
+
+    # Fixed-input native CT inverse primitive gate for before/after experiments.
+    add_executable(bench_ct_inverse bench/bench_ct_inverse.cpp)
+    target_link_libraries(bench_ct_inverse PRIVATE ${SECP256K1_LIB_NAME})
+
     # CT (Constant-Time) layer benchmark -- fast:: vs ct:: overhead comparison
     add_executable(bench_ct bench/bench_ct.cpp)
     target_link_libraries(bench_ct PRIVATE ${SECP256K1_LIB_NAME})
@@ -1415,6 +1423,26 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME selftest COMMAND run_selftest)
+
+    add_executable(test_ct_point_io_standalone tests/test_ct_point_io.cpp)
+    target_link_libraries(test_ct_point_io_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME ct_point_io COMMAND test_ct_point_io_standalone)
+
+    add_executable(test_ct_inverse_gate_standalone tests/test_ct_inverse_gate.cpp)
+    target_link_libraries(test_ct_inverse_gate_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME ct_inverse_gate COMMAND test_ct_inverse_gate_standalone)
+
+    add_executable(test_hamburg_ecmult_witness_standalone
+        tests/test_hamburg_ecmult_witness.cpp)
+    target_link_libraries(test_hamburg_ecmult_witness_standalone
+        PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME hamburg_ecmult_witness COMMAND test_hamburg_ecmult_witness_standalone)
+
+    add_executable(test_xonly_invalid_contract_standalone
+        tests/test_xonly_invalid_contract.cpp)
+    target_link_libraries(test_xonly_invalid_contract_standalone
+        PRIVATE ${SECP256K1_LIB_NAME})
+    add_test(NAME xonly_invalid_contract COMMAND test_xonly_invalid_contract_standalone)
 
     # Standalone affine batch add test (independent of full test runner)
     add_executable(test_batch_add_affine_standalone

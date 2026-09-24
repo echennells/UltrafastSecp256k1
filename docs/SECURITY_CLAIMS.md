@@ -2,6 +2,89 @@
 
 **UltrafastSecp256k1 v4.6.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
+### 2026-09-24 - ECDH serialization and x-only input contracts
+
+The C++ ECDH variants and shim keep the secret-derived shared point in the
+raw CT Jacobian representation and use fixed-size point serializers, not
+`Point` affine conversion. Public peer validation may branch on public
+coordinates; the secret scalar retains the existing CT multiplication route.
+The result-valid mask is declassified only after serialization and output
+masking. Valid-input ECDH bytes, rejection results, and shim callback inputs
+and return values retain their contracts; custom hash callbacks are outside
+the library's constant-time guarantee.
+
+`ct::ecmult_const_xonly` rejects zero denominators and invalid curve lifts.
+Native validation is variable-time on public `xn`/`xd`, not on secret `q`.
+BIP-324 and ElligatorSwift alone use the private trusted entry with
+decoder-produced valid coordinates and nonzero denominator; no unchecked
+public API is introduced. Scope guards erase the named shared-point/buffer
+storage and shim parsed-key/default-hash scratch on every exit after creation;
+the serializer erases its own coordinate and byte scratch before return.
+Returned secrets and caller-owned inputs remain the caller's responsibility.
+
+The focused contract tests are `ct_point_io`, `selftest`'s ECDH fixtures,
+`secp256k1_shim_test`, `regression_ecdh_xy64_erase`, and
+`xonly_invalid_contract`. The serializer and ECDH taint-probe targets and
+required marker defines are listed in [`CT_VERIFICATION.md`](CT_VERIFICATION.md).
+Their presence and byte checks are not a new full Valgrind/dudect verdict,
+portable-backend certification, or speed claim. Existing portable-field,
+ladder-taint, and BIP-352 adapter limitations remain separate obligations.
+
+### 2026-09-23 - libbitcoin direct BIP-352 column scan (#431)
+
+`ufsecp::lbtc::bip352_scan_columns` is a secret-bearing C++ adapter:
+`scan_privkey32` is the receiver's private scan key. Adjacent rows with the
+same four-byte correlate form one transaction; only the first row of a group
+is marked when a candidate matches any row's public eight-byte prefix.
+`max_threads == 1` selects the serial CPU path. Otherwise an installed GPU
+provider may call the existing `bip352_scan_batch_multispend` once for the
+compacted groups; an unavailable or declining provider falls back to CPU.
+
+The CPU path strictly rejects zero and out-of-range scan scalars, uses
+`ct::scalar_mul` and `ct::generator_mul` for scalar multiplications, and
+clears `matches_out` after a failed group computation. Its subsequent
+secret-derived `spend.add(offset)` uses `fast::Point::add`; that addition
+remains a timing review blocker, with no end-to-end CT release claim. The
+GPU path inherits the selected backend's scan-key validation and device
+buffer contract, but its new host grouping and prefix comparison are outside
+the earlier C ABI's fail-closed wrapper. A trusted single-tenant GPU remains
+required when this provider is used. The adapter's complete timing behavior
+is not claimed constant-time; see [`CT_VERIFICATION.md`](CT_VERIFICATION.md).
+
+The GPU provider's host vector of key-derived candidate prefixes is erased by
+an exit guard before its storage is released, including on backend failure or
+CPU-fallback decline. It checks every candidate for the backend's zero
+sentinel before accepting a match, so an invalid later spend key cannot be
+hidden by an earlier match. The host lifecycle is recorded in
+[`SECRET_LIFECYCLE.md`](SECRET_LIFECYCLE.md); backend device-buffer erasure is
+a separate guarantee.
+
+### 2026-09-22 - explicit release of process-wide state (GitHub #430)
+
+**New API, no claim moves.** `secp256k1::release_process_resources()` and
+`secp256k1::process_resources_active()` (header `secp256k1/process_resources.hpp`),
+plus the C ABI wrapper `ufsecp_release_process_resources()`. They free the fused
+dual-mul generator tables and join the batch-verify worker pool.
+
+What a consumer can rely on:
+
+- **Default behaviour is unchanged.** Nothing is released unless the embedder
+  calls it. The tables and the pool are still retained for the process lifetime
+  otherwise, deliberately: the pool has no automatic destruction because its
+  destructor joins threads, which deadlocks under the Windows loader lock during
+  DLL unload.
+- **Correctness after a release.** The next call rebuilds what it needs. Covered
+  by `audit/test_regression_process_resource_release.cpp` PRR-5: the rebuilt
+  `a*G + b*P` is byte-identical to the pre-release answer and equal to an
+  independent two-scalar-mul computation.
+- **Precondition, not a guarantee:** no other thread may be inside the library
+  during the call. It is not thread-safe against a concurrent verify, by design --
+  making it so would put a lock on the verify hot path.
+- **No signing CT boundary moves.** The release call frees public generator
+  tables and joins the worker pool; after #431 that pool can also have served
+  per-call BIP-352 scan jobs. Release is not a key-erasure operation.
+- **Not covered:** the ESP32/STM32 arm's function-local generator table.
+
 ### 2026-09-21 - v4.6.0 addendum: the fixed-base cache and a trust boundary we had not named
 
 Found by SonarCloud's gate on `main` while preparing the release, and added to

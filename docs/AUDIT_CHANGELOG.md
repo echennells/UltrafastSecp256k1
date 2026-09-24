@@ -1,5 +1,89 @@
 # Audit Changelog
 
+## 2026-09-22 - 259 allocations retained at process exit had no way to be released
+
+Reported by evoskuil (libbitcoin) as GitHub issue #430, against
+`UltrafastSecp256k1-vc145` 4.5.0.3 on MSVC v145 / x64 / static debug CRT.
+
+**What the reporter saw.** Linking the library into a Boost.Test build -- which
+enables `_CRTDBG_LEAK_CHECK_DF` -- makes the CRT leak detector report 259 blocks,
+~1.32 MB, live at process termination:
+
+| count | size | total |
+|------:|-----:|------:|
+| 1 | 1,310,720 | 1,310,720 |
+| 1 | 2,256 | 2,256 |
+| 1 | 488 | 488 |
+| 256 | 16 | 4,096 |
+
+The report is unusually well-made and rules out the obvious dismissals itself.
+The block set is byte-identical whether one test case runs or all 6,255 do, so it
+is one-time and bounded rather than accumulating. Rebuilding the identical source
+against bitcoin-core/secp256k1 instead produces no leak report at all. And it is
+not a static-destruction-ordering artifact: the reporter instrumented the
+destructor of a function-local static and of a `thread_local` in the embedding
+application and confirmed both print *before* `Detected memory leaks!`, so the
+memory is genuinely still allocated when the CRT dump runs.
+
+**What it is.** Two pieces of process-wide lazily-built state, plus what the
+second one keeps alive:
+
+  * `src/cpu/src/point.cpp`, `get_dual_mul_gen_tables()` -- the fused dual-mul
+    G/H tables, w=15, 8192 entries each. That is the 1,310,720-byte block, and
+    the reporter's stack names it exactly: `get_dual_mul_gen_tables` <-
+    `Point::dual_scalar_mul_gen_point` <- `ecdsa_verify`.
+  * `detail::batch_worker_pool()` -- the persistent batch-verify worker pool.
+    That is the 488-byte pool object and the 2,256-byte thread vector, and it is
+    almost certainly the 256 x 16-byte blocks too: those are `thread_local` state
+    in workers that never exit, because the pool is never stopped.
+
+**Why they were retained, and why that reason stands.** An immortal table has no
+static-destruction-order hazard. The pool's case is stronger: its destructor
+joins the worker threads, and at static-destruction time on Windows that runs
+during DLL unload while the loader lock is held, where joining deadlocks -- the
+workers need that same lock to exit. The existing comment in the source said so,
+and it is right. Both of the reporter's alternatives to retention --
+`static const std::unique_ptr<...>`, or a static array -- reintroduce exactly
+that, so neither was taken.
+
+**The fix.** The retention stays the default; what was missing was a way for the
+embedder to hand it back on a thread *they* choose, from their own code, where
+the loader lock is not held. That is `secp256k1::release_process_resources()`
+(new header `secp256k1/process_resources.hpp`) and its C ABI wrapper
+`ufsecp_release_process_resources()`. It is idempotent, it is a no-op when the
+library was never used, and it is deliberately not a one-way door: the next call
+into the library rebuilds what it needs. Its companion
+`secp256k1::process_resources_active()` exists so a caller can assert the release
+happened rather than trust that it did.
+
+The two singletons moved from magic statics to an atomic pointer plus a
+construction mutex, because a magic static cannot be nulled. The hot path is
+still a single acquire load -- the same cost class as the magic-static guard it
+replaces -- and the mutex is taken only on the first call after a release. The
+pool's accessor moved into `secp256k1/detail/batch_pool.hpp` as `inline`, because
+`batch_verify.cpp` is conditional on `SECP256K1_BUILD_PIPPENGER` while
+`process_resources.cpp`, which calls the release, is not.
+
+Deliberately NOT tied to `ufsecp_ctx_destroy()`: this state is process-global, and
+destroying one context must not free what another context is still using.
+
+**Coverage.** `audit/test_regression_process_resource_release.cpp`, PRR-1..7. The
+load-bearing assertion is PRR-3 (`process_resources_active()` is false after the
+release); stubbing the release to a no-op turns PRR-3, PRR-4 and PRR-6 red, which
+was verified rather than assumed. PRR-5 is the other half: it recomputes
+`a*G + b*P` through the very path that owns the freed table and requires the
+answer to be byte-identical to the pre-release one **and** equal to the same
+product computed independently as two separate scalar multiplications -- so a
+rebuild that is merely self-consistent still fails.
+
+**Not covered, stated rather than hidden.** The ESP32/STM32 arm of
+`Point::dual_scalar_mul_gen_point` keeps its own generator table in a
+function-local static, which `release_process_resources()` cannot reach. Reaching
+it would mean hoisting it and `WINDOW_G`/`TABLE_SIZE_G` to file scope in a path no
+desktop host builds or tests. Those targets have no debug CRT and no leak
+sanitizer to report the retention to, and a single never-exiting firmware process
+has nothing to hand the memory back to.
+
 ## 2026-09-21 - the fixed-base cache could be planted in a world-writable directory
 
 Found by SonarCloud's quality gate on `main` (`cpp:S5443`), and it is a real

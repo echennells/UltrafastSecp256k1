@@ -1,6 +1,80 @@
 # Secret Lifecycle Review
 
-**Last updated**: 2026-09-21 | **Version**: 4.6.0
+**Last updated**: 2026-09-24 | **Version**: 4.6.0
+
+### 2026-09-24 - raw Jacobian ECDH and erase-on-exit scratch
+
+The C++ ECDH variants now hold the shared result in a local
+`CTJacobianPoint`, guarded by `secure_erase` on every exit after creation.
+Compressed-point and x-coordinate hash-input buffers also have exit guards.
+The fixed-size serializers erase their local coordinates, inverse powers and
+byte arrays before returning; they do not convert through a public `Point`.
+Only after serialization is the result-valid mask declassified for rejection.
+Returned digest/raw-secret bytes are intentional outputs, not erased scratch.
+
+The shim guards its copied secret-key bytes, parsed scalar, raw Jacobian and
+`xy64` callback-input buffer, including parse failure and callback return.
+Its default callback also guards the compressed hash input and digest scratch.
+A custom callback owns any copies it retains and is outside the library's CT
+claim; caller-owned input/output storage remains the caller's responsibility.
+This describes explicit named-storage erasure, not a guarantee about every
+compiler-generated register or spill copy.
+
+`ct_point_io`, the ECDH fixtures in `selftest`, `secp256k1_shim_test`, and
+`regression_ecdh_xy64_erase` check output preservation and rejection behavior;
+they do not by themselves prove post-return memory erasure. The serializer and
+ECDH taint-probe targets are documented in [`CT_VERIFICATION.md`](CT_VERIFICATION.md).
+This documentation update claims no fresh full Valgrind/dudect campaign.
+
+### 2026-09-23 - libbitcoin direct BIP-352 column scan (#431)
+
+The new `ufsecp::lbtc::bip352_scan_columns` accepts a caller-owned
+`scan_privkey32`; ownership and erasure of those 32 input bytes remain with
+the caller. The CPU fallback strictly parses it into a local scalar, which
+an exit guard erases. Per-group shared points, derived tweak scalars and
+temporary hash bytes are explicitly erased on the normal path and on the
+handled invalid-tweak path. Group jobs capture the scan scalar by reference;
+they do not place a copy in persistent pool state, and the call waits for
+the jobs to finish before its scalar guard runs.
+
+The CPU scan **does use `batch_worker_pool()` for secret-bearing work**. Its
+threads can hold per-call key-derived intermediates while a scan runs. The
+pool's later `release_process_resources()` call joins threads but is not a
+secret-erasure API. Existing claims that this pool is verification-only apply
+to its use before this adapter was added, not to the adapter itself.
+
+The optional GPU hook passes the caller's scan key to the existing
+`bip352_scan_batch_multispend` backend, whose backend-specific key and device
+buffer erasure contract is recorded below. It groups public tweak points on
+the host and receives a vector of scan-key-derived candidate prefixes. A
+`CandidateGuard` erases the vector's allocated elements with `secure_erase`
+before `std::vector` releases storage, on success, backend failure, invalid
+candidate and exception exits after allocation. This new host-buffer erasure
+is in the adapter; the backend's separate device-buffer erasure contract is
+unchanged. The caller still owns and must erase `scan_privkey32` when done.
+
+### 2026-09-22 - process-wide state can now be released (GitHub #430): what that frees, and what it does not
+
+`secp256k1::release_process_resources()` / `ufsecp_release_process_resources()`
+free the fused dual-mul generator tables and stop the batch worker pool. Neither
+is secret material, and the release is not a zeroization mechanism:
+
+- **The generator tables hold multiples of G and H = 2^128·G** -- public
+  constants, identical for every user of the curve. They are freed with plain
+  `delete`; there is nothing to erase.
+- **The worker pool also serves BIP-352 column scans after #431.** Batch verify
+  remains variable-time over public signatures, pubkeys and messages. A column
+  scan can give a worker access to the scan scalar and transient derived data
+  for the duration of its job. Joining workers ends their thread-local state;
+  it does not replace the scan call's own erasure obligations.
+
+The #430 release API itself adds no erase obligation. It exists
+because the retained blocks were indistinguishable from a leak in the MSVC debug
+CRT and leak sanitizers, not because anything sensitive outlived its use.
+
+The process-wide tables contain no secret. Signing-call erasure remains as
+described below; the later column-scan adapter has its own per-call secret
+lifetime and host-candidate erasure described above.
 
 ### 2026-09-21 - v4.6.0 addendum: the cache file on disk holds no secret, and its directory is now private
 
@@ -1060,9 +1134,12 @@ Erases: `shared_x` (ECDH raw), `kdf` (64B enc+mac keys), `eph_privkey`, `eph_byt
 
 Erases: entropy buffers after mnemonic generation and seed derivation.
 
-### ECDH (`src/cpu/src/ecdh.cpp`) -- 2 calls
+### ECDH (`src/cpu/src/ecdh.cpp` and internal point-IO helper)
 
-Erases: compressed point representation, `x_bytes` after shared secret derivation.
+Erases: guarded raw Jacobian result and compressed/x-coordinate hash inputs;
+the serializer separately erases coordinate, inverse-power and byte scratch.
+The returned digest or raw secret remains caller-owned. See the 2026-09-24
+entry for shim callback and erasure limits.
 
 ---
 
@@ -1079,7 +1156,7 @@ Erases: compressed point representation, `x_bytes` after shared secret derivatio
 | FROST nonces (d, ei) | Function-local | `frost.cpp` | Cleared on return |
 | FROST signing share | Key pkg member | C ABI wrapper | Cleared on return |
 | FROST signer-set scratch | Derived/public transcript data | `frost.cpp` | Reduced in 2026-04-14 refactor |
-| ECDH shared secret | Function-local | `ecdh.cpp` + C ABI | CT mul |
+| ECDH shared secret | Function-local scratch; output caller-owned | `ecdh.cpp` guards + internal point-IO; shim guards | Raw CT Jacobian mul + fixed-size serialization; profile limits above |
 | ECIES derived keys | Function-local | `ecies.cpp` | AES-CBC key schedule |
 | BIP-32 chain code | Derived state | C ABI wrapper | HMAC-SHA512 |
 | BIP-39 entropy | Function-local | `bip39.cpp` | Zeroized after use |
