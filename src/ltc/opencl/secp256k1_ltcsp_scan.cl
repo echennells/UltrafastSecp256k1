@@ -44,7 +44,7 @@ __constant uint LTCSP_SHAREDSECRET_MIDSTATE[8] = {
 
 // H_LTCSP/SharedSecret(data) = SHA256(tag || tag || data)
 // Midstate already includes the two copies of SHA256(tag) per BIP-340 §D.
-inline void ltcsp_tagged_sha256_impl(const uchar* data, uint data_len, uchar out[32]) {
+static inline void ltcsp_tagged_sha256_impl(const uchar* data, uint data_len, uchar out[32]) {
     SHA256Ctx ctx;
     for (int i = 0; i < 8; i++) ctx.h[i] = LTCSP_SHAREDSECRET_MIDSTATE[i];
     ctx.buf_len  = 0;
@@ -55,7 +55,7 @@ inline void ltcsp_tagged_sha256_impl(const uchar* data, uint data_len, uchar out
 
 // Serialize Jacobian point to 33-byte compressed form + 4 zero bytes (37 total).
 // Matches bip352_shared_secret_input_impl — same layout for the hash input.
-inline void ltcsp_shared_secret_input_impl(const JacobianPoint* p, uchar ser[37]) {
+static inline void ltcsp_shared_secret_input_impl(const JacobianPoint* p, uchar ser[37]) {
     FieldElement z_inv, z_inv2, z_inv3, x_aff, y_aff;
     field_inv_impl(&z_inv, &p->z);
     field_sqr_impl(&z_inv2, &z_inv);
@@ -73,7 +73,7 @@ inline void ltcsp_shared_secret_input_impl(const JacobianPoint* p, uchar ser[37]
 }
 
 // Extract first 8 bytes of affine X coordinate as uint64 prefix (for fast filtering).
-inline ulong ltcsp_point_prefix64_impl(const JacobianPoint* p) {
+static inline ulong ltcsp_point_prefix64_impl(const JacobianPoint* p) {
     FieldElement z_inv, z_inv2, x_aff;
     field_inv_impl(&z_inv, &p->z);
     field_sqr_impl(&z_inv2, &z_inv);
@@ -90,7 +90,7 @@ inline ulong ltcsp_point_prefix64_impl(const JacobianPoint* p) {
 
 // Optimised GLV scalar-multiply with pre-decomposed scan key (same as BIP-352).
 // Precomputed wNAF digits in __constant memory; one field_inv shared across table.
-inline void ltcsp_scalar_mul_glv_predecomp_impl(
+static inline void ltcsp_scalar_mul_glv_predecomp_impl(
     JacobianPoint*                  r,
     const AffinePoint*              p,
     __constant const LTCSPScanKeyGlv* scan)

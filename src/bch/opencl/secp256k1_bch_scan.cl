@@ -33,14 +33,14 @@ __constant BCHScanKeyGlv  BCH_SCANKEY_WNAF;
 __constant AffinePoint    BCH_SPEND_AFFINE;
 
 // Double-SHA256: SHA256(SHA256(data))
-inline void bch_double_sha256(const uchar* data, uint len, uchar out[32]) {
+static inline void bch_double_sha256(const uchar* data, uint len, uchar out[32]) {
     uchar inner[32];
     sha256_oneshot_impl(data, len, inner);
     sha256_oneshot_impl(inner, 32, out);
 }
 
 // Shared secret hash: c = SHA256(SHA256(ser(S)) || outpoint[36])
-inline void bch_shared_secret_hash(
+static inline void bch_shared_secret_hash(
     const uchar ser_S[33],          // compressed S
     const uchar outpoint[36],       // txid[32] + vout[4]
     uchar c_out[32])
@@ -56,7 +56,7 @@ inline void bch_shared_secret_hash(
 }
 
 // Payment key hash: t_k = SHA256(spend_pubkey[33] || c[32] || ser32(k)[4])
-inline void bch_payment_key_hash(
+static inline void bch_payment_key_hash(
     const uchar spend_pubkey[33],
     const uchar c[32],
     uint k,
@@ -73,7 +73,7 @@ inline void bch_payment_key_hash(
 }
 
 // GLV scalar multiply with precomputed scan key (same as LTC-SP/BIP-352)
-inline void bch_scalar_mul_glv_predecomp(
+static inline void bch_scalar_mul_glv_predecomp(
     JacobianPoint*                r,
     const AffinePoint*            p,
     constant const BCHScanKeyGlv* scan)
@@ -116,7 +116,7 @@ inline void bch_scalar_mul_glv_predecomp(
 }
 
 // Extract 64-bit x-coordinate prefix
-inline ulong bch_point_prefix64(const JacobianPoint* p) {
+static inline ulong bch_point_prefix64(const JacobianPoint* p) {
     FieldElement z_inv, z_inv2, x_aff;
     field_inv_impl(&z_inv, &p->z);
     field_sqr_impl(&z_inv2, &z_inv);
