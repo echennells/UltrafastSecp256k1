@@ -155,13 +155,13 @@ int main(int argc, char** argv) {
         std::puts("FAIL: second witness scalar must be canonical and nonzero");
         return 1;
     }
-    ok = check_xonly(generator, second_scalar, second_expected_x,
-                     "generator x, independent near-order scalar") && ok;
-    ok = check_reference(generator, scalar, "Hamburg witness as x/7 fraction",
-                         FieldElement::from_uint64(7)) && ok;
-    ok = check_reference(generator, Scalar::zero(), "generator x, scalar 0") && ok;
-    ok = check_reference(generator, Scalar::zero() - Scalar::one(),
-                         "generator x, scalar n-1") && ok;
+    ok &= check_xonly(generator, second_scalar, second_expected_x,
+                      "generator x, independent near-order scalar");
+    ok &= check_reference(generator, scalar, "Hamburg witness as x/7 fraction",
+                          FieldElement::from_uint64(7));
+    ok &= check_reference(generator, Scalar::zero(), "generator x, scalar 0");
+    ok &= check_reference(generator, Scalar::zero() - Scalar::one(),
+                          "generator x, scalar n-1");
 
     std::uint64_t state = 0x73e6d9b14c25f08aULL;
     for (std::size_t i = 0; i < 256; ++i) {
@@ -171,9 +171,9 @@ int main(int argc, char** argv) {
         const auto peer = generator.scalar_mul(peer_scalar);
         char name[64];
         std::snprintf(name, sizeof(name), "deterministic peer/scalar %zu", i);
-        ok = check_reference(peer, test_scalar, name) && ok;
+        ok &= check_reference(peer, test_scalar, name);
         std::snprintf(name, sizeof(name), "fractional peer/scalar %zu", i);
-        ok = check_reference(peer, test_scalar, name, denominator) && ok;
+        ok &= check_reference(peer, test_scalar, name, denominator);
     }
     if (ok) std::puts("PASS: Hamburg x-only differential cases");
     return ok ? 0 : 1;
