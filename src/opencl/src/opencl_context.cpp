@@ -2653,11 +2653,11 @@ std::vector<std::pair<std::string, std::vector<DeviceInfo>>> enumerate_devices()
         std::vector<DeviceInfo> devices;
 
         cl_uint num_devices = 0;
-        clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, 0, nullptr, &num_devices);
+        clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, 0, nullptr, &num_devices);
 
         if (num_devices > 0) {
             std::vector<cl_device_id> device_ids(num_devices);
-            clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, num_devices, device_ids.data(), nullptr);
+            clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, num_devices, device_ids.data(), nullptr);
 
             for (cl_uint j = 0; j < num_devices; j++) {
                 DeviceInfo info;
