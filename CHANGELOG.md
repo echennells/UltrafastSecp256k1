@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.1] - 2026-09-25
+
 ### Fixed
-- **OpenCL AMD linking (GH-436)**: plain `inline` (and non-static `FORCE_INLINE` on non-NVIDIA) helpers had no external definition under OpenCL C99 rules. AMD/ROCm declined inlining for larger field helpers (e.g. `field_inv_impl`) → "undefined hidden symbol". Fixed by making all helper `FORCE_INLINE` and standalone `inline` definitions `static inline` (TU-local). NVIDIA path unchanged in effect (still `always_inline`). Affects all `.cl` kernel helpers (field/point, extended sha, bip*, keccak, ct*, affine, hash160 etc.). `hash160` previously worked by luck (always inlined). No behavior change.
+- **OpenCL AMD/ROCm kernel linking (GH-436)**: plain `inline` helpers had no external definition. Fixed by using `static inline` for all helpers (FORCE_INLINE macro + direct in other .cl files). All programs now link on AMD.
+- **GPU support for libbitcoin-direct consumers (GH-434, GH-435)**: 
+  - Device selection restricted to real GPUs (CL_DEVICE_TYPE_GPU), CPU OpenCL devices no longer reported as available.
+  - Runtime loading for OpenCL (no load-time dependency on OpenCL.dll / libOpenCL.so for static consumers).
+  - Kernel sources embedded (or reliable module-relative discovery) so installed/static consumers find them without extra copies or env vars.
+  - Metal library installed and discoverable on macOS after build tree removal.
+  - Metal preferred over OpenCL on Apple platforms.
+  - ROCm/HIP path registered where possible.
+  - Hook retention exported for pkg-config / installed static libbitcoin-direct consumers.
+- **Allocations retained at exit (GH-430)**: Generator tables moved to static storage (no heap magic static), explicit `release_process_resources()` / C ABI entry point, batch pool properly joined. Leak detectors no longer report the tables as leaks when release is used.
+- **Packaging / CI fixes**: RPM build on Fedora now succeeds (libatomic + proper linker flags). CI Advisory Windows/MSVC excludes GPU hardware-dependent tests that cannot run on hosted runners. Linux packages workflow can now produce .deb/.rpm artifacts.
+- Other stability and regression guards for the above surfaces wired into unified audit runner and documented.
+
+All open issues at time of preparation addressed in this release. 4.6.1 release artifacts (deb/rpm) should now generate cleanly via the packaging workflow.
 
 ## [4.6.0] - 2026-09-24
 
