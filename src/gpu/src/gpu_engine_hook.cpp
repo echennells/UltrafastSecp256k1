@@ -88,7 +88,9 @@ secp256k1::gpu::GpuBackend* engine_gpu_backend() {  /* call under g_engine_gpu_b
         for (uint32_t i = 0; i < n; ++i) {
             if (!secp256k1::gpu::is_available(ids[i])) continue;
             auto b = secp256k1::gpu::create_backend(ids[i]);
-            if (b && b->init(0) == secp256k1::gpu::GpuError::Ok && b->is_ready()) {
+            /* The first enumerated device may be an integrated GPU (ICD order). */
+            if (b && b->init(secp256k1::gpu::preferred_device(*b)) == secp256k1::gpu::GpuError::Ok &&
+                b->is_ready()) {
                 backend = std::move(b);
                 break;
             }

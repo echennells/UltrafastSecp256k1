@@ -45,6 +45,29 @@ void check(bool cond, const char* what) { if (!cond) { std::printf("FAIL: %s\n",
 void rand_sk(std::uint8_t sk[32]) {
     do { for (int i = 0; i < 32; ++i) sk[i] = nb(); } while (!ufsecp::lbtc::seckey_verify(sk));
 }
+
+secp256k1::gpu::DeviceInfo device(std::uint32_t compute_units, bool host_unified_memory) {
+    secp256k1::gpu::DeviceInfo info{};
+    info.compute_units = compute_units;
+    info.host_unified_memory = host_unified_memory;
+    return info;
+}
+
+// The hook initializes the preferred device, not the first enumerated one.
+void check_preferred_device() {
+    using secp256k1::gpu::preferred_device;
+    check(preferred_device(nullptr, 0) == 0, "preferred device of none is 0");
+    const secp256k1::gpu::DeviceInfo one[] = { device(8, true) };
+    check(preferred_device(one, 1) == 0, "preferred device of one is 0");
+    const secp256k1::gpu::DeviceInfo integrated_first[] = { device(96, true), device(28, false) };
+    check(preferred_device(integrated_first, 2) == 1, "discrete preferred over integrated with more units");
+    const secp256k1::gpu::DeviceInfo discrete[] = { device(28, false), device(64, false), device(40, false) };
+    check(preferred_device(discrete, 3) == 1, "most compute units among discrete");
+    const secp256k1::gpu::DeviceInfo tied[] = { device(64, false), device(64, false) };
+    check(preferred_device(tied, 2) == 0, "tie resolves to first enumerated");
+    const secp256k1::gpu::DeviceInfo integrated[] = { device(24, true), device(32, true) };
+    check(preferred_device(integrated, 2) == 1, "most compute units among integrated");
+}
 } // namespace
 
 int main() {
@@ -176,6 +199,8 @@ int main() {
                                                  prefixes.data(), points.data(), 3, matches.data()),
               "BIP-352 mismatched group rejected");
     }
+
+    check_preferred_device();
 
     // (2) Transparent accelerated path: a small valid ECDSA + Schnorr column batch
     // through the unified engine surface. With the hook installed the engine
