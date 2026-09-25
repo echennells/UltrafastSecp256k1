@@ -21,7 +21,7 @@
 // Returns 1 on success, 0 on invalid prefix or non-square y^2.
 // The result has z = 1 (affine Jacobian representation).
 // -----------------------------------------------------------------------------
-inline int frost_decompress_sec1(const __global uchar* sec1_33,
+static inline int frost_decompress_sec1(const __global uchar* sec1_33,
                                   JacobianPoint* out)
 {
     uchar prefix = sec1_33[0];
@@ -44,7 +44,7 @@ inline int frost_decompress_sec1(const __global uchar* sec1_33,
 // Returns 0 if the point is at infinity, 1 on success.
 // Uses field_inv_impl to normalize Z if Z != 1.
 // -----------------------------------------------------------------------------
-inline int frost_jac_to_affine_bytes(const JacobianPoint* p,
+static inline int frost_jac_to_affine_bytes(const JacobianPoint* p,
                                       uchar x_out[32],
                                       int* y_odd_out)
 {

@@ -28,7 +28,7 @@
   #define FORCE_INLINE __attribute__((always_inline)) inline
   #define FORCE_INLINE_STATIC __attribute__((always_inline)) static inline
 #else
-  #define FORCE_INLINE inline
+  #define FORCE_INLINE static inline
   #define FORCE_INLINE_STATIC static inline
 #endif
 

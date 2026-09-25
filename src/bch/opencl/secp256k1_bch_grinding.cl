@@ -36,7 +36,7 @@
 //   V || 0x00 || priv_bytes || msg_hash || extra[4]   (101 bytes)
 //   V || 0x01 || priv_bytes || msg_hash || extra[4]   (101 bytes)
 // =============================================================================
-inline void rfc6979_hedged_nonce_impl(
+static inline void rfc6979_hedged_nonce_impl(
     const Scalar* priv,
     const uchar   msg_hash[32],
     uint          extra_nonce,
@@ -83,7 +83,7 @@ inline void rfc6979_hedged_nonce_impl(
 // Double-SHA256 of a 64-byte input → 32-byte output
 // Used to hash the compact (r || s) signature before prefix check.
 // =============================================================================
-inline void double_sha256_64(const uchar in64[64], uchar out32[32]) {
+static inline void double_sha256_64(const uchar in64[64], uchar out32[32]) {
     uchar inner[32];
     sha256_oneshot_impl(in64, 64, inner);
     sha256_oneshot_impl(inner, 32, out32);
@@ -96,7 +96,7 @@ inline void double_sha256_64(const uchar in64[64], uchar out32[32]) {
 // prefix_bits == 16 → first two bytes must match
 // prefix_bits == 24 → first three bytes must match
 // =============================================================================
-inline bool bch_prefix_matches(
+static inline bool bch_prefix_matches(
     const uchar hash[32],
     uchar       prefix_bits,
     const uchar prefix_data[4])
