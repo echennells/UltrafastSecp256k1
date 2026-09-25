@@ -985,7 +985,14 @@ if(SECP256K1_INSTALL)
                 if(TARGET secp256k1_opencl)
                     string(APPEND SECP256K1_LIBBITCOIN_PC_LIBS
                         " -lsecp256k1_opencl")
-                    set(SECP256K1_LIBBITCOIN_PC_REQUIRES "OpenCL")
+                    # A runtime-loaded OpenCL needs the dynamic loader, not OpenCL.
+                    if(SECP256K1_OPENCL_RUNTIME_LOAD)
+                        foreach(_lbtc_pc_dl_lib ${CMAKE_DL_LIBS})
+                            string(APPEND SECP256K1_LIBBITCOIN_PC_LIBS " -l${_lbtc_pc_dl_lib}")
+                        endforeach()
+                    else()
+                        set(SECP256K1_LIBBITCOIN_PC_REQUIRES "OpenCL")
+                    endif()
                 endif()
                 if(TARGET secp256k1_metal_lib)
                     string(APPEND SECP256K1_LIBBITCOIN_PC_LIBS
