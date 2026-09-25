@@ -48,26 +48,15 @@ __constant uint SHA256_K[64] = {
 // SHA-256 Helpers
 // =============================================================================
 
-inline uint hash_rotr32(uint x, uint n) { return (x >> n) | (x << (32 - n)); }
-inline uint hash_rotl32(uint x, uint n) { return (x << n) | (x >> (32 - n)); }
+static inline uint hash_rotr32(uint x, uint n) { return (x >> n) | (x << (32 - n)); }
+static inline uint hash_rotl32(uint x, uint n) { return (x << n) | (x >> (32 - n)); }
 
 // =============================================================================
 // One-shot SHA-256 (up to 128 bytes input, max 2 blocks)
 // =============================================================================
 // Output: 32 bytes, big-endian (standard SHA-256 byte order)
 
-inline void sha256_oneshot_impl(const uchar* data, uint len, uchar out[32]) {
-    uint h0 = 0x6a09e667U;
-    uint h1 = 0xbb67ae85U;
-    uint h2 = 0x3c6ef372U;
-    uint h3 = 0xa54ff53aU;
-    uint h4 = 0x510e527fU;
-    uint h5 = 0x9b05688cU;
-    uint h6 = 0x1f83d9abU;
-    uint h7 = 0x5be0cd19U;
-
-    // Prepare padded block(s) — max 128 bytes (2 blocks)
-    uchar block[128];
+static inline void sha256_oneshot_impl(const uchar* data, uint len, uchar out[32]) {
     for (int i = 0; i < 128; ++i) block[i] = 0;
     for (uint i = 0; i < len; ++i) block[i] = data[i];
     block[len] = 0x80;

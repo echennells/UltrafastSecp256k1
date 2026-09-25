@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **OpenCL AMD linking (GH-436)**: plain `inline` (and non-static `FORCE_INLINE` on non-NVIDIA) helpers had no external definition under OpenCL C99 rules. AMD/ROCm declined inlining for larger field helpers (e.g. `field_inv_impl`) → "undefined hidden symbol". Fixed by making all helper `FORCE_INLINE` and standalone `inline` definitions `static inline` (TU-local). NVIDIA path unchanged in effect (still `always_inline`). Affects all `.cl` kernel helpers (field/point, extended sha, bip*, keccak, ct*, affine, hash160 etc.). `hash160` previously worked by luck (always inlined). No behavior change.
+
 ## [4.6.0] - 2026-09-24
 
 > **A security and correctness release, with a namespace break in the legacy C

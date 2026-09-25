@@ -27,7 +27,7 @@
 //     doubling formula; this path is negligible in batch GPU search pipelines
 // For non-degenerate inputs, full 2M+1S affine addition as described above.
 // ---------------------------------------------------------------------------
-inline void affine_add_impl(AffinePoint* r,
+static inline void affine_add_impl(AffinePoint* r,
                              const FieldElement* px, const FieldElement* py,
                              const FieldElement* qx, const FieldElement* qy) {
     FieldElement h, rr, t, lam;

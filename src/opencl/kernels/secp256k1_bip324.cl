@@ -18,35 +18,35 @@
 
 // ─── Little-endian load / store helpers ─────────────────────────────────────
 
-inline uint load32_le(const __global uchar* p) {
+static inline uint load32_le(const __global uchar* p) {
     return (uint)p[0]
          | ((uint)p[1] << 8)
          | ((uint)p[2] << 16)
          | ((uint)p[3] << 24);
 }
 
-inline uint load32_le_priv(const uchar* p) {
+static inline uint load32_le_priv(const uchar* p) {
     return (uint)p[0]
          | ((uint)p[1] << 8)
          | ((uint)p[2] << 16)
          | ((uint)p[3] << 24);
 }
 
-inline void store32_le(__global uchar* p, uint v) {
+static inline void store32_le(__global uchar* p, uint v) {
     p[0] = (uchar)(v);
     p[1] = (uchar)(v >> 8);
     p[2] = (uchar)(v >> 16);
     p[3] = (uchar)(v >> 24);
 }
 
-inline void store32_le_priv(uchar* p, uint v) {
+static inline void store32_le_priv(uchar* p, uint v) {
     p[0] = (uchar)(v);
     p[1] = (uchar)(v >> 8);
     p[2] = (uchar)(v >> 16);
     p[3] = (uchar)(v >> 24);
 }
 
-inline ulong load64_le_priv(const uchar* p) {
+static inline ulong load64_le_priv(const uchar* p) {
     return (ulong)p[0]
          | ((ulong)p[1] << 8)
          | ((ulong)p[2] << 16)
@@ -57,37 +57,25 @@ inline ulong load64_le_priv(const uchar* p) {
          | ((ulong)p[7] << 56);
 }
 
-inline void store64_le_priv(uchar* p, ulong v) {
+static inline void store64_le_priv(uchar* p, ulong v) {
     for (int i = 0; i < 8; ++i)
         p[i] = (uchar)(v >> (i * 8));
 }
 
-inline uint rotl32(uint v, int n) {
+static inline uint rotl32(uint v, int n) {
     return (v << n) | (v >> (32 - n));
 }
 
 // ─── ChaCha20 (RFC 8439) ───────────────────────────────────────────────────
 
-inline void chacha20_quarter_round(uint* a, uint* b, uint* c, uint* d) {
+static inline void chacha20_quarter_round(uint* a, uint* b, uint* c, uint* d) {
     *a += *b; *d ^= *a; *d = rotl32(*d, 16);
     *c += *d; *b ^= *c; *b = rotl32(*b, 12);
     *a += *b; *d ^= *a; *d = rotl32(*d, 8);
     *c += *d; *b ^= *c; *b = rotl32(*b, 7);
 }
 
-inline void chacha20_block(const uint input[16], uchar output[64]) {
-    uint x[16];
-    for (int i = 0; i < 16; ++i) x[i] = input[i];
-
-    for (int i = 0; i < 10; ++i) {
-        chacha20_quarter_round(&x[0], &x[4], &x[ 8], &x[12]);
-        chacha20_quarter_round(&x[1], &x[5], &x[ 9], &x[13]);
-        chacha20_quarter_round(&x[2], &x[6], &x[10], &x[14]);
-        chacha20_quarter_round(&x[3], &x[7], &x[11], &x[15]);
-        chacha20_quarter_round(&x[0], &x[5], &x[10], &x[15]);
-        chacha20_quarter_round(&x[1], &x[6], &x[11], &x[12]);
-        chacha20_quarter_round(&x[2], &x[7], &x[ 8], &x[13]);
-        chacha20_quarter_round(&x[3], &x[4], &x[ 9], &x[14]);
+static inline void chacha20_block(const uint input[16], uchar output[64]) {
     }
 
     for (int i = 0; i < 16; ++i)

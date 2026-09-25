@@ -53,7 +53,7 @@ __constant ulong SHA512_K[80] = {
     0x4cc5d4becb3e42b6UL, 0x597f299cfc657e2aUL, 0x5fcb6fab3ad6faecUL, 0x6c44198c4a475817UL,
 };
 
-inline ulong sha512_rotr(ulong x, int n) {
+static inline ulong sha512_rotr(ulong x, int n) {
     return (x >> n) | (x << (64 - n));
 }
 
@@ -64,7 +64,7 @@ typedef struct {
     ulong total;
 } SHA512Ctx;
 
-inline void sha512_compress(SHA512Ctx* ctx, const uchar block[128]) {
+static inline void sha512_compress(SHA512Ctx* ctx, const uchar block[128]) {
     ulong w[80];
     for (int i = 0; i < 16; i++) {
         w[i] = 0;
@@ -96,7 +96,7 @@ inline void sha512_compress(SHA512Ctx* ctx, const uchar block[128]) {
     ctx->h[4] += e; ctx->h[5] += f; ctx->h[6] += g; ctx->h[7] += hh;
 }
 
-inline void sha512_init(SHA512Ctx* ctx) {
+static inline void sha512_init(SHA512Ctx* ctx) {
     ctx->h[0] = 0x6a09e667f3bcc908UL; ctx->h[1] = 0xbb67ae8584caa73bUL;
     ctx->h[2] = 0x3c6ef372fe94f82bUL; ctx->h[3] = 0xa54ff53a5f1d36f1UL;
     ctx->h[4] = 0x510e527fade682d1UL; ctx->h[5] = 0x9b05688c2b3e6c1fUL;
@@ -105,19 +105,7 @@ inline void sha512_init(SHA512Ctx* ctx) {
     ctx->total = 0;
 }
 
-inline void sha512_update(SHA512Ctx* ctx, const uchar* data, uint len) {
-    ctx->total += len;
-    uint offset = 0;
-
-    if (ctx->buf_len > 0) {
-        uint fill = 128 - ctx->buf_len;
-        uint copy = (len < fill) ? len : fill;
-        for (uint i = 0; i < copy; i++) ctx->buf[ctx->buf_len + i] = data[i];
-        ctx->buf_len += copy;
-        offset += copy;
-        if (ctx->buf_len == 128) {
-            sha512_compress(ctx, ctx->buf);
-            ctx->buf_len = 0;
+static inline void sha512_update(SHA512Ctx* ctx, const uchar* data, uint len) {
         }
     }
 

@@ -35,11 +35,11 @@ __constant int KECCAK_ROT[25] = {
     18,  2, 61, 56, 14,
 };
 
-inline ulong keccak_rotl64(ulong x, int n) {
+static inline ulong keccak_rotl64(ulong x, int n) {
     return (x << (n & 63)) | (x >> ((64 - n) & 63));
 }
 
-inline void keccak_f1600_impl(ulong state[25]) {
+static inline void keccak_f1600_impl(ulong state[25]) {
     for (int round = 0; round < 24; ++round) {
         // theta
         ulong C[5];
@@ -68,11 +68,7 @@ inline void keccak_f1600_impl(ulong state[25]) {
 }
 
 // One-shot Keccak-256: hash arbitrary-length data -> 32 bytes
-inline void keccak256_impl(const uchar* data, uint len, uchar out[32]) {
-    ulong state[25];
-    for (int i = 0; i < 25; i++) state[i] = 0;
-
-    const uint RATE = 136;  // 1088 bits / 8
+static inline void keccak256_impl(const uchar* data, uint len, uchar out[32]) {
     uint pos = 0;
 
     // Absorb full blocks

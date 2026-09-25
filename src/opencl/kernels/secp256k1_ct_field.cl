@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 // 256-bit add with carry (a + b -> r, returns carry)
 // ---------------------------------------------------------------------------
-inline ulong ct_add256(const ulong a[4], const ulong b[4], ulong r[4]) {
+static inline ulong ct_add256(const ulong a[4], const ulong b[4], ulong r[4]) {
     ulong carry = 0;
     for (int i = 0; i < 4; ++i) {
         ulong sum = a[i] + b[i] + carry;
@@ -23,7 +23,7 @@ inline ulong ct_add256(const ulong a[4], const ulong b[4], ulong r[4]) {
 }
 
 // 256-bit sub with borrow (a - b -> r, returns borrow)
-inline ulong ct_sub256(const ulong a[4], const ulong b[4], ulong r[4]) {
+static inline ulong ct_sub256(const ulong a[4], const ulong b[4], ulong r[4]) {
     ulong borrow = 0;
     for (int i = 0; i < 4; ++i) {
         ulong diff = a[i] - b[i] - borrow;

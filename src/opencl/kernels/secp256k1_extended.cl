@@ -1030,15 +1030,15 @@ typedef struct {
     ulong total_len;
 } SHA256Ctx;
 
-inline uint sha256_rotr(uint x, uint n) { return (x >> n) | (x << (32 - n)); }
-inline uint sha256_ch(uint x, uint y, uint z)  { return (x & y) ^ (~x & z); }
-inline uint sha256_maj(uint x, uint y, uint z) { return (x & y) ^ (x & z) ^ (y & z); }
-inline uint sha256_bsig0(uint x) { return sha256_rotr(x,2) ^ sha256_rotr(x,13) ^ sha256_rotr(x,22); }
-inline uint sha256_bsig1(uint x) { return sha256_rotr(x,6) ^ sha256_rotr(x,11) ^ sha256_rotr(x,25); }
-inline uint sha256_ssig0(uint x) { return sha256_rotr(x,7) ^ sha256_rotr(x,18) ^ (x >> 3); }
-inline uint sha256_ssig1(uint x) { return sha256_rotr(x,17) ^ sha256_rotr(x,19) ^ (x >> 10); }
+static inline uint sha256_rotr(uint x, uint n) { return (x >> n) | (x << (32 - n)); }
+static inline uint sha256_ch(uint x, uint y, uint z)  { return (x & y) ^ (~x & z); }
+static inline uint sha256_maj(uint x, uint y, uint z) { return (x & y) ^ (x & z) ^ (y & z); }
+static inline uint sha256_bsig0(uint x) { return sha256_rotr(x,2) ^ sha256_rotr(x,13) ^ sha256_rotr(x,22); }
+static inline uint sha256_bsig1(uint x) { return sha256_rotr(x,6) ^ sha256_rotr(x,11) ^ sha256_rotr(x,25); }
+static inline uint sha256_ssig0(uint x) { return sha256_rotr(x,7) ^ sha256_rotr(x,18) ^ (x >> 3); }
+static inline uint sha256_ssig1(uint x) { return sha256_rotr(x,17) ^ sha256_rotr(x,19) ^ (x >> 10); }
 
-inline void sha256_compress(SHA256Ctx* ctx, const uchar block[64]) {
+static inline void sha256_compress(SHA256Ctx* ctx, const uchar block[64]) {
     uint w[64];
     for (int i = 0; i < 16; i++)
         w[i] = ((uint)block[i*4] << 24) | ((uint)block[i*4+1] << 16)
@@ -1059,7 +1059,7 @@ inline void sha256_compress(SHA256Ctx* ctx, const uchar block[64]) {
     ctx->h[4]+=e; ctx->h[5]+=f; ctx->h[6]+=g; ctx->h[7]+=h;
 }
 
-inline void sha256_init(SHA256Ctx* ctx) {
+static inline void sha256_init(SHA256Ctx* ctx) {
     ctx->h[0]=0x6a09e667u; ctx->h[1]=0xbb67ae85u;
     ctx->h[2]=0x3c6ef372u; ctx->h[3]=0xa54ff53au;
     ctx->h[4]=0x510e527fu; ctx->h[5]=0x9b05688cu;
@@ -1067,7 +1067,7 @@ inline void sha256_init(SHA256Ctx* ctx) {
     ctx->buf_len = 0; ctx->total_len = 0;
 }
 
-inline void sha256_update(SHA256Ctx* ctx, const uchar* data, uint len) {
+static inline void sha256_update(SHA256Ctx* ctx, const uchar* data, uint len) {
     ctx->total_len += len;
     uint i = 0;
     if (ctx->buf_len > 0) {

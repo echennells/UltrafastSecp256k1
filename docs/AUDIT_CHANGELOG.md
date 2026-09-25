@@ -1,5 +1,27 @@
 # Audit Changelog
 
+## 2026-09-25 - OpenCL AMD kernel link failure (plain inline) — GH-436
+
+AMD/ROCm (gfx900, ROCm 7.1) failed to build OpenCL programs containing the larger
+field helpers (field_inv_impl, field_sqr_impl, ...). Root cause: OpenCL C99
+`inline` does not emit an external definition; when the compiler does not inline,
+the linker sees "undefined hidden symbol". NVIDIA was protected by
+`__attribute__((always_inline))`. Only `hash160` built by accident.
+
+**Fix:** all helper definitions (FORCE_INLINE on non-NV + every bare `inline` in
+the .cl files) changed to `static inline` (TU-local definition always present).
+FORCE_INLINE_STATIC already was. Updated field.cl macro + ~8 other kernel files.
+No behaviour change; full parity with previous results on NVIDIA.
+
+**Audit surface added:**
+- New wired regression: `regression_opencl_static_inline_link` (differential)
+  in unified_audit_runner (test_regression_opencl_static_inline_link_run).
+- Source hygiene + build linkage now exercised on every audit run.
+- CHANGELOG entry + this note.
+
+The previous bare-inline sources would have made the new gate red on any
+C99-strict OpenCL implementation.
+
 ## 2026-09-22 - 259 allocations retained at process exit had no way to be released
 
 Reported by evoskuil (libbitcoin) as GitHub issue #430, against
