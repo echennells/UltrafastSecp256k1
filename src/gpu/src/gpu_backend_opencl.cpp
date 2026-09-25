@@ -57,6 +57,7 @@
 
 /* -- OpenCL Context (Layer 1) ---------------------------------------------- */
 #include "secp256k1_opencl.hpp"
+#include "opencl_program.hpp"
 
 /* -- Raw OpenCL API for extended kernel loading ----------------------------- */
 #ifdef __APPLE__
@@ -4254,15 +4255,14 @@ private:
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
         cl_int err;
-        ext_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS)
-            return set_error(GpuError::Launch, "clCreateProgramWithSource failed");
-
         std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
         if (!kernel_dir.empty())
             opts += " -I " + kernel_dir;
 
-        err = clBuildProgram(ext_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        err = secp256k1::opencl::build_program(cl_ctx, device, 1, &src_ptr, &src_len, opts.c_str(), &ext_program_);
+        if (!ext_program_)
+            return set_error(GpuError::Launch, "clCreateProgramWithSource failed");
+
         if (err != CL_SUCCESS) {
             /* Grab build log for diagnostics */
             size_t log_len = 0;
@@ -4486,15 +4486,14 @@ private:
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
         cl_int err;
-        frost_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS)
-            return set_error(GpuError::Launch, "frost clCreateProgramWithSource failed");
-
         std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
         if (!kernel_dir.empty())
             opts += " -I " + kernel_dir;
 
-        err = clBuildProgram(frost_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        err = secp256k1::opencl::build_program(cl_ctx, device, 1, &src_ptr, &src_len, opts.c_str(), &frost_program_);
+        if (!frost_program_)
+            return set_error(GpuError::Launch, "frost clCreateProgramWithSource failed");
+
         if (err != CL_SUCCESS) {
             size_t log_len = 0;
             clGetProgramBuildInfo(frost_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
@@ -4542,15 +4541,14 @@ private:
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
         cl_int err;
-        hash160_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS)
-            return set_error(GpuError::Launch, "hash160 clCreateProgramWithSource failed");
-
         std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
         if (!kernel_dir.empty())
             opts += " -I " + kernel_dir;
 
-        err = clBuildProgram(hash160_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        err = secp256k1::opencl::build_program(cl_ctx, device, 1, &src_ptr, &src_len, opts.c_str(), &hash160_program_);
+        if (!hash160_program_)
+            return set_error(GpuError::Launch, "hash160 clCreateProgramWithSource failed");
+
         if (err != CL_SUCCESS) {
             size_t log_len = 0;
             clGetProgramBuildInfo(hash160_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
@@ -4709,14 +4707,13 @@ private:
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
         cl_int err;
-        zk_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS)
-            return set_error(GpuError::Launch, "zk clCreateProgramWithSource failed");
-
         std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
         if (!kernel_dir.empty()) opts += " -I " + kernel_dir;
 
-        err = clBuildProgram(zk_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        err = secp256k1::opencl::build_program(cl_ctx, device, 1, &src_ptr, &src_len, opts.c_str(), &zk_program_);
+        if (!zk_program_)
+            return set_error(GpuError::Launch, "zk clCreateProgramWithSource failed");
+
         if (err != CL_SUCCESS) {
             size_t log_len = 0;
             clGetProgramBuildInfo(zk_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
@@ -4779,14 +4776,13 @@ private:
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
         cl_int err;
-        bip324_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS)
-            return set_error(GpuError::Launch, "bip324 clCreateProgramWithSource failed");
-
         std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
         if (!kernel_dir.empty()) opts += " -I " + kernel_dir;
 
-        err = clBuildProgram(bip324_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        err = secp256k1::opencl::build_program(cl_ctx, device, 1, &src_ptr, &src_len, opts.c_str(), &bip324_program_);
+        if (!bip324_program_)
+            return set_error(GpuError::Launch, "bip324 clCreateProgramWithSource failed");
+
         if (err != CL_SUCCESS) {
             size_t log_len = 0;
             clGetProgramBuildInfo(bip324_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
@@ -4856,14 +4852,13 @@ private:
         const char* src_ptr = src.c_str();
         size_t src_len = src.size();
         cl_int err;
-        bip352_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
-        if (err != CL_SUCCESS)
-            return set_error(GpuError::Launch, "bip352 clCreateProgramWithSource failed");
-
         std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
         if (!kernel_dir.empty()) opts += " -I " + kernel_dir;
 
-        err = clBuildProgram(bip352_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        err = secp256k1::opencl::build_program(cl_ctx, device, 1, &src_ptr, &src_len, opts.c_str(), &bip352_program_);
+        if (!bip352_program_)
+            return set_error(GpuError::Launch, "bip352 clCreateProgramWithSource failed");
+
         if (err != CL_SUCCESS) {
             size_t log_len = 0;
             clGetProgramBuildInfo(bip352_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
