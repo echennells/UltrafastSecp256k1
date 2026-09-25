@@ -17,6 +17,17 @@ project(secp256k1_opencl
 # Option to enable/disable OpenCL
 option(SECP256K1_USE_OPENCL "Enable OpenCL GPU acceleration" ON)
 
+# Load the OpenCL runtime on first use instead of linking it, so a consumer
+# starts on a host without one and the backend reports unavailable. macOS
+# always has the OpenCL framework.
+if(APPLE)
+    set(_secp256k1_opencl_runtime_load_default OFF)
+else()
+    set(_secp256k1_opencl_runtime_load_default ON)
+endif()
+option(SECP256K1_OPENCL_RUNTIME_LOAD "Load the OpenCL runtime on first use instead of linking it"
+    ${_secp256k1_opencl_runtime_load_default})
+
 if(NOT SECP256K1_USE_OPENCL)
     message(STATUS "OpenCL support disabled")
     return()
@@ -112,15 +123,22 @@ target_include_directories(secp256k1_opencl
         ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
 )
 
-target_link_libraries(secp256k1_opencl
-    PRIVATE
-        OpenCL::OpenCL
-)
+if(SECP256K1_OPENCL_RUNTIME_LOAD)
+    target_sources(secp256k1_opencl PRIVATE src/opencl_loader.cpp)
+    if(CMAKE_DL_LIBS)
+        target_link_libraries(secp256k1_opencl PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+else()
+    target_link_libraries(secp256k1_opencl
+        PRIVATE
+            OpenCL::OpenCL
+    )
+endif()
 
 # Make OpenCL optional at load time for consumers (addresses GH#434 / #435):
 # - Windows: /DELAYLOAD so absence of OpenCL.dll does not prevent process start.
 # - The actual OpenCL functions are still called only after successful probe in the backend.
-if(MSVC)
+if(MSVC AND NOT SECP256K1_OPENCL_RUNTIME_LOAD)
     target_link_options(secp256k1_opencl PRIVATE
         /DELAYLOAD:OpenCL.dll
     )
