@@ -23,6 +23,8 @@
     #include <CL/cl.h>
 #endif
 
+#include "opencl_program.hpp"
+
 #include <cstring>
 #include <algorithm>
 #include <iostream>
@@ -1781,12 +1783,6 @@ bool Context::Impl::build_program() {
         lengths[i] = std::strlen(kernel_parts[i]);
     }
 
-    program = clCreateProgramWithSource(context, num_parts, sources, lengths, &err);
-    if (err != CL_SUCCESS) {
-        last_error = std::string("Failed to create program: ") + cl_error_string(err);
-        return false;
-    }
-
     // Build options
     std::string build_options = "-cl-std=CL1.2 -cl-mad-enable";
 
@@ -1799,8 +1795,13 @@ bool Context::Impl::build_program() {
         build_options += " -D__NV_CL_C_VERSION=200";
     }
 
-    // Build program
-    err = clBuildProgram(program, 1, &device, build_options.c_str(), nullptr, nullptr);
+    // Build program, reusing a cached binary of an identical build
+    err = secp256k1::opencl::build_program(context, device, num_parts, sources, lengths,
+        build_options.c_str(), &program);
+    if (!program) {
+        last_error = std::string("Failed to create program: ") + cl_error_string(err);
+        return false;
+    }
 
     if (err != CL_SUCCESS) {
         // Get build log

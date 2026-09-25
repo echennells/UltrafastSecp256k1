@@ -96,6 +96,7 @@ add_library(secp256k1_opencl STATIC
     src/opencl_point.cpp
     src/opencl_batch.cpp
     src/opencl_selftest.cpp
+    src/opencl_program.cpp
 )
 
 set_target_properties(secp256k1_opencl PROPERTIES
