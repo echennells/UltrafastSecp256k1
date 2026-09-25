@@ -13,7 +13,7 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DSECP256K1_BUILD_ZK=OFF -DSECP256K1_BUILD_FROST=OFF
 ```
 
-## Global / top-level (backends, GPU op selection, install)
+## Other (.kilo/worktrees/sordid-thumb)
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -61,7 +61,42 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 | `UFSECP_REFRESH_SOURCE_GRAPH` | `OFF` | Refresh the repo source graph during builds (mutates source tree — OFF by default for reproducibility) |
 | `UFSECP_REPRODUCIBLE` | `OFF` | Enable reproducible-build flags (path stripping, fixed march) |
 
-## CPU implementation (crypto modules, optimization, integration)
+## Other (.kilo/worktrees/sordid-thumb/audit)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `SECP256K1_BUILD_CROSS_TESTS` | `OFF` | Build in-process differential tests against bitcoin-core/libsecp256k1 |
+| `SECP256K1_BUILD_FUZZ_TESTS` | `OFF` | Build deterministic fuzz tests for parsers (DER, Schnorr, Pubkey) |
+| `SECP256K1_BUILD_LIBFUZZER` | `OFF` | Build LibFuzzer harnesses (requires clang -fsanitize=fuzzer,address) |
+| `SECP256K1_BUILD_LIBFUZZER_STANDALONE` | `OFF` | Build LibFuzzer harnesses in standalone deterministc mode (no fuzzer runtime) |
+| `SECP256K1_BUILD_PROTOCOL_TESTS` | `OFF` | Build MuSig2 + FROST protocol tests |
+
+## Other (.kilo/worktrees/sordid-thumb/compat/libbitcoin_bridge)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `UFSECP_LBTC_BUILD_BENCH` | `ON` | Build the bridge throughput benchmark |
+| `UFSECP_LBTC_BUILD_EXAMPLE` | `ON` | Build the example harness |
+| `UFSECP_LBTC_BUILD_TESTS` | `ON` | Build the bridge correctness test |
+| `UFSECP_LBTC_WITH_GPU` | `OFF` | Enable GPU dispatch (requires engine GPU ABI) |
+
+## Other (.kilo/worktrees/sordid-thumb/compat/libsecp256k1_shim)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `SECP256K1_SHIM_BUILD_SHARED` | `OFF` | Also build a self-contained shared ultrafast_secp256k1 (DLL/.so) exporting the libsecp256k1 ABI |
+| `SECP256K1_SHIM_BUILD_TESTS` | `OFF` | Build shim compatibility test |
+| `SECP256K1_SHIM_INSTALL` | `ON` | Install the shim shared lib + secp256k1*.h ABI headers + ultrafast_secp256k1.pc (our-name pkg-config; integrator aliases secp256k1 explicitly) |
+| `SECP256K1_SHIM_RFC6979_COMPAT` | `OFF` | Match upstream libsecp256k1 nonce bytes exactly (includes ECDSA algo16 tag). Disables fault-attack resistance of hedged nonce. |
+
+## Other (.kilo/worktrees/sordid-thumb/include/ufsecp)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `UFSECP_BUILD_SHARED` | `ON` | Build shared library |
+| `UFSECP_BUILD_STATIC` | `ON` | Build static library |
+
+## Other (.kilo/worktrees/sordid-thumb/src/cpu)
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -89,54 +124,19 @@ cmake -S . -B out/mybuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
 | `SECP256K1_USE_PGO_USE` | `OFF` | Enable Profile-Guided Optimization - Use profile |
 | `SECP256K1_USE_RISCV_FE52_ASM` | `OFF` | Use hand-written RISC-V assembly for 5x52 field multiply/square (slower on in-order cores like U74) |
 
-## CUDA backend
+## Other (.kilo/worktrees/sordid-thumb/src/cuda)
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `SECP256K1_CUDA_LIMBS_32` | `OFF` | Use 8x32-bit limbs for field arithmetic |
 | `SECP256K1_CUDA_USE_MONTGOMERY` | `OFF` | Use Montgomery field arithmetic backend in CUDA |
 
-## OpenCL backend
+## Other (.kilo/worktrees/sordid-thumb/src/opencl)
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `SECP256K1_USE_OPENCL` | `ON` | Enable OpenCL GPU acceleration |
 
-## C ABI library (ufsecp_* shared/static)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `UFSECP_BUILD_SHARED` | `ON` | Build shared library |
-| `UFSECP_BUILD_STATIC` | `ON` | Build static library |
-
-## libsecp256k1 compatibility shim
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `SECP256K1_SHIM_BUILD_SHARED` | `OFF` | Also build a self-contained shared ultrafast_secp256k1 (DLL/.so) exporting the libsecp256k1 ABI |
-| `SECP256K1_SHIM_BUILD_TESTS` | `OFF` | Build shim compatibility test |
-| `SECP256K1_SHIM_INSTALL` | `ON` | Install the shim shared lib + secp256k1*.h ABI headers + ultrafast_secp256k1.pc (our-name pkg-config; integrator aliases secp256k1 explicitly) |
-| `SECP256K1_SHIM_RFC6979_COMPAT` | `OFF` | Match upstream libsecp256k1 nonce bytes exactly (includes ECDSA algo16 tag). Disables fault-attack resistance of hedged nonce. |
-
-## libbitcoin bridge (script-sig batch verify + scan)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `UFSECP_LBTC_BUILD_BENCH` | `ON` | Build the bridge throughput benchmark |
-| `UFSECP_LBTC_BUILD_EXAMPLE` | `ON` | Build the example harness |
-| `UFSECP_LBTC_BUILD_TESTS` | `ON` | Build the bridge correctness test |
-| `UFSECP_LBTC_WITH_GPU` | `OFF` | Enable GPU dispatch (requires engine GPU ABI) |
-
-## Audit / test harness (differential, fuzz, protocol tests)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `SECP256K1_BUILD_CROSS_TESTS` | `OFF` | Build in-process differential tests against bitcoin-core/libsecp256k1 |
-| `SECP256K1_BUILD_FUZZ_TESTS` | `OFF` | Build deterministic fuzz tests for parsers (DER, Schnorr, Pubkey) |
-| `SECP256K1_BUILD_LIBFUZZER` | `OFF` | Build LibFuzzer harnesses (requires clang -fsanitize=fuzzer,address) |
-| `SECP256K1_BUILD_LIBFUZZER_STANDALONE` | `OFF` | Build LibFuzzer harnesses in standalone deterministc mode (no fuzzer runtime) |
-| `SECP256K1_BUILD_PROTOCOL_TESTS` | `OFF` | Build MuSig2 + FROST protocol tests |
-
 ---
 
-_Generated from:_ `CMakeLists.txt`, `audit/CMakeLists.txt`, `bindings/android/CMakeLists.txt`, `bindings/android/example/src/main/cpp/CMakeLists.txt`, `bindings/c_api/CMakeLists.txt`, `bindings/java/CMakeLists.txt`, `bindings/wasm/CMakeLists.txt`, `ci/fixtures/pr353_msvc_link_retention/CMakeLists.txt`, `compat/libbitcoin_bridge/CMakeLists.txt`, `compat/libbitcoin_direct/CMakeLists.txt`, `compat/libsecp256k1_bchn_shim/CMakeLists.txt`, `compat/libsecp256k1_shim/CMakeLists.txt`, `compat/litecoin_shim/CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/esp32_bench_hornet/CMakeLists.txt`, `examples/esp32_bench_hornet/main/CMakeLists.txt`, `examples/esp32_test/CMakeLists.txt`, `examples/esp32_test/main/CMakeLists.txt`, `examples/esp32c6_bench_hornet/CMakeLists.txt`, `examples/esp32c6_bench_hornet/main/CMakeLists.txt`, `examples/esp32p4_bench_hornet/CMakeLists.txt`, `examples/esp32p4_bench_hornet/main/CMakeLists.txt`, `examples/stm32_test/CMakeLists.txt`, `include/ufsecp/CMakeLists.txt`, `src/bch/CMakeLists.txt`, `src/cpu/CMakeLists.txt`, `src/cuda/CMakeLists.txt`, `src/gpu/CMakeLists.txt`, `src/ltc/cuda/CMakeLists.txt`, `src/metal/CMakeLists.txt`, `src/opencl/CMakeLists.txt`, `tests/esp32_audit/CMakeLists.txt`, `tests/esp32_audit/main/CMakeLists.txt`, `tests/esp32c6_audit/CMakeLists.txt`, `tests/esp32c6_audit/main/CMakeLists.txt`, `tests/esp32p4_audit/CMakeLists.txt`, `tests/esp32p4_audit/main/CMakeLists.txt`
+_Generated from:_ `.kilo/worktrees/sordid-thumb/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/audit/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/bindings/android/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/bindings/android/example/src/main/cpp/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/bindings/c_api/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/bindings/java/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/bindings/wasm/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/ci/fixtures/pr353_msvc_link_retention/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/compat/libbitcoin_bridge/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/compat/libbitcoin_direct/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/compat/libsecp256k1_bchn_shim/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/compat/libsecp256k1_shim/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/compat/litecoin_shim/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32_bench_hornet/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32_bench_hornet/main/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32_test/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32_test/main/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32c6_bench_hornet/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32c6_bench_hornet/main/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32p4_bench_hornet/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/esp32p4_bench_hornet/main/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/examples/stm32_test/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/include/ufsecp/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/bch/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/cpu/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/cuda/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/gpu/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/ltc/cuda/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/metal/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/src/opencl/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/tests/esp32_audit/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/tests/esp32_audit/main/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/tests/esp32c6_audit/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/tests/esp32c6_audit/main/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/tests/esp32p4_audit/CMakeLists.txt`, `.kilo/worktrees/sordid-thumb/tests/esp32p4_audit/main/CMakeLists.txt`, `CMakeLists.txt`, `audit/CMakeLists.txt`, `bindings/android/CMakeLists.txt`, `bindings/android/example/src/main/cpp/CMakeLists.txt`, `bindings/c_api/CMakeLists.txt`, `bindings/java/CMakeLists.txt`, `bindings/wasm/CMakeLists.txt`, `ci/fixtures/pr353_msvc_link_retention/CMakeLists.txt`, `compat/libbitcoin_bridge/CMakeLists.txt`, `compat/libbitcoin_direct/CMakeLists.txt`, `compat/libsecp256k1_bchn_shim/CMakeLists.txt`, `compat/libsecp256k1_shim/CMakeLists.txt`, `compat/litecoin_shim/CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/esp32_bench_hornet/CMakeLists.txt`, `examples/esp32_bench_hornet/main/CMakeLists.txt`, `examples/esp32_test/CMakeLists.txt`, `examples/esp32_test/main/CMakeLists.txt`, `examples/esp32c6_bench_hornet/CMakeLists.txt`, `examples/esp32c6_bench_hornet/main/CMakeLists.txt`, `examples/esp32p4_bench_hornet/CMakeLists.txt`, `examples/esp32p4_bench_hornet/main/CMakeLists.txt`, `examples/stm32_test/CMakeLists.txt`, `include/ufsecp/CMakeLists.txt`, `src/bch/CMakeLists.txt`, `src/cpu/CMakeLists.txt`, `src/cuda/CMakeLists.txt`, `src/gpu/CMakeLists.txt`, `src/ltc/cuda/CMakeLists.txt`, `src/metal/CMakeLists.txt`, `src/opencl/CMakeLists.txt`, `tests/esp32_audit/CMakeLists.txt`, `tests/esp32_audit/main/CMakeLists.txt`, `tests/esp32c6_audit/CMakeLists.txt`, `tests/esp32c6_audit/main/CMakeLists.txt`, `tests/esp32p4_audit/CMakeLists.txt`, `tests/esp32p4_audit/main/CMakeLists.txt`
