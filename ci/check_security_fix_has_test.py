@@ -112,6 +112,13 @@ RETROACTIVELY_COVERED: dict[str, tuple[list[str], str]] = {
         "no job list and no permission changed here -- only how long one build is "
         "allowed to take.",
     ),
+    "8998cd8975": (
+        ["audit/test_regression_process_resource_release.cpp"],
+        "RPM build fix + Windows CI Advisory exclusion + #430 generator table static storage (no heap new). "
+        "The src/cpu/src/point.cpp change (DualMulGenTables now static instead of operator new) eliminates the "
+        "1.3 MiB leak report. Covered by the process resource release regression test (which asserts release "
+        "frees/rebuilds the tables and that post-release values match independent computation).",
+    ),
     "8c25dd3eb1": (
         ["audit/test_regression_scalar_decomposition_and_comb.cpp"],
         "Pure dead-code removal: jac52_add_mixed_inplace_zr (src/cpu/src/point.cpp) "
