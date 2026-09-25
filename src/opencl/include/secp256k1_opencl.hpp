@@ -146,6 +146,7 @@ struct DeviceInfo {
     bool is_intel;
     bool is_amd;
     bool is_nvidia;
+    bool host_unified_memory = false;  // shares host memory (integrated GPU)
 };
 
 // =============================================================================

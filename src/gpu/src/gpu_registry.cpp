@@ -10,6 +10,8 @@
 
 #include "gpu_backend.hpp"
 
+#include <vector>
+
 /* Forward declarations for backend factories (defined in their own .cpp/.cu) */
 #if defined(SECP256K1_HAVE_CUDA)
 namespace secp256k1::gpu {
@@ -82,6 +84,31 @@ std::unique_ptr<GpuBackend> create_backend(uint32_t backend_id) {
 bool is_available(uint32_t backend_id) {
     auto b = create_backend(backend_id);
     return b && b->device_count() > 0;
+}
+
+uint32_t preferred_device(const DeviceInfo* infos, uint32_t count) {
+    uint32_t best = 0;
+    for (uint32_t i = 1; i < count; ++i) {
+        const DeviceInfo& candidate = infos[i];
+        const DeviceInfo& current = infos[best];
+        if (candidate.host_unified_memory != current.host_unified_memory) {
+            if (!candidate.host_unified_memory) best = i;
+        } else if (candidate.compute_units > current.compute_units) {
+            best = i;
+        }
+    }
+    return best;
+}
+
+uint32_t preferred_device(const GpuBackend& backend) {
+    std::vector<DeviceInfo> infos(backend.device_count());
+    for (uint32_t i = 0; i < infos.size(); ++i) {
+        if (backend.device_info(i, infos[i]) != GpuError::Ok) {
+            infos[i] = DeviceInfo{};
+            infos[i].host_unified_memory = true;
+        }
+    }
+    return preferred_device(infos.data(), static_cast<uint32_t>(infos.size()));
 }
 
 } // namespace gpu

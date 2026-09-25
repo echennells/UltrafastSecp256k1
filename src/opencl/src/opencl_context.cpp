@@ -2660,7 +2660,7 @@ std::vector<std::pair<std::string, std::vector<DeviceInfo>>> enumerate_devices()
             clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, num_devices, device_ids.data(), nullptr);
 
             for (cl_uint j = 0; j < num_devices; j++) {
-                DeviceInfo info;
+                DeviceInfo info{};
                 char buffer[256];
 
                 clGetDeviceInfo(device_ids[j], CL_DEVICE_NAME, sizeof(buffer), buffer, nullptr);
@@ -2678,6 +2678,10 @@ std::vector<std::pair<std::string, std::vector<DeviceInfo>>> enumerate_devices()
                 info.is_intel = (info.vendor.find("Intel") != std::string::npos);
                 info.is_amd = (info.vendor.find("AMD") != std::string::npos);
                 info.is_nvidia = (info.vendor.find("NVIDIA") != std::string::npos);
+
+                cl_bool unified = CL_FALSE;
+                clGetDeviceInfo(device_ids[j], CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(unified), &unified, nullptr);
+                info.host_unified_memory = (unified == CL_TRUE);
 
                 devices.push_back(info);
             }

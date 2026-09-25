@@ -840,6 +840,7 @@ public:
                     out.max_threads_per_block = static_cast<uint32_t>(d.max_work_group_size);
                     out.backend_id            = 2;
                     out.device_index          = device_index;
+                    out.host_unified_memory   = d.host_unified_memory;
                     return GpuError::Ok;
                 }
                 ++idx;

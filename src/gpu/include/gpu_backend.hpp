@@ -60,6 +60,7 @@ struct DeviceInfo {
     uint32_t max_threads_per_block = 0;
     uint32_t backend_id          = 0;
     uint32_t device_index        = 0;
+    bool     host_unified_memory = false;  /* shares host memory (integrated GPU) */
 };
 
 /* -- Host-side fallback helpers (defined in gpu_backend_fallback.cpp) ----- */
@@ -774,6 +775,17 @@ std::unique_ptr<GpuBackend> create_backend(uint32_t backend_id);
 
 /** Check if a backend is compiled and has at least one device. */
 bool is_available(uint32_t backend_id);
+
+/** Index of the preferred device among `count` infos: a discrete device over
+ *  one that shares host memory, then the most compute units, ties to the first
+ *  enumerated. Compute units are not comparable across vendors (Intel reports
+ *  execution units), so the discrete preference is applied first. Returns 0
+ *  when count is 0. */
+uint32_t preferred_device(const DeviceInfo* infos, uint32_t count);
+
+/** Index of the preferred device of `backend` (see above). A device whose info
+ *  cannot be read ranks last. */
+uint32_t preferred_device(const GpuBackend& backend);
 
 /* -- Metal loadable-library shader discovery override (GitHub issue #335) --
  *
