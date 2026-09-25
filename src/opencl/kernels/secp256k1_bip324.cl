@@ -76,13 +76,25 @@ static inline void chacha20_quarter_round(uint* a, uint* b, uint* c, uint* d) {
 }
 
 static inline void chacha20_block(const uint input[16], uchar output[64]) {
+    uint x[16];
+    for (int i = 0; i < 16; ++i) x[i] = input[i];
+
+    for (int i = 0; i < 10; ++i) {
+        chacha20_quarter_round(&x[0], &x[4], &x[ 8], &x[12]);
+        chacha20_quarter_round(&x[1], &x[5], &x[ 9], &x[13]);
+        chacha20_quarter_round(&x[2], &x[6], &x[10], &x[14]);
+        chacha20_quarter_round(&x[3], &x[7], &x[11], &x[15]);
+        chacha20_quarter_round(&x[0], &x[5], &x[10], &x[15]);
+        chacha20_quarter_round(&x[1], &x[6], &x[11], &x[12]);
+        chacha20_quarter_round(&x[2], &x[7], &x[ 8], &x[13]);
+        chacha20_quarter_round(&x[3], &x[4], &x[ 9], &x[14]);
     }
 
     for (int i = 0; i < 16; ++i)
         store32_le_priv(output + i * 4, x[i] + input[i]);
 }
 
-inline void chacha20_setup(uint state[16],
+static inline void chacha20_setup(uint state[16],
                             const __global uchar* key,
                             const __global uchar* nonce,
                             uint counter) {
@@ -106,7 +118,7 @@ typedef struct {
     uint h[5];
 } Poly1305State;
 
-inline void poly1305_init(Poly1305State* st, const uchar key[32]) {
+static inline void poly1305_init(Poly1305State* st, const uchar key[32]) {
     uint t0 = load32_le_priv(key +  0) & 0x0FFFFFFFu;
     uint t1 = load32_le_priv(key +  4) & 0x0FFFFFFCu;
     uint t2 = load32_le_priv(key +  8) & 0x0FFFFFFCu;
@@ -126,7 +138,7 @@ inline void poly1305_init(Poly1305State* st, const uchar key[32]) {
     st->h[0] = st->h[1] = st->h[2] = st->h[3] = st->h[4] = 0;
 }
 
-inline void poly1305_block(Poly1305State* st, const uchar* msg, uint len) {
+static inline void poly1305_block(Poly1305State* st, const uchar* msg, uint len) {
     uchar buf[17];
     for (int i = 0; i < 17; ++i) buf[i] = 0;
     for (uint i = 0; i < len; ++i) buf[i] = msg[i];
@@ -173,7 +185,7 @@ inline void poly1305_block(Poly1305State* st, const uchar* msg, uint len) {
     st->h[1] += c;
 }
 
-inline void poly1305_block_global(Poly1305State* st, const __global uchar* msg, uint len) {
+static inline void poly1305_block_global(Poly1305State* st, const __global uchar* msg, uint len) {
     uchar buf[17];
     for (int i = 0; i < 17; ++i) buf[i] = 0;
     for (uint i = 0; i < len; ++i) buf[i] = msg[i];
@@ -220,7 +232,7 @@ inline void poly1305_block_global(Poly1305State* st, const __global uchar* msg, 
     st->h[1] += c;
 }
 
-inline void poly1305_finish(Poly1305State* st, uchar tag[16]) {
+static inline void poly1305_finish(Poly1305State* st, uchar tag[16]) {
     uint c;
     c = st->h[1] >> 26; st->h[1] &= 0x3FFFFFF;
     st->h[2] += c; c = st->h[2] >> 26; st->h[2] &= 0x3FFFFFF;
@@ -264,7 +276,7 @@ inline void poly1305_finish(Poly1305State* st, uchar tag[16]) {
 
 // ─── AEAD ChaCha20-Poly1305 (RFC 8439) ─────────────────────────────────────
 
-inline void aead_encrypt(const __global uchar* key,
+static inline void aead_encrypt(const __global uchar* key,
                           const __global uchar* nonce,
                           const __global uchar* plaintext,
                           uint plaintext_len,
@@ -323,7 +335,7 @@ inline void aead_encrypt(const __global uchar* key,
         tag_out[i] = tag[i];
 }
 
-inline int aead_decrypt(const __global uchar* key,
+static inline int aead_decrypt(const __global uchar* key,
                          const __global uchar* nonce,
                          const __global uchar* ciphertext,
                          uint ciphertext_len,

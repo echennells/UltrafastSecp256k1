@@ -69,6 +69,10 @@ static inline void keccak_f1600_impl(ulong state[25]) {
 
 // One-shot Keccak-256: hash arbitrary-length data -> 32 bytes
 static inline void keccak256_impl(const uchar* data, uint len, uchar out[32]) {
+    ulong state[25];
+    for (int i = 0; i < 25; i++) state[i] = 0;
+
+    const uint RATE = 136;  // 1088 bits / 8
     uint pos = 0;
 
     // Absorb full blocks
@@ -107,7 +111,7 @@ static inline void keccak256_impl(const uchar* data, uint len, uchar out[32]) {
 
 // Ethereum address: keccak256(uncompressed_pubkey[1..64]) -> last 20 bytes
 // Input: 65-byte uncompressed (04||x||y) or 64-byte raw (x||y)
-inline void eth_address_impl(const uchar* pubkey_xy, uint xy_len, uchar addr[20]) {
+static inline void eth_address_impl(const uchar* pubkey_xy, uint xy_len, uchar addr[20]) {
     uchar hash[32];
     keccak256_impl(pubkey_xy, xy_len, hash);
     for (int i = 0; i < 20; i++) addr[i] = hash[12 + i];
@@ -115,7 +119,7 @@ inline void eth_address_impl(const uchar* pubkey_xy, uint xy_len, uchar addr[20]
 
 // EIP-55 checksum encoding: lowercase hex addr -> checksummed hex string
 // Input: 20-byte raw address, Output: 40-byte hex string (no 0x prefix)
-inline void eip55_checksum_impl(const uchar addr[20], uchar hex_out[40]) {
+static inline void eip55_checksum_impl(const uchar addr[20], uchar hex_out[40]) {
     // Convert to lowercase hex
     const uchar hex_chars[16] = {'0','1','2','3','4','5','6','7',
                                   '8','9','a','b','c','d','e','f'};
